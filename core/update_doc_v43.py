@@ -37,21 +37,21 @@ if not match:
     sys.exit(1)
 
 # 替换: 保留"# v4.3 实测校准附录"作为章节头, 然后是报告内容
-v43_header = """---
-
-# v4.3 实测校准附录(50 条规则 100% 全验证)
+v43_header = """# v4.3 实测校准附录(50 条规则 100% 全验证)
 
 > **核心定位**:本文档由 `analyze_results.py` 自动生成,**底部附录承载实战数据**。
 
-# v4.3 实测校准报告(50 条规则全验证)
 """
 new_doc = doc[:match.start()] + v43_header + report + '\n---\n\n' + doc[match.end():]
 
-# 更新版本历史
-new_doc = new_doc.replace(
-    '| v4.2 | 2026-06-07 | 扩 50 币种实测',
-    '| v4.3 | 2026-06-07 | ★ 5 条 skip 多币种联动规则(E05/E06/J01/J02/J03)全部验证,50/50 闭环 |\n| v4.2 | 2026-06-07 | 扩 50 币种实测'
-)
+# 更新版本历史(幂等:重复运行不再追加第二行)
+v43_row = '| v4.3 | 2026-06-07 | ★ 5 条 skip 多币种联动规则(E05/E06/J01/J02/J03)全部验证,50/50 闭环 |'
+if 'v4.3 |' not in new_doc:
+    new_doc = new_doc.replace(
+        '| v4.2 | 2026-06-07 | 扩 50 币种实测',
+        f'{v43_row}\n| v4.2 | 2026-06-07 | 扩 50 币种实测'
+    )
+
 
 with open(DOC_PATH, 'w', encoding='utf-8') as f:
     f.write(new_doc)
