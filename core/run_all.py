@@ -5,7 +5,7 @@ Unified Entry: 50/50 规则一站式回测
   1. 单币种 45 条 (45+ 币种 × 2 周期)
   2. BTC 联动 4 条 (E05/E06/J01/J02)
   3. 板块内联动 1 条 (J03)
-  4. 反向工程 → v4.3 报告 → 文档
+  4. 反向工程 → v4.4 报告 → 文档
 
 用法:
   python core/run_all.py                 # 默认 50 币种 90d
@@ -48,7 +48,7 @@ def main():
     parser.add_argument('--skip-batch', action='store_true', help='跳过单币种批(45 条)')
     parser.add_argument('--skip-btc', action='store_true', help='跳过 BTC 联动(E05/E06/J01/J02)')
     parser.add_argument('--skip-sector', action='store_true', help='跳过板块内(J03)')
-    parser.add_argument('--skip-analyze', action='store_true', help='跳过 v4.3 报告生成')
+    parser.add_argument('--skip-analyze', action='store_true', help='跳过校准报告生成')
     args = parser.parse_args()
 
     print(f"=== 50/50 Unified Backtest ===")
@@ -80,7 +80,7 @@ def main():
     if not args.skip_analyze:
         steps.append(('analyze_results.py', []))
 
-    # Step 5: 把 v4.3 报告追加进 文档模板.md
+    # Step 5: 把校准报告追加进 文档模板.md
     steps.append(('update_doc_v43.py', []))
 
     total = len(steps)
@@ -98,8 +98,8 @@ def main():
     print(f"  - cache/csv/{{sym}}_{{args.periods}}d.csv     (单币种)")
     print(f"  - cache/csv/btc_corr_results.csv   (BTC 联动)")
     print(f"  - cache/csv/j03_sector_results.csv  (板块)")
-    print(f"  - cache/v4.3_calibration.md        (整合报告)")
-    print(f"  - 文档模板.md (已含 v4.3 附录)")
+    print(f"  - cache/v4.4_calibration.md        (整合报告)")
+    print(f"  - 文档模板.md (已含校准附录)")
 
     return 0
 

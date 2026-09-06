@@ -1,3 +1,10 @@
+"""
+lib/analysis.py
+===============
+回测统计与绘图。**口径契约**:本模块 `backtest()` 是全项目唯一的规则评估入口,
+回测侧不得另写第二套成交模型(否则数字不可比)。执行口径已在 `backtest()` 的
+docstring 里定成明文,修改任何一条都要同步 README 与 `文档模板.md` 的维护原则。
+"""
 import math
 import tempfile
 import os
@@ -83,6 +90,21 @@ def backtest(cond, close, direction, hold_bars, fee=0.0005, min_trades=5, period
 
     Returns:
         dict {n, wr, avg, total, sharpe, mdd} in percent, or None if < min_trades
+
+    Conventions (明文契约,勿在回测侧另写一套成交模型):
+      1. 入场时点 — 信号在 K 线 i 收盘后才成立,仓位从 i+1 起建立
+         (pos[s:e] = sign, s = i+1)。与 lib.strategy.hold_n_bars 同构,
+         两者刻意保持一致。
+      2. 成交价 — 入场价 = close[i](信号 K 线的收盘价),出场价 = close[i+hold]。
+         这排除了"用当根收盘预测当根收益"的前视,但仍是一个**乐观**假设:
+         实盘在 close[i] 已知后下单,拿不到 close[i] 本身,会有下一根的滑点。
+         报告里的 Sharpe/total 应视为上界;要严格口径请改入场价为 close[i+1]。
+      3. 手续费 — 单边 fee 计入 per-trade 收益,不额外建模滑点与冲击成本。
+      4. 无退出信号 — 满 hold_bars 固定平仓,不设止盈/止损(用户决定,见 README)。
+      5. 参数锁定 — best_params 由该币×该窗口在参数空间内扫出,只对
+         "该币 + 该窗口"成立(阈值取自该窗口的 alpha 分布分位,见
+         rules_catalog.catalog.resolve_param_space)。落盘到实盘策略后必须写死,
+         回测不得重挑 —— 重跑重挑 = 用已知结果选股,是选择偏差。
     """
     cond_arr   = np.asarray(cond.values if hasattr(cond, 'values') else cond, dtype=bool)
     close_arr  = np.asarray(close.values if hasattr(close, 'values') else close, dtype=float)

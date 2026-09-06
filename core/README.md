@@ -11,7 +11,7 @@
 | `single_symbol_backtest.py` | 单币种回测,带方向校准 | `python core/single_symbol_backtest.py BTCUSDT --days 90 --top 10` |
 | `run_batch.py` | ★ 统一批量入口 | `python core/run_batch.py --symbols BTCUSDT,ETHUSDT` |
 | `cross_period_analysis.py` | 跨周期配对统计 | `python core/cross_period_analysis.py` |
-| `analyze_results.py` | 反向工程 → 出 v4.3 报告 | `python core/analyze_results.py` |
+| `analyze_results.py` | 反向工程 → 出 v4.4 报告 | `python core/analyze_results.py` |
 | **`coin_screener.py`** | **批量币种筛选(找候选)** | **`python core/coin_screener.py --rules D01 --top 20`** |
 | `validate_strategy.py` | 策略三层验证(IS/OOS/MCPT) | `python core/validate_strategy.py strategies/<name>` |
 | `update_doc_v43.py` | 报告写回文档(幂等) | `python core/update_doc_v43.py` |
@@ -38,11 +38,11 @@
 阶段 5 — 校准文档:
   cross_period_analysis.py    (跨周期统计)
        ↓
-  analyze_results.py          (出 v4.3 实测校准报告)
+  analyze_results.py          (出 v4.4 实测校准报告)
        ↓
-  cache/v4.3_calibration.md
+  cache/v4.4_calibration.md
        ↓
-  update_doc_v43.py           (幂等写回 文档模板.md v4.3 章节)
+  update_doc_v43.py           (幂等写回 文档模板.md 校准附录章节)
 ```
 
 > 阶段 5 依赖阶段 2 的产物:`cache/csv/batch_50_summary.csv`(90d 合并)

@@ -4,19 +4,20 @@
 
 ## 🎯 项目目标
 
-把"业务规则"(文档定义)→"实测验证"(回测数据)→"文档校准"(v4.3 附录)形成闭环,
+把"业务规则"(文档定义)→"实测验证"(回测数据)→"文档校准"(v4.4 附录)形成闭环,
 让 50 条规则有**数据支撑**,不再靠业务假设。
 
 ## 📋 系统状态(2026-09-06)
 
 | 模块 | 状态 | 备注 |
 |---|---|---|
-| 规则文档 v4.0 | ✅ | 50 条,见 `文档模板.md` |
+| 规则文档 v4.0 | ✅ | 50 条,见 `文档模板.md`(v4.4:口径明文,版本号统一) |
 | 规则结构化 catalog | ✅ | 50 条(45 active),见 `rules_catalog/catalog.py` |
 | 单币种回测框架 | ✅ | catalog-driven + 双方向 + 死币跳过 |
 | 批量回测框架(统一入口) | ✅ | `core/run_batch.py`,增量/多周期 |
+| 回测执行口径 | ✅ | 明文契约:下一根开仓 / 收盘价成交(上界) / 参数锁定,见 `lib/analysis.py` › `backtest()` |
 | 跨周期验证 | ✅ | 36 币(90d)+ 14 币(180d) |
-| 反向工程报告 v4.3 | ✅ | 见 `cache/v4.3_calibration.md` |
+| 反向工程报告 v4.4 | ✅ | 见 `cache/v4.4_calibration.md` |
 | 跨周期稳健规则 | ✅ | **13 条 Stab=100%**(2026-09-06 重建) |
 | ★★★ 强推 | ✅ | **2 条**(报告按当前数据动态生成) |
 | **币对筛选器 coin_screener** | ✅ | `core/coin_screener.py`,8 keys 轮询 + 分 key 限流 |
@@ -38,14 +39,14 @@
 
 ```
 BBAC-D/
-├── 文档模板.md                  50 条规则 v4.0 + v4.3 实测校准附录(自动生成)
+├── 文档模板.md                  50 条规则 v4.0 + v4.4 实测校准附录(自动生成)
 ├── VERSION                      当前版本标记
 │
 ├── core/                         ★ 7 个主入口 + 10 个遗留/绘图脚本
 │   ├── single_symbol_backtest.py 单币种回测(catalog 驱动)
 │   ├── run_batch.py             统一批量入口
 │   ├── cross_period_analysis.py 跨周期统计
-│   ├── analyze_results.py       出 v4.3 校准报告
+│   ├── analyze_results.py       出 v4.4 校准报告
 │   ├── update_doc_v43.py        报告写回 文档模板.md(幂等)
 │   ├── coin_screener.py         批量币种筛选
 │   └── validate_strategy.py     三层验证(IS/OOS/MCPT)
@@ -66,7 +67,7 @@ BBAC-D/
 └── vendor/chan/                 ┘ 缠论框架(内嵌,chan_plot 用)
 │
 ├── cache/
-│   ├── v4.3_calibration.md      ★ 实测校准报告(analyze_results 产物)
+│   ├── v4.4_calibration.md      ★ 实测校准报告(analyze_results 产物)
 │   ├── csv/                     回测结果(batch_*_summary.csv 等)
 │   └── *.parquet                Blave 原始数据缓存
 │
@@ -117,7 +118,7 @@ python core/run_batch.py --incremental
 ### 4. 反向工程(校准文档)
 ```bash
 python core/cross_period_analysis.py   # 跨周期统计 → cross_period_rule_summary.csv
-python core/analyze_results.py         # 出 v4.3 校准报告 → cache/v4.3_calibration.md
+python core/analyze_results.py         # 出 v4.4 校准报告 → cache/v4.4_calibration.md
 python core/update_doc_v43.py          # 写回 文档模板.md(可重复运行,幂等)
 ```
 
@@ -149,7 +150,7 @@ python core/validate_strategy.py strategies/<name>
 ## 🛠️ 详细文档
 
 - `AGENTS.md` — Claude Agent 工作指令(系统提示,带 TOC + 🔴 标记)
-- `文档模板.md` — 50 条规则 + v4.3 实测校准附录
+- `文档模板.md` — 50 条规则 + v4.4 实测校准附录
 - `core/README.md` — 核心入口用法与限流参数
 - `references/` — 部署/策略/TW 股票/**coin_screener** 参考
-- `cache/v4.3_calibration.md` — 最新实测校准报告
+- `cache/v4.4_calibration.md` — 最新实测校准报告

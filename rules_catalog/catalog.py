@@ -14,8 +14,11 @@ Rules Catalog v4.0
   cond_builder : 条件构建函数 (df, p) -> pd.Series[bool]
                   df: 含有 HC/WH/MS/TI/LM/ret_1h 等指标的 DataFrame
                   p : dict, 参数名 -> 具体阈值(由 resolve_param_space 解析后传入)
-  notes        : 备注
   skip         : 标记为 True 表示该规则跳过(如 BTC 联动)
+
+执行口径约定见 lib.analysis.backtest 的 docstring(入场时点/成交价/参数锁定)。
+本 catalog 只定义"何时触发"与"方向",不定义成交模型 —— 评估统一走 backtest(),
+保证跨规则、跨币种、跨周期的数字可比。
 """
 import numpy as np
 
@@ -551,7 +554,10 @@ def resolve_param_space(rule, df, mode='default'):
       - 'default'  : 用规则固定阈值 (6 个等距分位点, 50%-95%)
       - 'adaptive' : 把 quantile_* 替换为该币 alpha 分布的实际分位数 (per-coin p90 公平)
                      注意: 此模式下 50%-95% 仍映射到该币分布的 50%-95% 分位,
-                     而非固定到全局常量;对小币种更公平
+    注意(口径):解析出的阈值是**该币在该样本窗口 alpha 分布上的分位数**,
+    不是全局常量。也就是说 A01 的 hc_th=1.545 只对"BTC × 那 90 天"成立 ——
+    换币种或换窗口,这个数就得重解析。落盘到实盘策略后必须写死,回测不得重挑
+    (重跑重挑 = 用已知结果选股,是选择偏差)。详见 lib.analysis.backtest 契约第 5 条。
     """
     resolved = {}
     for k, v in rule['param_space'].items():
