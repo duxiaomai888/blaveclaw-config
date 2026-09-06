@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "tradingview": {
+      "command": "npx",
+      "args": ["-y", "@specialagentk/tradingview-mcp"],
+      "env": {
+        "CDP_PORT": "9222"
+      }
+    }
+  }
+}

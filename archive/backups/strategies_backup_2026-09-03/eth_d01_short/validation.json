@@ -1,0 +1,43 @@
+{
+  "strategy": "eth_d01_short",
+  "oos_days": 30,
+  "mcpt_n": 200,
+  "IS": {
+    "window": "2026-03-08 ~ 2026-06-06",
+    "sharpe": 2.6291468066768027,
+    "sortino": 0.790748872936294,
+    "omega": 2.1428622803369772,
+    "mdd": 0.5350036201938413,
+    "total_ret": 2.469428824645359,
+    "ann_ret": 10.40665783494279,
+    "n_trades": 2,
+    "win_rate": 87.5,
+    "pass_sharpe": true,
+    "pass_trades": false,
+    "pass_mdd": true,
+    "verdict": "[FAIL]"
+  },
+  "OOS": {
+    "window": "2026-05-07 ~ 2026-06-06",
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "omega": Infinity,
+    "mdd": 0.0,
+    "total_ret": 0.0,
+    "ann_ret": 0.0,
+    "n_trades": 0,
+    "win_rate": 0.0
+  },
+  "MCPT": {
+    "actual_sharpe": 2.6189477184981276,
+    "p_value": 0.11,
+    "median_dist": 0.011880686185541077,
+    "p95_dist": 3.7881243084487846,
+    "p99_dist": 4.287449993384881,
+    "n_perm": 200,
+    "pass": false,
+    "verdict": "[FAIL]"
+  },
+  "sharpe_drop_pct": 100.0,
+  "all_pass": false
+}

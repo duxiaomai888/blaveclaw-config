@@ -1,0 +1,55 @@
+# Strategy: BTC SMA Cross
+# Type:     A (single symbol, signal-based)
+# Symbol:   BTCUSDT
+# Interval: 1h
+# Logic:    Long on SMA20/SMA50 golden cross, flat on death cross
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# ── Config ────────────────────────────────────────────────────────────────────
+MODE          = "backtest"
+STRATEGY_NAME = "btc_sma_cross"
+SYMBOL        = "BTCUSDT"
+INTERVAL      = "1h"
+START         = "2022-01-01"
+END           = None
+FEE           = 0.0005
+
+SMA_FAST = 45
+SMA_SLOW = 100
+WARMUP   = SMA_SLOW
+
+PLOT_SERIES = {"SMA 45": ("SMA_F", {"overlay": True}), "SMA 100": ("SMA_S", {"overlay": True})}
+
+
+# ── indicators ────────────────────────────────────────────────────────────────
+def _add_indicators(df, fast=SMA_FAST, slow=SMA_SLOW):
+    df = df.copy()
+    df['SMA_F'] = df['Close'].rolling(fast).mean()
+    df['SMA_S'] = df['Close'].rolling(slow).mean()
+    return df
+
+
+# ── fetch_data ────────────────────────────────────────────────────────────────
+def fetch_data(hdrs):
+    from lib.data import fetch_kline
+    df = fetch_kline(SYMBOL, INTERVAL, START, END, hdrs)
+    return _add_indicators(df)   # PLOT_SERIES reads the columns off this df
+
+
+# ── compute_signals ───────────────────────────────────────────────────────────
+def compute_signals(df, fast=SMA_FAST, slow=SMA_SLOW):
+    import pandas as pd, numpy as np
+    df     = _add_indicators(df, fast, slow)
+    signal = pd.Series(np.nan, index=df.index)
+    signal[df['SMA_F'] > df['SMA_S']] = 1.0
+    signal[df['SMA_F'] < df['SMA_S']] = 0.0
+    return signal
+
+
+if __name__ == '__main__':
+    from lib.runner import run
+    from lib.notify import make_sender
+    run(locals(), fetch_data, compute_signals, make_sender())

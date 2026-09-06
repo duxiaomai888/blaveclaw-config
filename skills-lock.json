@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "blave-quant": {
+      "source": "Blave-TW/blave-quant-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "928297ccef186ff798cf8cbcd8632e0a7d42ce4894fdd9f552a609106b2c48e5"
+    }
+  }
+}

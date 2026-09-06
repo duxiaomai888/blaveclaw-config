@@ -1,0 +1,72 @@
+# Core 核心入口
+
+> 本目录是 BBAC-D 的 7 个核心 Python 入口。从项目根目录调用,自动处理 sys.path。
+
+## 7 个入口
+
+| 脚本 | 用途 | 用法 |
+|---|---|---|
+| `single_symbol_backtest.py` | 单币种回测,带方向校准 | `python core/single_symbol_backtest.py BTCUSDT --days 90 --top 10` |
+| `run_batch.py` | ★ 统一批量入口 | `python core/run_batch.py --symbols BTCUSDT,ETHUSDT` |
+| `cross_period_analysis.py` | 跨周期配对统计 | `python core/cross_period_analysis.py` |
+| `analyze_results.py` | 反向工程 → 出 v4.x 报告 | `python core/analyze_results.py` |
+| **`coin_screener.py`** | **批量币种筛选(找候选)** | **`python core/coin_screener.py --rules D01 --top 20`** |
+| `validate_strategy.py` | 策略三层验证(IS/OOS/MCPT) | `python core/validate_strategy.py strategies/<name>` |
+| `update_doc_v43.py` | 文档自动更新工具 | `python core/update_doc_v43.py` |
+
+## 工作流
+
+```
+阶段 1 — 找候选:
+  coin_screener.py            (扫 539 币 × 多规则,找 top 候选)
+       ↓
+阶段 2 — 验证候选:
+  single_symbol_backtest.py   (单币种精细回测,带双方向)
+       ↓
+  run_batch.py                (多币种批量)
+       ↓
+  cache/csv/{sym}_{days}d.csv
+       ↓
+阶段 3 — 落盘:
+  strategies/{name}/strategy.py  (照抄 eth_d01_short 模板)
+       ↓
+阶段 4 — 验证:
+  validate_strategy.py        (3 层验证 → validation.json)
+       ↓
+阶段 5 — 校准文档:
+  cross_period_analysis.py    (跨周期统计)
+       ↓
+  analyze_results.py          (出 v4.x 实测校准报告)
+       ↓
+  cache/v4.x_calibration.md  +  文档模板.md
+```
+
+## coin_screener 限流(2026-06 新增)
+
+8 keys × 2.0 req/s = 16 req/s 默认。**详细见 `references/coin_screener.md`。**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--rps-per-key` | 2.0 | 每 key 每秒请求数 |
+| `--batch-size` | 100 | 每批多少币 |
+| `--batch-sleep` | 5.0 | 批间 sleep |
+| `--no-batch` | — | 不分批 |
+
+```bash
+# 5 币 smoke test
+python core/coin_screener.py --rules D01 --coins test5.txt --top 5
+
+# 全市场 539 币
+python core/coin_screener.py --rules D01,E04,G05 --top 20
+```
+
+## 路径处理
+
+每个脚本头部都加了:
+```python
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+```
+
+→ 在任何目录下跑 `python core/xxx.py` 都能 import `lib.*` 和 `rules_catalog.*`。

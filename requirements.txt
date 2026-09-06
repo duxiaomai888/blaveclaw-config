@@ -1,0 +1,17 @@
+# BBAC-D 主项目依赖
+pandas>=1.5
+numpy>=1.23
+matplotlib>=3.5
+python-dotenv>=1.0
+requests>=2.28
+
+# 从 Blave API 取数据(可选,BBAC-D 已经在用)
+# (见 skills/blave-quant/ 的 Blave API 客户端)
+
+# ── chan.py 缠论可视化脚本额外依赖 ──
+# 静态图:已在主依赖里(matplotlib)
+
+# 动态图(可选,用于 Jupyter 逐 K 线演进)
+# chan_plot_animate.py 需要 IPython + jupyter
+# 安装:pip install ipython jupyter
+ipython>=8.0    # 仅 chan_plot_animate.py 用到
