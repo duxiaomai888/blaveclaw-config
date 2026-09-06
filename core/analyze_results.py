@@ -340,7 +340,8 @@ def main():
     n_cross   = int(cross['rule'].nunique())
     output_lines = [f"# {VERSION} 实测校准报告({n_covered}/{n_total} 条规则有 90d 数据)", "",
                     f"> **生成日期**: {datetime.now().strftime('%Y-%m-%d')}",
-                    f"> **数据来源**: {n_sym_90} 币种(90d)+ 跨周期配对 {n_pair} 条 (见 cross_period_rule_summary.csv)",
+                    f"> **数据来源**: {n_sym_90} 币种(90d);跨周期 {n_cross} 条规则,"
+                    f"{n_pair} 个 (rule, symbol) 配对 (见 cross_period_rule_summary.csv)",
                     f"> **校准目的**: 用跨周期实测校准文档 v4.0 的业务假设",
                     f"> **覆盖**: {n_covered}/{n_total} 条规则有 90d 数据;"
                     f"{n_cross} 条有跨周期配对,其中 {n_stable} 条 Stab=100%"
