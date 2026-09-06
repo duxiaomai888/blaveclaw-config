@@ -44,12 +44,17 @@ v43_header = """# v4.3 实测校准附录(50 条规则 100% 全验证)
 """
 new_doc = doc[:match.start()] + v43_header + report + '\n---\n\n' + doc[match.end():]
 
-# 更新版本历史(幂等:重复运行不再追加第二行)
-v43_row = '| v4.3 | 2026-06-07 | ★ 5 条 skip 多币种联动规则(E05/E06/J01/J02/J03)全部验证,50/50 闭环 |'
-if 'v4.3 |' not in new_doc:
+# 更新版本历史。日期与描述都从报告本身取,不硬编码 —— 报告换了数据,
+# 这行才跟着变;行已存在且内容不同就纠正(幂等且自修正)。
+gen_date = (re.search(r'\*\*生成日期\*\*:\s*([\d-]+)', report) or [None, 'unknown'])[1]
+stable_n = (re.search(r'由\s*(\d+)\s*条 Stab=100%', report) or [None, '?'])[1]
+row_new = (f'| v4.3 | {gen_date} | 规则级实测校准:50 条规则 × 跨周期,'
+           f'{stable_n} 条 Stab=100%(数据源 cache/v4.3_calibration.md) |')
+new_doc = re.sub(r'^\| v4\.3 \|.*$', row_new, new_doc, count=1, flags=re.MULTILINE)
+if row_new not in new_doc:
     new_doc = new_doc.replace(
         '| v4.2 | 2026-06-07 | 扩 50 币种实测',
-        f'{v43_row}\n| v4.2 | 2026-06-07 | 扩 50 币种实测'
+        f'{row_new}\n| v4.2 | 2026-06-07 | 扩 50 币种实测'
     )
 
 
