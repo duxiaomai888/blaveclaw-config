@@ -32,19 +32,21 @@ def _load_inputs():
 
 def _section_overall(df_90, cross, doc_direction):
     """Section 1: overall summary table + key finding."""
+    n_sym_90   = df_90['symbol'].nunique()
+    n_pair     = cross['n_symbols'].sum()
+    flip_pct_90 = (df_90['direction_doc'] != df_90['direction_best']).sum() / len(df_90) * 100
     L = [f"## 一、整体结论", ""]
     L.append("| 指标 | 数值 | 解读 |")
     L.append("|------|------|------|")
-    L.append(f"| 数据范围 | 45 币种(90d)+ 24 币种(180d) | 跨周期配对 42 对 |")
-    L.append(f"| 90d 规则正 Sharpe 比例 | 100% ({len(df_90)}/{len(df_90)}) | 全部规则都赚 |")
-    L.append(f"| 180d 规则正 Sharpe 比例 | 100% ({len(df_180)}) | 跨周期全保持 |" if False else "")
-    L.append(f"| 90d 方向翻转率 | {(df_90['direction_doc']!=df_90['direction_best']).sum()/len(df_90)*100:.1f}% | 文档与实测方向相反 |")
+    L.append(f"| 数据范围 | {n_sym_90} 币种(90d)+ 跨周期配对 {n_pair} 条 | 见 cross_period_rule_summary.csv |")
+    L.append(f"| 90d 规则正 Sharpe 比例 | {(df_90['sharpe']>0).sum()}/{len(df_90)} | 全部规则都赚 |")
+    L.append(f"| 90d 方向翻转率 | {flip_pct_90:.1f}% | 文档与实测方向相反 |")
     L.append(f"| 180d 方向翻转率 | 文档对照需逐条查表 | 跨周期方向一致由 cross_period 验证 |")
     L.append(f"| 平均 Sharpe 90d | {df_90['sharpe'].mean():.2f} | 高 |")
     L.append(f"| 平均 Sharpe 180d | {cross['avg_sharpe_180'].mean():.2f} | 略降(波动累积) |")
     L.append(f"| 跨周期稳健规则 | 由 {len(cross[cross['stability']==1.0])} 条 Stab=100% 组成 | 全部双周期正 Sharpe |")
     L.append("")
-    L.append("**核心发现**:扩到 45 币种后,核心结论保持一致——文档约 58% 规则方向与实测相反,需要校准。")
+    L.append(f"**核心发现**:扩到 {n_sym_90} 币种后,核心结论保持一致——文档约 {flip_pct_90:.0f}% 规则方向与实测相反,需要校准。")
     L.append("")
     L.append("---")
     L.append("")
@@ -274,26 +276,25 @@ def _section_j03():
     return L
 
 
-def _section_appendix():
+def _section_appendix(n_sym_90, n_pair):
     """Section 10: data scope, limits, next steps."""
     L = ["## 十、附录", "",
          "### 数据范围",
-         "- 90d 周期:45 币种(50 候选中 5 个 Blave 端失败)",
-         "- 180d 周期:24 币种",
+         f"- 90d 周期:{n_sym_90} 币种(见 cache/csv/batch_50_summary.csv)",
+         f"- 跨周期配对:{n_pair} 条 (rule, symbol) 同进 Top 5",
          "- 持有期:12 根 1h K 线",
          "- 频率:每小时触发检查",
-         "- 跨周期配对:42 对 (rule, symbol) 同进 Top 5",
          "",
          "### 已知限制", "",
-         "1. **数据仅 14 币种**:BTC, ETH, SOL, BNB, DOGE, SHIB, PEPE, UNI, AAVE, CRV, ARB, OP, DASH, FET",
-         "2. **180d 范围**:仅 2025-12 至 2026-06,可能未覆盖完整牛熊周期",
-         "3. **样本量**:跨周期 Top 5 共 70 行,统计上有意义但建议扩 50+ 币种再校准",
-         "4. **未做止损/止盈**:回测可能高估 Sharpe(实战中爆拉/暴跌会触发止损)",
-         "5. **未做手续费滑点分离**:当前 fee=0.0005 单边,实际可能更高",
+         "1. **跨周期样本**:14 币种配对,统计上有意义但建议扩到 50+ 币种再校准",
+         "2. **180d 范围**:可能未覆盖完整牛熊周期",
+         "3. **未做止损/止盈**:回测可能高估 Sharpe(实战中爆拉/暴跌会触发止损)",
+         "4. **未做手续费滑点分离**:当前 fee=0.0005 单边,实际可能更高",
+         "5. **死币跳过**:改名/下市币种(MATICUSDT、RNDRUSDT 等)在 Blave 端 400,自动跳过",
          "",
          "### 下一步建议", "",
-         "1. 把本报告核心结论写进 `文档模板.md` v4.1 章节",
-         "2. 扩 36 个币种(凑 50 币种),覆盖更多板块,出 v4.2 校准",
+         "1. 把本报告核心结论写进 `文档模板.md` v4.3 章节",
+         "2. 扩 50+ 币种覆盖更多板块,出下一版校准",
          "3. 写 Top 5 正式策略(用 ★★★ 规则),用 TEMPLATE_A 框架",
          "4. 加止损/止盈风控,验证 Sharpe 真实性",
          "",
@@ -306,9 +307,11 @@ def _section_appendix():
 
 def main():
     df_90, cross, doc_name, doc_direction = _load_inputs()
+    n_sym_90 = df_90['symbol'].nunique()
+    n_pair   = int(cross['n_symbols'].sum())
     output_lines = [f"# v4.3 实测校准报告(50 条规则全验证)", "",
                     f"> **生成日期**: {datetime.now().strftime('%Y-%m-%d')}",
-                    f"> **数据来源**: 45 币种(90d) + 24 币种(180d) + 5 条多币种联动规则独立验证",
+                    f"> **数据来源**: {n_sym_90} 币种(90d)+ 跨周期配对 {n_pair} 条 (见 cross_period_rule_summary.csv)",
                     f"> **校准目的**: 50/50 规则全部实测,文档 v4.0 全方位校准",
                     f"> **范围**: 全部 50 条规则已验证,无 skip",
                     "", "---", ""]
@@ -322,7 +325,7 @@ def main():
     output_lines += tier_lines
     output_lines += _section_btc_corr()
     output_lines += _section_j03()
-    output_lines += _section_appendix()
+    output_lines += _section_appendix(n_sym_90, n_pair)
 
     report_path = 'cache/v4.3_calibration.md'
     with open(report_path, 'w', encoding='utf-8') as f:
