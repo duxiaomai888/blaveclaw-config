@@ -1,18 +1,25 @@
-# BBAC-D 主项目依赖
-pandas>=1.5
+# BBAC-D 依赖(核心功能全部需要,缺一即跑不起来)
+pandas>=2.0
 numpy>=1.23
 matplotlib>=3.5
 python-dotenv>=1.0
 requests>=2.28
-
-# 从 Blave API 取数据(可选,BBAC-D 已经在用)
-# (见 skills/blave-quant/ 的 Blave API 客户端)
-
-# ── chan.py 缠论可视化脚本额外依赖 ──
-# 静态图:已在主依赖里(matplotlib)
-
-# 动态图(可选,用于 Jupyter 逐 K 线演进)
-# chan_plot_animate.py 需要 IPython + jupyter
-# 安装:pip install ipython jupyter
-ipython>=8.0    # 仅 chan_plot_animate.py 用到
+# lib/data.py 顶部 import — 缓存层用 parquet 读写
+pyarrow>=10.0
+# core/coin_screener.py 读 symbols.xlsx 币池
+openpyxl>=3.0
+# manager/manager.py slope 分配器用 scipy.optimize.minimize
 scipy>=1.10
+
+# ── 可选:台股(永豐金 Shioaji)──
+# lib/order_sinopac.py 顶部 import shioaji;只做加密/期货时不需要
+# 安装:pip install shioaji
+# shioaji>=0.9
+
+# ── 可选:chan.py 缠论动态可视化 ──
+# core/chan_plot_animate.py 用(Jupyter 逐 K 线演进)
+ipython>=8.0
+# jupyter
+
+# ── 可选:开发/调试 ──
+# pytest    tests/check_*.py 是自包含脚本,不依赖 pytest

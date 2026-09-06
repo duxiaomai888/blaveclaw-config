@@ -1,6 +1,8 @@
 # Core 核心入口
 
-> 本目录是 BBAC-D 的 7 个核心 Python 入口。从项目根目录调用,自动处理 sys.path。
+> 本目录是 BBAC-D 的 **7 个核心 Python 入口**(下表)。另有 ~10 个遗留/绘图脚本
+> (`chan_plot*.py`、`run_all.py`、`fetch_*.py`、`workflow_btcusdt.py` 等),
+> 从项目根目录调用,自动处理 sys.path。
 
 ## 7 个入口
 
@@ -9,10 +11,10 @@
 | `single_symbol_backtest.py` | 单币种回测,带方向校准 | `python core/single_symbol_backtest.py BTCUSDT --days 90 --top 10` |
 | `run_batch.py` | ★ 统一批量入口 | `python core/run_batch.py --symbols BTCUSDT,ETHUSDT` |
 | `cross_period_analysis.py` | 跨周期配对统计 | `python core/cross_period_analysis.py` |
-| `analyze_results.py` | 反向工程 → 出 v4.x 报告 | `python core/analyze_results.py` |
+| `analyze_results.py` | 反向工程 → 出 v4.3 报告 | `python core/analyze_results.py` |
 | **`coin_screener.py`** | **批量币种筛选(找候选)** | **`python core/coin_screener.py --rules D01 --top 20`** |
 | `validate_strategy.py` | 策略三层验证(IS/OOS/MCPT) | `python core/validate_strategy.py strategies/<name>` |
-| `update_doc_v43.py` | 文档自动更新工具 | `python core/update_doc_v43.py` |
+| `update_doc_v43.py` | 报告写回文档(幂等) | `python core/update_doc_v43.py` |
 
 ## 工作流
 
@@ -28,7 +30,7 @@
   cache/csv/{sym}_{days}d.csv
        ↓
 阶段 3 — 落盘:
-  strategies/{name}/strategy.py  (照抄 eth_d01_short 模板)
+  strategies/{name}/strategy.py  (照抄 eth_a08_short 模板)
        ↓
 阶段 4 — 验证:
   validate_strategy.py        (3 层验证 → validation.json)
@@ -36,10 +38,16 @@
 阶段 5 — 校准文档:
   cross_period_analysis.py    (跨周期统计)
        ↓
-  analyze_results.py          (出 v4.x 实测校准报告)
+  analyze_results.py          (出 v4.3 实测校准报告)
        ↓
-  cache/v4.x_calibration.md  +  文档模板.md
+  cache/v4.3_calibration.md
+       ↓
+  update_doc_v43.py           (幂等写回 文档模板.md v4.3 章节)
 ```
+
+> 阶段 5 依赖阶段 2 的产物:`cache/csv/batch_50_summary.csv`(90d 合并)
+> 和 `cache/csv/*_180d.csv`(跨周期配对)。这两个被清掉就得重跑 `run_batch.py`,
+> `cross_period_analysis.py` / `analyze_results.py` 没有输入。
 
 ## coin_screener 限流(2026-06 新增)
 

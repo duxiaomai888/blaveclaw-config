@@ -78,13 +78,13 @@ blave_api_key10=...
 blave_secret_key10=...
 ```
 
-**当前默认 8 keys**(`key1`-`key8`)。**重启 Python 进程**才能加载新 key(KeyRotator 是模块级单例)。
+**当前默认 8 keys**(`key1`-`key8`)。**重启 Python 进程**才能加载新 key(`lib/data.py` 的
+`_KEY_PAIRS` 是模块级缓存,懒加载一次)。
 
-**判断够不够:**
+**判断够不够**(每个 key 2 req/s):
 - 6 keys:够用(12 req/s)
-- 8 keys:留 2x 余量(16 req/s,推荐)
-- 10 keys:上限(20 req/s)
-- 12+ keys:需改 `lib/data.py` 的 `_KeyRotator._load_keys` 循环
+- 8 keys:留 2x 余量(16 req/s,当前上限,推荐)
+- 8+ keys:改 `lib/data.py` 的 `_load_key_pairs()` 里 `range(2, 9)` 的上界
 
 ## 输出
 

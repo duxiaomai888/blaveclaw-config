@@ -54,16 +54,21 @@ def _section_overall(df_90, cross, doc_direction):
 
 
 def _section_recommendations(cross, doc_name, doc_direction):
-    """Section 2: ★★★ strong recommendations (dual-period Sharpe≥3)."""
+    """Section 2: ★★★ strong recommendations.
+
+    Same criterion as _section_tiered_recs (both periods individually >= 3.5)
+    so the two '★★★' lists in one report can never disagree.
+    """
     cross = cross.copy()
     cross['avg_sharpe_combined'] = (cross['avg_sharpe_90'] + cross['avg_sharpe_180']) / 2
     top_recs = cross[
-        (cross['stability']   >= 1.0) &
-        (cross['avg_sharpe_90']  >= 3.0) &
-        (cross['avg_sharpe_180'] >= 3.0)
+        (cross['stability']    >= 1.0) &
+        (cross['avg_sharpe_90']  >= 3.5) &
+        (cross['avg_sharpe_180'] >= 3.5)
     ].sort_values('avg_sharpe_combined', ascending=False)
     L = ["## 二、★★★ 实战推荐(双周期 Sharpe≥3.5,跨周期稳健)", "",
-         "**入选标准**:跨周期双正 Sharpe,且双周期平均 Sharpe≥3.5", ""]
+         f"**入选标准**:跨周期 Stab=100%,且 90d 与 180d Sharpe **各自** ≥ 3.5 — 与第七节分级同口径"
+         f"(本次 {len(top_recs)} 条)", ""]
     L.append("| 规则 | 名称 | 双周期 Sharpe | 90d 收益 | 180d 收益 | 方向 (文档→实测) |")
     L.append("|------|------|--------------|---------|---------|----------------|")
     for _, r in top_recs.iterrows():
