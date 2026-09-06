@@ -51,6 +51,88 @@ def precise_pnl(close_v, open_v, w_curr, w_prev, exec_shifted, fee):
     return pf_ret, overnight, delta_w, tc_daily
 
 
+# ── Catalog-rule backtest (core/single_symbol_backtest.py, core/run_batch.py) ──
+# Restored 2026-09-06 from tmp/cleanup_2026-09-03 (removed 2026-09-03 cleanup);
+# the 6 月 core scripts still call this exact signature.
+
+PERIODS_PER_YEAR = {
+    '1m':  525_600,  # 60 × 24 × 365
+    '5m':  105_120,
+    '15m': 35_040,
+    '30m': 17_520,
+    '1h':  8_760,
+    '2h':  4_380,
+    '4h':  2_190,
+    '1d':  365,
+    '1w':  52,
+}
+
+
+def backtest(cond, close, direction, hold_bars, fee=0.0005, min_trades=5, periods_per_year=8_760):
+    """
+    Single-source-of-truth backtest for catalog-driven rule evaluation.
+
+    Args:
+        cond:        pd.Series[bool] or np.array — entry signals
+        close:       pd.Series or np.array — close prices
+        direction:   'long' | 'short'
+        hold_bars:   bars to hold after each entry
+        fee:         per-side transaction cost (default 5 bps)
+        min_trades:  skip if fewer triggers (default 5)
+        periods_per_year: annualization factor (default 8760 = 1h bars)
+
+    Returns:
+        dict {n, wr, avg, total, sharpe, mdd} in percent, or None if < min_trades
+    """
+    cond_arr   = np.asarray(cond.values if hasattr(cond, 'values') else cond, dtype=bool)
+    close_arr  = np.asarray(close.values if hasattr(close, 'values') else close, dtype=float)
+    n          = len(cond_arr)
+    if n < hold_bars + 2 or cond_arr.sum() < min_trades:
+        return None
+
+    sign = 1.0 if direction == 'long' else -1.0
+    pos  = np.zeros(n)
+    i    = 0
+    while i < n - hold_bars - 1:
+        if cond_arr[i]:
+            s = min(i + 1, n - 1)
+            e = min(s + hold_bars, n)
+            pos[s:e] = sign
+            i = e
+        else:
+            i += 1
+
+    # Per-bar return series
+    ret = np.zeros(n)
+    for t in range(1, n):
+        if pos[t] != 0 and close_arr[t-1] > 0:
+            ret[t] = pos[t] * (close_arr[t] - close_arr[t-1]) / close_arr[t-1] - fee * abs(pos[t] - pos[t-1])
+
+    # Per-trade returns
+    trade_rets = []
+    for t in range(n - hold_bars - 1):
+        if cond_arr[t]:
+            ep, xp = close_arr[t], close_arr[t + hold_bars]
+            if ep > 0:
+                r = ((xp - ep) / ep - fee) * 100 * sign
+                trade_rets.append(r)
+    if not trade_rets:
+        return None
+
+    cum    = np.cumsum(ret[1:])
+    mdd    = (cum.max() - cum.min()) * 100 if len(cum) > 0 else 0
+    std    = np.std(ret[1:])
+    sharpe = (np.mean(ret[1:]) / std * math.sqrt(periods_per_year)) if std > 0 else 0
+    return {
+        'n':      len(trade_rets),
+        'wr':     sum(1 for r in trade_rets if r > 0) / len(trade_rets) * 100,
+        'avg':    float(np.mean(trade_rets)),
+        'total':  float(sum(trade_rets)),
+        'sharpe': float(sharpe),
+        'mdd':    float(mdd),
+    }
+
+
 def periods_per_year(index, n=None):
     """Bars per year derived from the actual date range of `index` (n bars over
     span_days) — works for any market (crypto 24/7, stocks 252d, futures ~250d,

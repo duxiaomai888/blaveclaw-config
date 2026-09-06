@@ -46,8 +46,8 @@ def run_one(sym, days, hold):
         if df is not None and len(df) > 0:
             return f'OK {len(df)}'
         return 'EMPTY'
-    except (requests.RequestException, ValueError, KeyError, OSError) as e:
-        # Network / data / I/O error during single-symbol backtest
+    except (requests.RequestException, ValueError, KeyError, OSError, RuntimeError) as e:
+        # Network / data / I/O error during single-symbol backtest; RuntimeError = dead symbol (HTTP 400)
         return f'EXC:{type(e).__name__}:{e}'[:120]
 
 
@@ -55,7 +55,9 @@ def load_symbols(args):
     """决定币种列表: 文件 > 命令行 > 默认"""
     if args.symbols_file:
         with open(args.symbols_file) as f:
-            return [s.strip() for s in f if s.strip()]
+            syms = [s.strip() for s in f if s.strip()]
+        # 跳过表头行(如 'symbol')与非 USDT 的说明行
+        return [s for s in syms if s.upper().endswith('USDT')]
     elif args.symbols:
         return [s.strip() for s in args.symbols.split(',') if s.strip()]
     else:

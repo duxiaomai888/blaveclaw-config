@@ -15,3 +15,4 @@ requests>=2.28
 # chan_plot_animate.py 需要 IPython + jupyter
 # 安装:pip install ipython jupyter
 ipython>=8.0    # 仅 chan_plot_animate.py 用到
+scipy>=1.10

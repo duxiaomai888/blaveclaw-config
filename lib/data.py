@@ -69,7 +69,65 @@ def _load_key_pairs():
     return pairs
 
 
-def _current_headers(headers):
+def _default_headers():
+    """First key pair as a headers dict — for the legacy 6 月 callers
+    (single_symbol_backtest / coin_screener) that fetch without headers."""
+    if _KEY_PAIRS is None:
+        return None
+    if not _KEY_PAIRS:
+        return None
+    return {'api-key': _KEY_PAIRS[0][0], 'secret-key': _KEY_PAIRS[0][1]}
+
+
+def get_headers():
+    """Get rotating API headers for Blave API (legacy single-shot callers)."""
+    global _KEY_PAIRS, _KEY_INDEX
+    with _HEADERS_LOCK:
+        if _KEY_PAIRS is None:
+            _KEY_PAIRS = _load_key_pairs()
+        if not _KEY_PAIRS:
+            return {'api-key': '', 'secret-key': ''}
+        h = {'api-key': _KEY_PAIRS[_KEY_INDEX][0], 'secret-key': _KEY_PAIRS[_KEY_INDEX][1]}
+        _KEY_INDEX = (_KEY_INDEX + 1) % len(_KEY_PAIRS)
+        return h
+
+
+def get_all_headers():
+    """Get all available header sets (for parallel requests) — used by
+    core/coin_screener.py to give each worker its own key."""
+    global _KEY_PAIRS
+    with _HEADERS_LOCK:
+        if _KEY_PAIRS is None:
+            _KEY_PAIRS = _load_key_pairs()
+        return [{'api-key': a, 'secret-key': s} for a, s in _KEY_PAIRS]
+
+
+class _KeyAwareRateLimiter:
+    """Per-key sliding-window rate limiter. Each API key gets its own counter.
+
+    Used by coin_screener to fan out across multiple keys without 429s.
+    """
+
+    def __init__(self, rps_per_key=2.0):
+        self._rps    = rps_per_key
+        self._period = 1.0 / rps_per_key
+        self._calls  = {}  # key_idx -> list[float]
+        self._lock   = threading.Lock()
+
+    def acquire(self, key_idx):
+        with self._lock:
+            now = time.time()
+            calls = self._calls.setdefault(key_idx, [])
+            calls = [t for t in calls if now - t < 1.0]
+            if calls:
+                wait = self._period - (now - calls[0])
+                if wait > 0:
+                    time.sleep(wait)
+                    now = time.time()
+            self._calls[key_idx] = [t for t in (calls + [time.time()]) if now - t < 1.0]
+
+
+def _current_headers(headers=None):
     """Return the currently active key pair for the caller's headers."""
     if not headers or 'api-key' not in headers:
         return None, None
@@ -84,7 +142,7 @@ def _current_headers(headers):
         return _KEY_PAIRS[_KEY_INDEX]
 
 
-def _rotate_headers(headers):
+def _rotate_headers(headers=None):
     """Request-level rotation: swap a Blave header dict onto the next key pair.
 
     No-op when the headers are not Blave's (no 'api-key'), only one pair
@@ -112,7 +170,7 @@ def _rotate_headers(headers):
     return h
 
 
-def _drop_bad_key(headers):
+def _drop_bad_key(headers=None):
     """Prune the active key from the pool when the server rejects it with 403."""
     global _KEY_PAIRS, _KEY_INDEX
     if not headers or 'api-key' not in headers:
@@ -871,7 +929,7 @@ def _is_sub_5min(interval):
     return pd.Timedelta(interval) < pd.Timedelta('5min')
 
 
-def _fetch_kline_raw(symbol, interval, start, end, headers):
+def _fetch_kline_raw(symbol, interval, start, end, headers=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     sub_5min = _is_sub_5min(interval)
     s = datetime.strptime(start, '%Y-%m-%d')
@@ -928,7 +986,7 @@ def normalize_symbol(symbol):
     return symbol.replace('/', '').replace('-', '').replace('_', '').upper()
 
 
-def fetch_kline(symbol, interval, start, end, headers):
+def fetch_kline(symbol, interval, start, end, headers=None):
     """Fetch OHLCV kline data from Blave API with date chunking and local cache.
 
     All intervals reach back to the symbol's Binance um-futures listing date
@@ -941,15 +999,19 @@ def fetch_kline(symbol, interval, start, end, headers):
     # Venue forms like 'BTC/USDT' → Binance 'BTCUSDT'; the API 400s on
     # separator forms and the separator would leak into the cache dir name.
     symbol = normalize_symbol(symbol)
+    if headers is None or 'api-key' not in headers:
+        h = _default_headers() or {'api-key': '', 'secret-key': ''}
+    else:
+        h = headers
     df = _extend_cache_monthly(
         'kline2', {'symbol': symbol, 'period': interval},
-        lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers),
+        lambda s, e: _fetch_kline_raw(symbol, interval, s, e, h),
         start, end,
     )
     return _sanity_check_ohlc(df, f'{symbol} {interval} kline')
 
 
-def fetch_kline_batch(symbols, interval, start, end, headers):
+def fetch_kline_batch(symbols, interval, start, end, headers=None):
     """Batch fetch OHLCV kline for many symbols via /kline/batch (chunk_size=20).
     Returns dict {symbol: DataFrame(Open, High, Low, Close, Volume)} — keys are
     the NORMALIZED canonical symbols (see normalize_symbol), not the caller's
@@ -1107,34 +1169,38 @@ def _fetch_alpha_raw(endpoint, params, headers, start, end):
 
 
 def _fetch_alpha(endpoint, params, headers, start, end):
+    if headers is None or 'api-key' not in headers:
+        h = _default_headers() or {'api-key': '', 'secret-key': ''}
+    else:
+        h = headers
     slug = endpoint.split('/')[0]
     return _extend_cache_monthly(
         slug, params,
-        lambda s, e: _fetch_alpha_raw(endpoint, params, headers, s, e),
+        lambda s, e: _fetch_alpha_raw(endpoint, params, h, s, e),
         start, end,
     )
 
 
-def fetch_holder_concentration(symbol, interval, start, end, headers):
+def fetch_holder_concentration(symbol, interval, start, end, headers=None):
     """籌碼集中度 Holder Concentration. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('holder_concentration/get_alpha',
                         {'symbol': symbol, 'period': interval}, headers, start, end)
 
 
-def fetch_funding_rate(symbol, interval, start, end, headers):
+def fetch_funding_rate(symbol, interval, start, end, headers=None):
     """資金費率 Funding Rate (Binance). Returns DataFrame with 'alpha' column (alpha = funding rate × 100)."""
     return _fetch_alpha('funding_rate/get_alpha',
                         {'symbol': symbol, 'period': interval}, headers, start, end)
 
 
-def fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h'):
+def fetch_taker_intensity(symbol, interval, start, end, headers=None, timeframe='24h'):
     """多空力道 Taker Intensity. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('taker_intensity/get_alpha',
                         {'symbol': symbol, 'period': interval, 'timeframe': timeframe},
                         headers, start, end)
 
 
-def fetch_whale_hunter(symbol, interval, start, end, headers, timeframe='24h', score_type='score_oi'):
+def fetch_whale_hunter(symbol, interval, start, end, headers=None, timeframe='24h', score_type='score_oi'):
     """巨鯨警報 Whale Hunter. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('whale_hunter/get_alpha',
                         {'symbol': symbol, 'period': interval,
@@ -1142,45 +1208,45 @@ def fetch_whale_hunter(symbol, interval, start, end, headers, timeframe='24h', s
                         headers, start, end)
 
 
-def fetch_unusual_movement(symbol, interval, start, end, headers, timeframe='24h'):
+def fetch_unusual_movement(symbol, interval, start, end, headers=None, timeframe='24h'):
     """異常漲跌 Unusual Movement. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('unusual_movement/get_alpha',
                         {'symbol': symbol, 'period': interval, 'timeframe': timeframe},
                         headers, start, end)
 
 
-def fetch_squeeze_momentum(symbol, start, end, headers):
+def fetch_squeeze_momentum(symbol, start, end, headers=None):
     """擠壓動能 Squeeze Momentum (period fixed to 1d). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('squeeze_momentum/get_alpha',
                         {'symbol': symbol, 'period': '1d'}, headers, start, end)
 
 
-def fetch_liquidation(symbol, interval, start, end, headers, timeframe='24h'):
+def fetch_liquidation(symbol, interval, start, end, headers=None, timeframe='24h'):
     """爆倉指標 Liquidation. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('liquidation/get_alpha',
                         {'symbol': symbol, 'period': interval, 'timeframe': timeframe},
                         headers, start, end)
 
 
-def fetch_market_direction(interval, start, end, headers):
+def fetch_market_direction(interval, start, end, headers=None):
     """市場方向 Market Direction (BTC only, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('market_direction/get_alpha',
                         {'period': interval}, headers, start, end)
 
 
-def fetch_capital_shortage(interval, start, end, headers):
+def fetch_capital_shortage(interval, start, end, headers=None):
     """資金稀缺 Capital Shortage (market-wide, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('capital_shortage/get_alpha',
                         {'period': interval}, headers, start, end)
 
 
-def fetch_market_sentiment(symbol, interval, start, end, headers):
+def fetch_market_sentiment(symbol, interval, start, end, headers=None):
     """市場情緒 Market Sentiment. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('market_sentiment/get_alpha',
                         {'symbol': symbol, 'period': interval}, headers, start, end)
 
 
-def fetch_top_trader_exposure(interval, start, end, headers):
+def fetch_top_trader_exposure(interval, start, end, headers=None):
     """Blave頂尖交易員曝險 Top Trader Exposure (BTC only, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('blave_top_trader/get_exposure',
                         {'period': interval}, headers, start, end)
@@ -1191,7 +1257,7 @@ def fetch_top_trader_exposure(interval, start, end, headers):
 _DB_CHUNK_DAYS = {'ohlcv-1m': 28, 'ohlcv-1h': 365, 'ohlcv-1d': 3650}
 
 
-def _fetch_db_raw(dataset, symbol, schema, start, end, headers):
+def _fetch_db_raw(dataset, symbol, schema, start, end, headers=None):
     """Fetch OHLCV — chunks fetched concurrently, chunk size by schema."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1261,7 +1327,7 @@ def settlement_signals_from_db(df, signal):
     return signal, exec_at_close
 
 
-def fetch_db_kline(dataset, symbol, schema, start, end, headers):
+def fetch_db_kline(dataset, symbol, schema, start, end, headers=None):
     """Fetch CME/NYMEX/ICE OHLCV with local cache."""
     slug = schema.replace('-', '')
     df = _extend_cache_monthly(
@@ -1274,7 +1340,7 @@ def fetch_db_kline(dataset, symbol, schema, start, end, headers):
 
 # ── Taiwan stock data ─────────────────────────────────────────────────────────
 
-def _fetch_twstock_price_raw(stock_id, start, end, headers):
+def _fetch_twstock_price_raw(stock_id, start, end, headers=None):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/price_adj/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
@@ -1288,7 +1354,7 @@ def _fetch_twstock_price_raw(stock_id, start, end, headers):
     return df.replace(0, float('nan')).ffill()
 
 
-def fetch_twstock_price_adj(stock_id, start, end, headers):
+def fetch_twstock_price_adj(stock_id, start, end, headers=None):
     """台股向後調整日K（除權息還原價）. Returns DataFrame with Open/Close columns.
     Use for backtesting — prices are dividend-adjusted so returns are comparable across time."""
     return _extend_cache_monthly(
@@ -1298,7 +1364,7 @@ def fetch_twstock_price_adj(stock_id, start, end, headers):
     )
 
 
-def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers):
+def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers=None):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/price/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
@@ -1313,7 +1379,7 @@ def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers):
     return df.replace(0, float('nan')).ffill()
 
 
-def fetch_twstock_price(stock_id, start, end, headers):
+def fetch_twstock_price(stock_id, start, end, headers=None):
     """台股原始日K（未除權息）. Returns DataFrame with Open/High/Low/Close/Volume columns.
     Use for visualization/charting — matches prices users see on broker apps.
     Do NOT use for backtesting (dividends cause artificial price drops that distort signals)."""
@@ -1325,7 +1391,7 @@ def fetch_twstock_price(stock_id, start, end, headers):
     return _sanity_check_ohlc(df, f'{stock_id} twstock price')
 
 
-def fetch_twstock_quote(stock_id, headers):
+def fetch_twstock_quote(stock_id, headers=None):
     """台股即時報價快照（約 10 秒更新）. Returns a flat dict — NOT a DataFrame, since a quote
     is a single point-in-time observation with no date range to index on. Keys: open/high/low/close
     (today so far), change_price, change_rate, average_price, volume (latest tick), total_volume
@@ -1337,7 +1403,7 @@ def fetch_twstock_quote(stock_id, headers):
     return r.json().get('data', {})
 
 
-def fetch_twstock_quote_batch(stock_ids, headers):
+def fetch_twstock_quote_batch(stock_ids, headers=None):
     """Batch 即時報價（最多 50 檔）. Returns dict {stock_id: quote_dict}, same fields as
     fetch_twstock_quote per entry. No local cache, same as the single-stock version."""
     r = _retry_get(f'{BASE}/studio/market/twstock/quote', headers=headers,
@@ -1353,7 +1419,7 @@ _TWSTOCK_MINUTE_CHUNK_DAYS = {'1d': 3650, '1m': 28, '5m': 28, '15m': 28, '30m': 
 _TWSTOCK_MINUTE_MAX_DAYS = {'1d': 3650, '1m': 31, '5m': 62, '15m': 93, '30m': 186, '60m': 365}
 
 
-def _fetch_twstock_minute_raw(stock_id, schema, start, end, headers, adjust=False):
+def _fetch_twstock_minute_raw(stock_id, schema, start, end, headers=None, adjust=False):
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
     chunk_days = _TWSTOCK_MINUTE_CHUNK_DAYS.get(schema, 28)
@@ -1390,7 +1456,7 @@ def _fetch_twstock_minute_raw(stock_id, schema, start, end, headers, adjust=Fals
     return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
 
 
-def fetch_twstock_ohlcv(stock_id, schema, headers, start=None, end=None, adjust=False):
+def fetch_twstock_ohlcv(stock_id, schema, headers=None, start=None, end=None, adjust=False):
     """台股現股分線 OHLCV. Returns DataFrame with Open/High/Low/Close/Volume columns.
 
     stock_id: any listed TWSE/TPEx security (e.g. '2330')
@@ -1445,7 +1511,7 @@ def fetch_twstock_ohlcv(stock_id, schema, headers, start=None, end=None, adjust=
     return df
 
 
-def fetch_twstock_ohlcv_symbols(headers):
+def fetch_twstock_ohlcv_symbols(headers=None):
     """Stocks that currently have minute-line data server-side — the covered set
     for fetch_twstock_ohlcv. Returns a plain list of stock_id strings.
 
@@ -1459,7 +1525,7 @@ def fetch_twstock_ohlcv_symbols(headers):
     return r.json().get('data', [])
 
 
-def _fetch_twstock_inst_raw(stock_id, start, end, headers):
+def _fetch_twstock_inst_raw(stock_id, start, end, headers=None):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/institutional/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
@@ -1473,7 +1539,7 @@ def _fetch_twstock_inst_raw(stock_id, start, end, headers):
     return df.fillna(0)
 
 
-def fetch_twstock_institutional(stock_id, start, end, headers):
+def fetch_twstock_institutional(stock_id, start, end, headers=None):
     """台股三大法人每日買賣超. Returns DataFrame with foreign_net and raw columns."""
     return _extend_cache_monthly(
         'twstock_inst', {'id': stock_id},
@@ -1482,7 +1548,7 @@ def fetch_twstock_institutional(stock_id, start, end, headers):
     )
 
 
-def _fetch_twstock_shareholding_raw(stock_id, start, end, headers):
+def _fetch_twstock_shareholding_raw(stock_id, start, end, headers=None):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/shareholding/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
@@ -1496,7 +1562,7 @@ def _fetch_twstock_shareholding_raw(stock_id, start, end, headers):
     return result[~result.index.duplicated(keep='last')]
 
 
-def fetch_twstock_shareholding(stock_id, start, end, headers):
+def fetch_twstock_shareholding(stock_id, start, end, headers=None):
     """台股週頻股東人數（持股分級表 total）. Returns DataFrame with 'shareholders' column."""
     return _extend_cache_monthly(
         'twstock_shareholding', {'id': stock_id},
@@ -1505,7 +1571,7 @@ def fetch_twstock_shareholding(stock_id, start, end, headers):
     )
 
 
-def _fetch_twstock_per_raw(stock_id, start, end, headers):
+def _fetch_twstock_per_raw(stock_id, start, end, headers=None):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/per/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
@@ -1517,7 +1583,7 @@ def _fetch_twstock_per_raw(stock_id, start, end, headers):
     return df.set_index('date').sort_index()
 
 
-def fetch_twstock_per(stock_id, start, end, headers):
+def fetch_twstock_per(stock_id, start, end, headers=None):
     """台股每日本益比 / 股價淨值比 / 殖利率. Columns: dividend_yield, PER, PBR. Data from 2005-10-01."""
     return _extend_cache_monthly(
         'twstock_per', {'id': stock_id},
@@ -1547,7 +1613,7 @@ def _dividend_slice(df, start, end):
     return df[mask]
 
 
-def fetch_twstock_dividend(stock_id, start, end, headers):
+def fetch_twstock_dividend(stock_id, start, end, headers=None):
     """台股股利事件 (one row per announcement row; cash + stock dividends).
     Columns: record_date, period, announce_date, cash_ex_date, stock_ex_date,
     pay_date, cash, stock, stock_ratio. Empty dates are '' (never NaN); `period`
@@ -1573,7 +1639,7 @@ def fetch_twstock_dividend(stock_id, start, end, headers):
     return _dividend_slice(df, start, end).reset_index(drop=True)
 
 
-def fetch_twstock_dividend_batch(stock_ids, start, end, headers):
+def fetch_twstock_dividend_batch(stock_ids, start, end, headers=None):
     """Batch 台股股利事件. Returns dict {stock_id: DataFrame} (same columns as
     fetch_twstock_dividend). Ids with no dividend history are silently absent
     (the batch API's contract); ids in the API's `failed` list are reported and
@@ -1876,7 +1942,7 @@ def _save_fundamental_cache(path, df):
     df.to_parquet(path, compression='snappy')
 
 
-def _fetch_twstock_fundamental_raw(endpoint, stock_id, headers):
+def _fetch_twstock_fundamental_raw(endpoint, stock_id, headers=None):
     r = _retry_get(f'{BASE}/studio/market/twstock/{endpoint}/{stock_id}',
                    headers=headers, timeout=60)
     data = r.json().get('data', [])
@@ -1887,7 +1953,7 @@ def _fetch_twstock_fundamental_raw(endpoint, stock_id, headers):
     return df.set_index('date').sort_index()
 
 
-def _fetch_fundamental(prefix, endpoint, stock_id, headers):
+def _fetch_fundamental(prefix, endpoint, stock_id, headers=None):
     path = _fundamental_cache_path(prefix, stock_id)
     df = _load_fundamental_cache(path)
     if df is not None:
@@ -1898,20 +1964,20 @@ def _fetch_fundamental(prefix, endpoint, stock_id, headers):
     return df
 
 
-def fetch_twstock_financials(stock_id, headers):
+def fetch_twstock_financials(stock_id, headers=None):
     """台股季頻綜合損益表 (long format). index=date, columns: type, value, origin_name.
     Key types: Revenue, GrossProfit, OperatingIncome, IncomeAfterTaxes, EPS.
     Pivot: df.pivot_table(index='date', columns='type', values='value', aggfunc='last')"""
     return _fetch_fundamental('twstock_fin', 'financials', stock_id, headers)
 
 
-def fetch_twstock_balance_sheet(stock_id, headers):
+def fetch_twstock_balance_sheet(stock_id, headers=None):
     """台股季頻資產負債表 (long format). index=date, columns: type, value, origin_name.
     Key types: TotalAssets, Equity. ROE = IncomeAfterTaxes / Equity."""
     return _fetch_fundamental('twstock_bs', 'balance_sheet', stock_id, headers)
 
 
-def fetch_twstock_monthly_revenue(stock_id, headers):
+def fetch_twstock_monthly_revenue(stock_id, headers=None):
     """台股月營收. index=date, columns: revenue (NTD 元, full amount not thousands), revenue_month, revenue_year.
     YoY = (rev - rev_same_month_last_year) / abs(rev_same_month_last_year)."""
     return _fetch_fundamental('twstock_rev', 'monthly_revenue', stock_id, headers)
@@ -1921,7 +1987,7 @@ def _twstock_list_cache_path():
     return _CACHE_DIR / 'twstock_list.parquet'
 
 
-def fetch_twstock_list(headers):
+def fetch_twstock_list(headers=None):
     """全市場股票清單（上市+上櫃，含 ETF）。DataFrame indexed by stock_id, columns:
     name, close, industry_code, listing_date (YYYY-MM-DD). Basic company data, not a
     time series — refreshed once a day: single-file cache like fundamentals (see
@@ -1943,7 +2009,7 @@ def fetch_twstock_list(headers):
     return df
 
 
-def fetch_twstock_info(stock_id, headers):
+def fetch_twstock_info(stock_id, headers=None):
     """單支股票基本資料: {stock_id, name, close, industry_code, listing_date}, or None
     if not currently listed. Looks up within fetch_twstock_list's cached universe
     (same 1-day-fresh data) instead of a separate network call."""
@@ -1953,7 +2019,7 @@ def fetch_twstock_info(stock_id, headers):
     return {'stock_id': stock_id, **df.loc[stock_id].to_dict()}
 
 
-def fetch_twstock_market_value_all(headers, top=None):
+def fetch_twstock_market_value_all(headers=None, top=None):
     """全市場市值排名快照 (whole-market market-cap ranking). 上市 + 上櫃 + ETF
     (興櫃 excluded, ETNs have no data) — about 2,400 rows. DataFrame with columns
     rank (1-based, market_value desc), stock_id, name, market_value (NTD 元,
@@ -1993,7 +2059,7 @@ def fetch_twstock_market_value_all(headers, top=None):
     return out
 
 
-def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers):
+def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers=None):
     """Batch fetch fundamental data. Returns dict {stock_id: DataFrame}.
     Uses cache first; fetches uncached stocks in chunks of 50 via batch API."""
     results = {}
@@ -2029,17 +2095,17 @@ def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers):
     return results
 
 
-def fetch_twstock_financials_batch(stock_ids, headers):
+def fetch_twstock_financials_batch(stock_ids, headers=None):
     """Batch fetch 台股季頻綜合損益表. Returns dict {stock_id: DataFrame}."""
     return _fetch_fundamental_batch('twstock_fin', 'financials', stock_ids, headers)
 
 
-def fetch_twstock_balance_sheet_batch(stock_ids, headers):
+def fetch_twstock_balance_sheet_batch(stock_ids, headers=None):
     """Batch fetch 台股季頻資產負債表. Returns dict {stock_id: DataFrame}."""
     return _fetch_fundamental_batch('twstock_bs', 'balance_sheet', stock_ids, headers)
 
 
-def fetch_twstock_monthly_revenue_batch(stock_ids, headers):
+def fetch_twstock_monthly_revenue_batch(stock_ids, headers=None):
     """Batch fetch 台股月營收. Returns dict {stock_id: DataFrame}."""
     return _fetch_fundamental_batch('twstock_rev', 'monthly_revenue', stock_ids, headers)
 
@@ -2259,7 +2325,7 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
     return results
 
 
-def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, start, end, headers):
+def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, start, end, headers=None):
     """Shared batch fetcher for monthly-cached 台股 datasets. Thin wrapper over
     _fetch_batch_cached — kept for existing callers (stock_ids param name, 50/chunk)."""
     return _fetch_batch_cached(
@@ -2267,7 +2333,7 @@ def _fetch_twstock_cached_batch(prefix, endpoint, raw_fn, parse_fn, stock_ids, s
         raw_fn, parse_fn, stock_ids, start, end, headers, chunk_size=50)
 
 
-def fetch_twstock_shareholding_batch(stock_ids, start, end, headers):
+def fetch_twstock_shareholding_batch(stock_ids, start, end, headers=None):
     """Batch fetch 台股週頻股東人數. Returns dict {stock_id: DataFrame(shareholders)}."""
     def _parse(records):
         df = pd.DataFrame(records)
@@ -2280,7 +2346,7 @@ def fetch_twstock_shareholding_batch(stock_ids, start, end, headers):
         stock_ids, start, end, headers)
 
 
-def fetch_twstock_price_adj_batch(stock_ids, start, end, headers):
+def fetch_twstock_price_adj_batch(stock_ids, start, end, headers=None):
     """Batch fetch 台股向後調整日K. Returns dict {stock_id: DataFrame(Open, Close)}."""
     def _parse(records):
         df = pd.DataFrame(records)
@@ -2293,7 +2359,7 @@ def fetch_twstock_price_adj_batch(stock_ids, start, end, headers):
         stock_ids, start, end, headers)
 
 
-def fetch_twstock_price_batch(stock_ids, start, end, headers):
+def fetch_twstock_price_batch(stock_ids, start, end, headers=None):
     """Batch fetch 台股原始日K OHLCV（未除權息）. Returns dict {stock_id: DataFrame(Open,
     High, Low, Close, Volume)}. Same data and cache as fetch_twstock_price — use for
     High/Low-based screens (KD, breakout, range) across many stocks; do NOT use for
@@ -2313,7 +2379,7 @@ def fetch_twstock_price_batch(stock_ids, start, end, headers):
             for sid, df in results.items()}
 
 
-def fetch_twstock_per_batch(stock_ids, start, end, headers):
+def fetch_twstock_per_batch(stock_ids, start, end, headers=None):
     """Batch fetch 台股每日本益比/股價淨值比/殖利率. Returns dict {stock_id:
     DataFrame(dividend_yield, PER, PBR)}. Same data and cache as fetch_twstock_per —
     use for value screens (殖利率 > x%, PER < y) across many stocks."""
@@ -2326,7 +2392,7 @@ def fetch_twstock_per_batch(stock_ids, start, end, headers):
         stock_ids, start, end, headers)
 
 
-def fetch_twstock_institutional_batch(stock_ids, start, end, headers):
+def fetch_twstock_institutional_batch(stock_ids, start, end, headers=None):
     """Batch fetch 台股三大法人. Returns dict {stock_id: DataFrame(foreign_net, ...)}."""
     def _parse(records):
         df = pd.DataFrame(records)
@@ -2339,7 +2405,7 @@ def fetch_twstock_institutional_batch(stock_ids, start, end, headers):
         stock_ids, start, end, headers)
 
 
-def _fetch_twstock_foreign_shareholding_raw(stock_id, start, end, headers):
+def _fetch_twstock_foreign_shareholding_raw(stock_id, start, end, headers=None):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/foreign_shareholding/{stock_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
@@ -2351,7 +2417,7 @@ def _fetch_twstock_foreign_shareholding_raw(stock_id, start, end, headers):
     return df.set_index('date').sort_index()
 
 
-def fetch_twstock_foreign_shareholding_batch(stock_ids, start, end, headers):
+def fetch_twstock_foreign_shareholding_batch(stock_ids, start, end, headers=None):
     """Batch fetch 台股外資持股表. Returns dict {stock_id: DataFrame}.
     Key columns: ForeignInvestmentSharesRatio (持股比率%), ForeignInvestmentShares (持股股數),
     ForeignInvestmentRemainRatio (剩餘可投資比率%), NumberOfSharesIssued (已發行股數)."""
@@ -2367,7 +2433,7 @@ def fetch_twstock_foreign_shareholding_batch(stock_ids, start, end, headers):
 # ── Taiwan market-wide data (大盤) ────────────────────────────────────────────
 # 全市場層級,沒有 stock_id 維度。個股層級的同名資料請用上面的 fetch_twstock_* 系列。
 
-def _fetch_twmarket_index_raw(index_id, start, end, headers):
+def _fetch_twmarket_index_raw(index_id, start, end, headers=None):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twmarket/index/{index_id}',
                    headers=headers, params={'start': start, 'end': end_str}, timeout=60)
@@ -2380,7 +2446,7 @@ def _fetch_twmarket_index_raw(index_id, start, end, headers):
         columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}).astype(float)
 
 
-def fetch_twmarket_index(start, end, headers, index_id='TAIEX'):
+def fetch_twmarket_index(start, end, headers=None, index_id='TAIEX'):
     """大盤加權指數日K（發行量加權股價指數）. Returns DataFrame with Open/High/Low/Close.
     1999-01-05 起;`TAIEX` 是目前唯一支援的 index_id（其他值 API 回 400）。
     指數本身沒有成交量欄位——大盤成交量/成交金額請用 fetch_twmarket_turnover。"""
@@ -2392,7 +2458,7 @@ def fetch_twmarket_index(start, end, headers, index_id='TAIEX'):
     return _sanity_check_ohlc(df, f'{index_id} twmarket index')
 
 
-def _fetch_twmarket_raw(endpoint, columns, start, end, headers):
+def _fetch_twmarket_raw(endpoint, columns, start, end, headers=None):
     """Shared raw fetch for the market-wide (no stock_id) twmarket endpoints."""
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twmarket/{endpoint}',
@@ -2413,7 +2479,7 @@ _TWMARKET_MARGIN_COLUMNS = ['margin_balance', 'margin_balance_prev', 'margin_bal
                             'short_balance', 'short_balance_prev']
 
 
-def fetch_twmarket_turnover(start, end, headers):
+def fetch_twmarket_turnover(start, end, headers=None):
     """全市場每日成交量值（TWSE 集中市場）. Returns DataFrame with columns:
     volume（成交股數,股）、value（成交金額,元）、trades（成交筆數）. 1990-01-04 起。"""
     return _extend_cache_monthly(
@@ -2423,7 +2489,7 @@ def fetch_twmarket_turnover(start, end, headers):
     )
 
 
-def fetch_twmarket_institutional(start, end, headers):
+def fetch_twmarket_institutional(start, end, headers=None):
     """全市場三大法人每日買賣超. Returns DataFrame with columns:
     foreign / investment_trust / dealer / total,皆為淨買賣超金額（元,買 - 賣）。
     2004-04-07 起。外資自營商計入 dealer,不計入 foreign。
@@ -2435,7 +2501,7 @@ def fetch_twmarket_institutional(start, end, headers):
     )
 
 
-def fetch_twmarket_margin(start, end, headers):
+def fetch_twmarket_margin(start, end, headers=None):
     """全市場融資融券餘額. Returns DataFrame with columns:
     margin_balance / margin_balance_prev（融資餘額與前日餘額,張）、
     margin_balance_value（融資金額,元）、
@@ -2447,7 +2513,7 @@ def fetch_twmarket_margin(start, end, headers):
     )
 
 
-def fetch_twmarket_dividend_points(start, end, headers):
+def fetch_twmarket_dividend_points(start, end, headers=None):
     """加權指數每日除息點數 (TAIEX daily index dividend points) — the correction
     term for 正逆價差 fair-basis math. DatetimeIndex, columns: points (index
     points), estimated (bool: False = realized, TR-index derived, from 2003;
@@ -2504,7 +2570,7 @@ def fetch_twmarket_dividend_points(start, end, headers):
 _TW_FUTURES_CHUNK_DAYS = {'1d': 3650, '1m': 28, '5m': 28, '15m': 28, '30m': 28, '60m': 28}
 
 
-def _fetch_twfutures_raw(symbol, schema, start, end, headers):
+def _fetch_twfutures_raw(symbol, schema, start, end, headers=None):
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
     chunk_days = _TW_FUTURES_CHUNK_DAYS.get(schema, 28)
@@ -2549,7 +2615,7 @@ class _ExportUnavailable(Exception):
 _TW_FUTURES_RESAMPLE_RULES = {'5m': '5min', '15m': '15min', '30m': '30min', '60m': '60min'}
 
 
-def _fetch_twfutures_via_export(symbol, schema, start, end, headers):
+def _fetch_twfutures_via_export(symbol, schema, start, end, headers=None):
     """Fetch intraday OHLCV via the 1m-parquet bulk export endpoint
     (GET /studio/market/twfutures/ohlcv/<symbol>/export/<year>) and resample locally.
 
@@ -2612,7 +2678,7 @@ def _fetch_twfutures_via_export(symbol, schema, start, end, headers):
     return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
 
 
-def _fetch_twfutures_raw_smart(symbol, schema, start, end, headers):
+def _fetch_twfutures_raw_smart(symbol, schema, start, end, headers=None):
     """Long intraday spans → try the bulk-export path first (zero server CPU, one
     request per year); short spans, '1d', or export-unavailable → chunked JSON API."""
     if schema != '1d':
@@ -2626,7 +2692,7 @@ def _fetch_twfutures_raw_smart(symbol, schema, start, end, headers):
     return _fetch_twfutures_raw(symbol, schema, start, end, headers)
 
 
-def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
+def fetch_twfutures_ohlcv(symbol, schema, start, end, headers=None):
     """台灣期貨 OHLCV. Returns DataFrame with Open/High/Low/Close/Volume/Amount columns.
 
     symbol: 'TXF' ('MXF'/'TMF' accepted as aliases — see below)
@@ -2667,7 +2733,7 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     return df
 
 
-def fetch_twfutures_ohlcv_batch(symbols, schema, start, end, headers, max_workers=8):
+def fetch_twfutures_ohlcv_batch(symbols, schema, start, end, headers=None, max_workers=8):
     """Batch fetch_twfutures_ohlcv across many symbols, concurrently.
 
     Same per-symbol semantics (monthly cache, export-first for long intraday
@@ -2693,7 +2759,7 @@ def fetch_twfutures_ohlcv_batch(symbols, schema, start, end, headers, max_worker
     return results
 
 
-def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
+def _fetch_twfutures_bid_ask_vol_raw(start, end, headers=None):
     """Fetch raw bid/ask vol for a date range (≤31 days per chunk)."""
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d') + timedelta(days=1)
@@ -2730,7 +2796,7 @@ def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
     return df[['bid_vol', 'ask_vol', 'total_vol']].astype(int)
 
 
-def fetch_twfutures_pcr(start, end, headers):
+def fetch_twfutures_pcr(start, end, headers=None):
     """台指選擇權買賣權未平倉量比率（日）. Returns DataFrame with 'pcr' column.
 
     Source: TAIFEX (台灣期貨交易所). (History range: see the blave-quant skill / Notion API doc.)
@@ -2756,7 +2822,7 @@ _TWFUT_INST_COLUMNS = [f'{k}_{m}' for k, _ in _TWFUT_INST_INVESTORS
 _TWFUT_INST_ALIASES = {'TXF': 'TX', 'MXF': 'MTX'}
 
 
-def _fetch_twfutures_institutional_raw(futures_id, start, end, headers):
+def _fetch_twfutures_institutional_raw(futures_id, start, end, headers=None):
     """Raw fetch → one row per date, 12 float columns (see _TWFUT_INST_COLUMNS).
     The endpoint returns 3 rows per day (外資/投信/自營商); pivoted here so the
     cache layer sees a plain date-indexed frame like the twmarket_* series."""
@@ -2782,7 +2848,7 @@ def _fetch_twfutures_institutional_raw(futures_id, start, end, headers):
     return pd.DataFrame(out).sort_index()
 
 
-def fetch_twfutures_institutional(futures_id, start, end, headers):
+def fetch_twfutures_institutional(futures_id, start, end, headers=None):
     """期貨三大法人未平倉與交易口數(日). Returns a date-indexed DataFrame with
     12 float columns, 口數:
       {foreign|investment_trust|dealer}_net_oi   未平倉淨口數(多 − 空)——「外資期貨淨多單」就是 foreign_net_oi
@@ -2803,7 +2869,7 @@ def fetch_twfutures_institutional(futures_id, start, end, headers):
     )
 
 
-def fetch_twfutures_bid_ask_vol(start, end, headers):
+def fetch_twfutures_bid_ask_vol(start, end, headers=None):
     """台指期內外盤成交量（1 分鐘）. Returns DataFrame indexed by UTC time.
 
     Columns: bid_vol (內盤口數), ask_vol (外盤口數), total_vol (總口數).
@@ -2825,7 +2891,7 @@ def fetch_twfutures_bid_ask_vol(start, end, headers):
     return result
 
 
-def fetch_stock_futures_batch_daily(futures_ids, start, end, headers):
+def fetch_stock_futures_batch_daily(futures_ids, start, end, headers=None):
     """Batch daily OHLCV/OI for individual stock futures (max 250 ids per call,
     server-side parallel fetch + cache). Returns dict {futures_id: DataFrame}
     for ids with data; ids that hit persistent upstream rate-limiting are
@@ -2882,7 +2948,7 @@ def fetch_stock_futures_batch_daily(futures_ids, start, end, headers):
     return results
 
 
-def fetch_stock_futures_ohlcv_symbols(headers):
+def fetch_stock_futures_ohlcv_symbols(headers=None):
     """Currently-allowed symbols for fetch_twfutures_ohlcv (intraday/minute-line
     coverage) — always includes 'TXF' plus whichever individual stock futures
     ids currently have backfilled Shioaji minute-line data (a dynamically-

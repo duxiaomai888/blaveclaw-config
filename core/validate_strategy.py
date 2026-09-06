@@ -143,8 +143,13 @@ def run_backtest_window(strategy_mod, start, end):
 def layer_is(strategy_mod):
     start = getattr(strategy_mod, 'START', None)
     end   = getattr(strategy_mod, 'END', None)
-    if not start or not end:
-        return {'error': 'strategy.py must define START and END as YYYY-MM-DD strings'}
+    # END=None is the live-strategy idiom (数据拉到当前): treat it as today
+    if not start:
+        return {'error': 'strategy.py must define START as a YYYY-MM-DD string'}
+    if not end:
+        from datetime import date
+        end = date.today().strftime('%Y-%m-%d')
+        print(f"  END=None → using today {end}")
     print(f"  IS window: {start} ~ {end}")
     r = run_backtest_window(strategy_mod, start, end)
     return {

@@ -35,7 +35,12 @@ PERIODS_PER_YEAR = 8760
 # ── 1. 数据加载 ──────────────────────────────────────
 def load_data(symbol, start, end, interval='1h'):
     """加载单币种所有指标"""
-    kl = fetch_kline(symbol, interval, start, end)
+    try:
+        kl = fetch_kline(symbol, interval, start, end)
+    except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
+        # Dead symbol (HTTP 400) / network error — empty frame lets caller skip
+        print(f"  [skip] kline {symbol}: {e}")
+        return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
     df = kl.copy()
     log_ret = np.log(df['Close'] / df['Close'].shift(1))
     df['realized_vol'] = log_ret.rolling(168).std() * np.sqrt(PERIODS_PER_YEAR)
@@ -45,8 +50,8 @@ def load_data(symbol, start, end, interval='1h'):
             d = fn(symbol, interval, start, end, **kw)
             if d is not None and len(d) > 0 and 'alpha' in d.columns:
                 return d['alpha'].rename(name)
-        except (requests.RequestException, ValueError, KeyError) as e:
-            # Network / data shape error fetching alpha indicator
+        except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
+            # Network / data shape error / dead symbol (HTTP 400 RuntimeError) fetching alpha indicator
             print(f"  [skip] {name}: {e}")
         return None
 
@@ -201,6 +206,10 @@ def run_single_symbol(symbol, days=90, hold_bars=12, categories=None, output_csv
 
     if verbose: print("Loading data...")
     df = load_data(symbol, start, end)
+    if df is None or len(df) == 0:
+        if verbose:
+            print(f"  [skip] {symbol}: no data (dead symbol or network)")
+        return None
     bh = (df['Close'].iloc[-1] / df['Close'].iloc[0] - 1) * 100
     if verbose: print(f"Bars: {len(df)}, BH: {bh:+.2f}%")
 

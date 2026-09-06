@@ -68,11 +68,11 @@ def fetch_coin_data(coin, start, end, headers, interval=DEFAULT_INTERVAL, key_id
         limiter.acquire(key_idx)
     try:
         hdrs = headers
-        kl   = fetch_kline(coin, interval, start, end)
-        hc   = fetch_holder_concentration(coin, interval, start, end)
-        ms   = fetch_market_sentiment(coin, interval, start, end)
-        ti   = fetch_taker_intensity(coin, interval, start, end, timeframe='24h')
-        wh   = fetch_whale_hunter(coin, interval, start, end, timeframe='24h', score_type='score_oi')
+        kl   = fetch_kline(coin, interval, start, end, hdrs)
+        hc   = fetch_holder_concentration(coin, interval, start, end, hdrs)
+        ms   = fetch_market_sentiment(coin, interval, start, end, hdrs)
+        ti   = fetch_taker_intensity(coin, interval, start, end, hdrs, timeframe='24h')
+        wh   = fetch_whale_hunter(coin, interval, start, end, hdrs, timeframe='24h', score_type='score_oi')
 
         if len(kl) < 50:
             return None
@@ -89,8 +89,8 @@ def fetch_coin_data(coin, start, end, headers, interval=DEFAULT_INTERVAL, key_id
         df['ret_1h']  = df['Close'].pct_change()
         df['ret_24h'] = df['Close'].pct_change(24)
         return df
-    except (requests.RequestException, ValueError, KeyError) as e:
-        # Network / empty data / missing column
+    except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
+        # Network / empty data / missing column / dead symbol (HTTP 400 RuntimeError)
         return None
 
 
@@ -140,8 +140,8 @@ def fetch_all_coins_parallel(coins, start, end, workers=DEFAULT_WORKERS,
                 coin = futures[fut]
                 try:
                     df = fut.result()
-                except (requests.RequestException, ValueError, KeyError):
-                    # Worker raised network/data/column error — skip this coin
+                except (requests.RequestException, ValueError, KeyError, RuntimeError):
+                    # Worker raised network/data/column/dead-symbol error — skip this coin
                     df = None
                 results[coin] = df
 
