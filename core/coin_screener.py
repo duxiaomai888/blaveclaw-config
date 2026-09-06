@@ -33,7 +33,8 @@ import _bootstrap  # noqa: F401  — sys.path setup
 load_dotenv()
 from lib.data import (
     fetch_kline, fetch_holder_concentration, fetch_market_sentiment,
-    fetch_taker_intensity, fetch_whale_hunter, get_all_headers,
+    fetch_taker_intensity, fetch_whale_hunter, fetch_liquidation,
+    fetch_squeeze_momentum, get_all_headers,
     _KeyAwareRateLimiter as _KeyRateLimiter,  # re-export to keep public name stable
 )
 from rules_catalog.catalog import (
@@ -69,25 +70,53 @@ def fetch_coin_data(coin, start, end, headers, interval=DEFAULT_INTERVAL, key_id
     try:
         hdrs = headers
         kl   = fetch_kline(coin, interval, start, end, hdrs)
-        hc   = fetch_holder_concentration(coin, interval, start, end, hdrs)
-        ms   = fetch_market_sentiment(coin, interval, start, end, hdrs)
-        ti   = fetch_taker_intensity(coin, interval, start, end, hdrs, timeframe='24h')
-        wh   = fetch_whale_hunter(coin, interval, start, end, hdrs, timeframe='24h', score_type='score_oi')
 
         if len(kl) < 50:
             return None
 
         df = kl.copy()
-        df['HC'] = hc['alpha'].ffill()
-        df['MS'] = ms['alpha'].ffill()
-        df['TI'] = ti['alpha'].ffill()
-        df['WH'] = wh['alpha'].ffill()
+
+        # 缺哪个 alpha 只废那一个,不让整币失败 —— 与回测侧
+        # single_symbol_backtest.load_data 的处理一致。曾只拉 HC/MS/TI/WH,
+        # 导致 C 类(SM)和 H 类(LM)9 条规则 KeyError 静默失效。
+        def _alpha(name, fn, **kw):
+            try:
+                return fn(coin, interval, start, end, hdrs, **kw)['alpha'].ffill()
+            except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
+                print(f"  [skip] {coin} {name}: {type(e).__name__}")
+                return None
+
+        parts = {
+            'HC': _alpha('HC', fetch_holder_concentration),
+            'MS': _alpha('MS', fetch_market_sentiment),
+            'TI': _alpha('TI', fetch_taker_intensity, timeframe='24h'),
+            'WH': _alpha('WH', fetch_whale_hunter, timeframe='24h', score_type='score_oi'),
+            'LM': _alpha('LM', fetch_liquidation, timeframe='24h'),
+        }
+        # fetch_squeeze_momentum 签名是 (symbol, start, end, headers) —— 没有 interval,
+        # 与其余 5 个不同,单独调。
+        try:
+            parts['SM'] = fetch_squeeze_momentum(coin, start, end, hdrs)['alpha'].ffill()
+        except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
+            print(f"  [skip] {coin} SM: {type(e).__name__}")
+            parts['SM'] = None
+        for col, s in parts.items():
+            df[col] = s if s is not None else np.nan
+
         df['abs_HC']  = df['HC'].abs()
+        df['abs_TI']  = df['TI'].abs()
+        df['abs_SM']  = df['SM'].abs()
+        df['abs_LM']  = df['LM'].abs()
         df['hc_sign'] = np.sign(df['HC'])
         df['ti_sign'] = np.sign(df['TI'])
+        df['lm_sign'] = np.sign(df['LM'])
         df['hc_delta'] = np.sign(df['HC'].diff()).fillna(0)
         df['ret_1h']  = df['Close'].pct_change()
         df['ret_24h'] = df['Close'].pct_change(24)
+        # 与 single_symbol_backtest.load_data 的派生列保持同名同义,否则依赖这些列的
+        # 规则(D04/F02/F04/F05/G01)在扫描侧静默失效。
+        df['new_high_24h'] = df['Close'] >= df['Close'].rolling(24).max().shift(1)
+        df['new_low_24h']  = df['Close'] <= df['Close'].rolling(24).min().shift(1)
         return df
     except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
         # Network / empty data / missing column / dead symbol (HTTP 400 RuntimeError)
@@ -173,21 +202,20 @@ def score_coin_rule(coin_df, rule, direction_override=None, threshold_mode='defa
     if coin_df is None or len(coin_df) < 50:
         return None
 
-    # 解决参数 — 复用 catalog.resolve_param_space(已支持 mode='adaptive' / 'default')
+    # 解决参数 — 复用 catalog.resolve_param_space
+    # quantile_* 必须先解析成数值:不解析的话 cond_builder 收到字符串
+    # 'quantile_50_95',pandas 数值 Series 比字符串直接 TypeError,规则静默返回
+    # None。default 模式曾因此漏掉 23/45 条规则且无任何警告。
     try:
-        if threshold_mode == 'adaptive':
-            param_space = resolve_param_space(rule, coin_df, mode='adaptive')
-        else:
-            # default: 取 param_space 中位值(单值列表),非 quantile_* 直接保留
-            param_space = {}
-            for k, v in rule['param_space'].items():
-                if isinstance(v, list) and len(v) > 0:
-                    param_space[k] = [v[len(v) // 2]]
-                else:
-                    param_space[k] = v
+        param_space = resolve_param_space(
+            rule, coin_df, mode='adaptive' if threshold_mode == 'adaptive' else 'default')
+        # 扫描取单档(中位),不做 OR 合并 —— 与文档"单一判定条件"的写法对齐。
+        # 多档参数扫描是回测侧的职责(core/single_symbol_backtest.py)。
+        param_space = {
+            k: [v[len(v) // 2]] if isinstance(v, list) and v else v
+            for k, v in param_space.items()}
     except (ValueError, KeyError, TypeError) as e:
-        # param_space spec malformed or missing required key
-        print(f"  [skip] {coin}/{rule['id']}: param_space resolve failed: {e}")
+        print(f"  [skip] {rule['id']}: param_space resolve failed: {e}")
         return None
 
     # 跑 cond_builder
@@ -291,11 +319,13 @@ def run_screener(coins, rule_ids, days=DEFAULT_DAYS, direction='long',
     # 2. 评分
     print(f"\n[2/3] Scoring {len(coin_data)} coins × {len(rules)} rules...")
     rows = []
+    skip_count = {}   # rule_id -> 返回 None 的币数
     t0 = time.time()
     for i, (coin, df) in enumerate(coin_data.items(), 1):
         for rule in rules:
             score = score_coin_rule(df, rule, direction_override=direction, threshold_mode=threshold_mode)
             if score is None:
+                skip_count[rule['id']] = skip_count.get(rule['id'], 0) + 1
                 continue
             row = {
                 'coin':         coin,
@@ -314,6 +344,13 @@ def run_screener(coins, rule_ids, days=DEFAULT_DAYS, direction='long',
         if i % 100 == 0:
             print(f"    [{i}/{len(coin_data)}] coins scored ({time.time()-t0:.1f}s)", flush=True)
     print(f"  Scoring done: {len(rows)} rows in {time.time()-t0:.1f}s")
+    # 全部币都无结果的规则要显式报出。静默跳过是最坏的失败方式:default 模式曾
+    # 让 31/45 条规则返回 None 而输出看起来完全正常,只有触发率分布异常才露馅。
+    dead_rules = {r: n for r, n in skip_count.items() if n >= len(coin_data)}
+    if dead_rules:
+        print(f"  ⚠️  {len(dead_rules)}/{len(rules)} 条规则在所有币上都无结果,未进入排名:")
+        for rid in sorted(dead_rules):
+            print(f"       {rid} — 检查 cond_builder 依赖的列是否存在于 fetch_coin_data")
 
     df_res = pd.DataFrame(rows)
     if len(df_res) == 0:
