@@ -65,7 +65,8 @@ def load_data(symbol, start, end, interval='1h'):
     try:
         sm = fetch_squeeze_momentum(symbol, start, end)
         parts['SM'] = sm['alpha']
-    except (requests.RequestException, ValueError, KeyError) as e:
+    except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
+        # Dead symbol / no data for this alpha (HTTP 400/404 RuntimeError)
         print(f"  [skip] SM: {e}")
 
     for name, s in parts.items():
