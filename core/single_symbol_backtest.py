@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from lib.data import (
     fetch_kline, fetch_holder_concentration, fetch_whale_hunter,
     fetch_taker_intensity, fetch_squeeze_momentum, fetch_liquidation,
-    fetch_market_sentiment
+    fetch_market_sentiment, drop_unsettled_bar
 )
 from lib.analysis import backtest
 from rules_catalog.catalog import (
@@ -41,7 +41,7 @@ def load_data(symbol, start, end, interval='1h'):
         # Dead symbol (HTTP 400) / network error — empty frame lets caller skip
         print(f"  [skip] kline {symbol}: {e}")
         return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
-    df = kl.copy()
+    df = drop_unsettled_bar(kl, interval).copy()   # 丢弃未收盘的当前 bar
     log_ret = np.log(df['Close'] / df['Close'].shift(1))
     df['realized_vol'] = log_ret.rolling(168).std() * np.sqrt(PERIODS_PER_YEAR)
 

@@ -105,6 +105,11 @@ def backtest(cond, close, direction, hold_bars, fee=0.0005, min_trades=5, period
          "该币 + 该窗口"成立(阈值取自该窗口的 alpha 分布分位,见
          rules_catalog.catalog.resolve_param_space)。落盘到实盘策略后必须写死,
          回测不得重挑 —— 重跑重挑 = 用已知结果选股,是选择偏差。
+      6. 数据范围不含未收盘 bar — kline API 返回正在形成的当前 bar(close 是
+         实时价),alpha API 只给已收盘 bar(实测慢 1 根)。所以末根 kline 的 alpha
+         列是 NaN,但 ret_1h / new_high_24h 仍会按未确认价格算出来,纯价格规则
+         (连续 K 线 I01/I02、新高新低 F02/F04/F05)会在信号未确认时触发。扫描与
+         回测都必须在 load 后调 lib.data.drop_unsettled_bar() 丢弃末根。
     """
     cond_arr   = np.asarray(cond.values if hasattr(cond, 'values') else cond, dtype=bool)
     close_arr  = np.asarray(close.values if hasattr(close, 'values') else close, dtype=float)

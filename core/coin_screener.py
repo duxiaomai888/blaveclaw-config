@@ -34,7 +34,7 @@ load_dotenv()
 from lib.data import (
     fetch_kline, fetch_holder_concentration, fetch_market_sentiment,
     fetch_taker_intensity, fetch_whale_hunter, fetch_liquidation,
-    fetch_squeeze_momentum, get_all_headers,
+    fetch_squeeze_momentum, get_all_headers, drop_unsettled_bar,
     _KeyAwareRateLimiter as _KeyRateLimiter,  # re-export to keep public name stable
 )
 from rules_catalog.catalog import (
@@ -70,6 +70,7 @@ def fetch_coin_data(coin, start, end, headers, interval=DEFAULT_INTERVAL, key_id
     try:
         hdrs = headers
         kl   = fetch_kline(coin, interval, start, end, hdrs)
+        kl   = drop_unsettled_bar(kl, interval)   # 丢弃未收盘的当前 bar
 
         if len(kl) < 50:
             return None

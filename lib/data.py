@@ -8,7 +8,7 @@ import requests
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -984,6 +984,36 @@ def normalize_symbol(symbol):
     separator not covered here must extend this function, not a local copy.
     """
     return symbol.replace('/', '').replace('-', '').replace('_', '').upper()
+
+
+def drop_unsettled_bar(df, interval='1h'):
+    """丢弃末根尚未收盘的 bar。用于扫描 / 回测对齐,单一来源放这里。
+
+    kline API 返回正在形成的当前 bar:10:00 的 1h bar 在 10:11 拉到时只走了
+    11 分钟,close 是实时价。alpha API 只给已收盘 bar(实测慢 1 根),所以末根
+    kline 的 alpha 列全是 NaN,但 ret_1h / new_high_24h 仍会基于未确认的价格
+    算出来 —— 纯价格规则(连续 K 线 I01/I02、新高新低 F02/F04/F05、价格横盘
+    B05/C04)会在信号未确认时就触发。对提前布局的扫描来说,这类假信号最危险。
+
+    末根已收盘或区间未知时原样返回。
+    """
+    if df is None or len(df) == 0:
+        return df
+    idx = df.index[-1]
+    last = idx.to_pydatetime() if hasattr(idx, 'to_pydatetime') else idx
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - last).total_seconds()
+    if age < _BAR_SECONDS.get(str(interval).lower(), 3600):
+        return df.iloc[:-1]
+    return df
+
+
+_BAR_SECONDS = {
+    '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+    '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600, '12h': 43200,
+    '1d': 86400, '1w': 604800,
+}
 
 
 def fetch_kline(symbol, interval, start, end, headers=None):
