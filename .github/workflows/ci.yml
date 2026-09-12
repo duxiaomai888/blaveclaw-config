@@ -11,17 +11,34 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [3.12, 3.11]
+        python-version: ["3.12", "3.11"]   # 引号:保持字符串,供下面 case 精确匹配
     steps:
       - uses: actions/checkout@v4
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
+      - name: Install dependencies (pinned + hash-verified)
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          # lock 是按 --python-version 单独编译的:lock 内没有 environment marker,
+          # 所以 pip 会在两个版本上都强行装同一份版本号。而 numpy 2.5.3 /
+          # scipy 1.18.1 已不支持 3.11(uv 在 3.11 上解析成 2.4.6 / 1.17.1),
+          # 共用一份 lock 会让 3.11 那半在 --require-hashes 下直接失败。
+          case "${{ matrix.python-version }}" in
+            "3.12") LOCK=requirements.lock ;;
+            "3.11") LOCK=requirements.lock.py311 ;;
+            *) echo "no lock for Python ${{ matrix.python-version }} — add one before testing it"; exit 1 ;;
+          esac
+          # pip 固定版本: --require-hashes 模式对 resolver 行为敏感,
+          # 不固定会让 CI 随 pip 发布节奏静默改变解析结果。
+          python -m pip install --upgrade "pip==24.3.1"
+          # --require-hashes 是强制校验:缺任何一个 hash pip 直接报错,
+          # 不会静默拉取未锁版本。
+          python -m pip install --require-hashes -r "$LOCK"
+        env:
+          PYTHONUTF8: "1"
+      - name: Install linter
+        run: python -m pip install "ruff==0.16.7"
       - name: Run checks (self-contained scripts, no network)
         run: |
           set -e
@@ -29,10 +46,7 @@ jobs:
             echo "=== $t ==="
             python "$t"
           done
-      - name: Check core scripts parse
-        run: |
-          set -e
-          for s in core/single_symbol_backtest.py core/run_batch.py core/coin_screener.py core/validate_strategy.py; do
-            echo "=== $s ==="
-            python -c "import ast; ast.parse(open('$s').read())"
-          done
+      - name: Lint (unused imports / redefined names / syntax errors)
+        run: ruff check lib core strategies rules_catalog allocators manager
+      # ruff 用自己的 parser 读取并解析上述目录里的每个文件,语法错误以 E999
+      # 报出 —— 原先单独 ast.parse 4 个脚本的 step 已冗余,且覆盖面更小。
