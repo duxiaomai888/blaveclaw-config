@@ -32,14 +32,10 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 import argparse
 import pandas as pd
 
-from Chan import CChan
-from ChanConfig import CChanConfig
-from Common.CEnum import AUTYPE, DATA_SRC, KL_TYPE, DATA_FIELD
-from Common.CTime import CTime
-from KLine.KLine_Unit import CKLine_Unit
+from Common.CEnum import KL_TYPE
 from Plot.PlotDriver import CPlotDriver
 
-from chan_plot import (load_kline_parquet, resample_ohlcv, df_to_klu_list,
+from chan_plot import (load_kline_parquet, df_to_klu_list,
                        compute_chan, PLOT_CONFIG_DEFAULT, _get_last_close,
                        overlay_current_price, highlight_recent_bsp)
 

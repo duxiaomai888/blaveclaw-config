@@ -47,7 +47,6 @@ import _bootstrap  # noqa: F401  — sys.path setup
 
 from dotenv import load_dotenv
 import numpy as np
-import pandas as pd
 from datetime import datetime, timedelta
 
 from lib.analysis import precise_pnl, compute_stats

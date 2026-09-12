@@ -24,7 +24,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 
 # --- path setup:BBAC-D 项目根 + 内嵌的 vendor/chan 框架 ---
 import _bootstrap  # noqa: F401  — BBAC-D sys.path
-import os, argparse
+import argparse
 from pathlib import Path
 
 # chan.py 已经内嵌在 BBAC-D/vendor/chan/ 下(随项目走,完全独立,不依赖桌面原版)

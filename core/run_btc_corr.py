@@ -17,13 +17,9 @@ BTC 联动规则回测框架
   J02: BTC 1h 涨 + 该币 1h 跌                 -> long (背离补涨)
 """
 import sys
-import os
-import time
 import pandas as pd
-import numpy as np
 import requests
 from datetime import datetime, timedelta
-from dotenv import dotenv_values
 import _bootstrap  # noqa: F401  — sys.path setup
 from lib.data import fetch_kline
 from lib.analysis import backtest

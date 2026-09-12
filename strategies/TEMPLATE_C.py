@@ -107,7 +107,6 @@ def fetch_data(hdrs):
 #   weights_mat : numpy array  shape (n_days, n_stocks) — DO NOT pre-shift
 #   price_df    : pd.concat({'close': close_df, 'open': open_df}, axis=1)
 def compute_signals(data, param1=PARAM1, param2=PARAM2, rebalance_freq=REBALANCE_FREQ):
-    import numpy as np
     import pandas as pd
 
     close_df, open_df = data   # unpack in the same order as fetch_data's return

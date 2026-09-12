@@ -8,8 +8,6 @@ ETH 短期回测模板 - 1 个月做多做空对比
   python core/eth_short_template.py BTCUSDT --days 30
   python core/eth_short_template.py SOLUSDT --days 14
 """
-import sys
-import os
 import argparse
 import _bootstrap  # noqa: F401  — sys.path setup
 

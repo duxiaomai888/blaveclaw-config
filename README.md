@@ -21,7 +21,7 @@
 | 跨周期稳健规则 | ✅ | **13 条 Stab=100%**(2026-09-06 重建) |
 | ★★★ 强推 | ✅ | **2 条**(报告按当前数据动态生成) |
 | **币对筛选器 coin_screener** | ✅ | `core/coin_screener.py`,8 keys 轮询 + 分 key 限流 |
-| **用户策略** | ✅ | `strategies/`:4 个已落盘 + vote_strategy |
+| **用户策略** | ✅ | `strategies/`:4 个已落盘 + `apps/vote_dashboard/`(桌面投票仪表盘) |
 | 三层验证 | ✅ | IS/OOS/MCPT,`core/validate_strategy.py` |
 | 实盘部署 | ⏸️ 测试阶段 | 组合配置在 `manager/portfolio_config.json` |
 | 止损/止盈 | ⏸️ 暂不用 | 用户决定 |
@@ -59,8 +59,8 @@ BBAC-D/
 ├── manager/                     组合管理 + reconciler
 ├── allocators/                  自定义权重分配器
 │
-├── rules/                      ─┐
-├── examples/                    │ 参考策略(Type A/C)
+├── rules_catalog/               50 条结构化规则(catalog 唯一真理源)
+├── examples/                    ─┐ 参考策略(Type A/C)
 ├── strategies/                  │ 用户策略 + TEMPLATE_A/C
 ├── skills/                      │ Blave API / 交易所 / 台股
 ├── references/                  │ 部署/策略/市场参考文档
@@ -79,7 +79,8 @@ BBAC-D/
 ### 1. 配置环境
 ```bash
 uv venv --python 3.12 .venv
-uv pip install --python .venv -r requirements.txt openpyxl pyarrow scipy
+# requirements.lock 是带 hash 锁定的依赖快照(可复现);requirements.in 是宽松声明
+uv pip install --python .venv -r requirements.lock
 
 cp .env.example .env
 # 编辑 .env 填入 Blave API key(支持 blave_api_key / _key2 .. _key8)

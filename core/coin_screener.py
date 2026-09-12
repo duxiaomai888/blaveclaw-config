@@ -18,7 +18,6 @@ import sys, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 import os
 import argparse
-import json
 import time
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -38,7 +37,7 @@ from lib.data import (
     _KeyAwareRateLimiter as _KeyRateLimiter,  # re-export to keep public name stable
 )
 from rules_catalog.catalog import (
-    ALL_RULES, get_active_rules, get_rule_by_id, resolve_param_space,
+    get_rule_by_id, resolve_param_space,
 )
 
 # ── Defaults ────────────────────────────────────────────────────────────────
@@ -64,7 +63,9 @@ def fetch_coin_data(coin, start, end, headers, interval=DEFAULT_INTERVAL, key_id
     key_idx: 当前 key 索引,用于限流
     limiter: _KeyRateLimiter 实例
     """
-    # 限流:每个 key 串行 acquire
+    # 限流:每个请求前 acquire。每币 7 个串行请求(kline + 5 alpha + SM),
+    # 若只在开头 acquire 一次,key 实际请求率 = 7 × rps_per_key ≈ 8.4 req/s,
+    # 远超服务器 500/5min (≈1.67 req/s) 预算,必然系统性 429 + 指数退避。
     if limiter and key_idx is not None:
         limiter.acquire(key_idx)
     try:
@@ -82,6 +83,8 @@ def fetch_coin_data(coin, start, end, headers, interval=DEFAULT_INTERVAL, key_id
         # 导致 C 类(SM)和 H 类(LM)9 条规则 KeyError 静默失效。
         def _alpha(name, fn, **kw):
             try:
+                if limiter and key_idx is not None:
+                    limiter.acquire(key_idx)
                 return fn(coin, interval, start, end, hdrs, **kw)['alpha'].ffill()
             except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
                 print(f"  [skip] {coin} {name}: {type(e).__name__}")
@@ -97,6 +100,8 @@ def fetch_coin_data(coin, start, end, headers, interval=DEFAULT_INTERVAL, key_id
         # fetch_squeeze_momentum 签名是 (symbol, start, end, headers) —— 没有 interval,
         # 与其余 5 个不同,单独调。
         try:
+            if limiter and key_idx is not None:
+                limiter.acquire(key_idx)
             parts['SM'] = fetch_squeeze_momentum(coin, start, end, hdrs)['alpha'].ffill()
         except (requests.RequestException, ValueError, KeyError, RuntimeError) as e:
             print(f"  [skip] {coin} SM: {type(e).__name__}")
@@ -215,6 +220,12 @@ def score_coin_rule(coin_df, rule, direction_override=None, threshold_mode='defa
         param_space = {
             k: [v[len(v) // 2]] if isinstance(v, list) and v else v
             for k, v in param_space.items()}
+        # 列全 NaN 时 resolve_param_space 返回原始字符串(如 'quantile_50_95'),
+        # 取中位会退化成单个字符,cond_builder 收到后抛 TypeError 被下面的
+        # except 静默跳过。这里显式检测并单独报出,与上方"全灭警告"同口径。
+        if any(isinstance(v, str) for v in param_space.values()):
+            print(f"  [skip] {rule['id']}: alpha 列全 NaN,阈值无法解析")
+            return None
     except (ValueError, KeyError, TypeError) as e:
         print(f"  [skip] {rule['id']}: param_space resolve failed: {e}")
         return None
@@ -268,6 +279,10 @@ def score_coin_rule(coin_df, rule, direction_override=None, threshold_mode='defa
     return {
         'trigger_rate': float(trigger_rate),
         'n_triggers':   n_triggers,
+        # 末根(已收盘)bar 是否触发 —— 这才是"现在该不该动手"的答案。
+        # trigger_rate 是历史累计频率,量错了东西:B01 19.7% 意味着每 5 根 bar
+        # 触发一次,阈值对那个币太松,规则没有区分度。
+        'last_hit':     bool(triggers_combined.iloc[-1]),
         'alpha_avg':    alpha_avgs,
         'direction':    direction,
     }
@@ -283,6 +298,12 @@ def run_screener(coins, rule_ids, days=DEFAULT_DAYS, direction='long',
     """
     end = datetime.now().strftime('%Y-%m-%d')
     start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+
+    # --direction both 的语义是"不覆盖方向,用每条规则自己的文档方向"。
+    # 直接把 'both' 传下去会被当成方向值:输出里 'both' != 'long' 就走"做空"分支,
+    # B01(文档 long)会被标成做空 —— 方向标错就是下错单,这里显式归一。
+    if direction == 'both':
+        direction = None
 
     # 解析规则
     rules = []
@@ -303,7 +324,7 @@ def run_screener(coins, rule_ids, days=DEFAULT_DAYS, direction='long',
     print(f"  Coins:     {len(coins)}")
     print(f"  Rules:     {[r['id'] for r in rules]}")
     print(f"  Window:    {start} ~ {end} ({days} days)")
-    print(f"  Direction: {direction}")
+    print(f"  Direction: {direction if direction else 'both(不覆盖,用文档方向)'}")
     print(f"  Top:       {top_n}")
     print(f"  Threshold: {threshold_mode}")
     print(f"  Workers:   {workers}, rate: {rps_per_key} req/s/key, batch: {batch_size}/{batch_sleep}s")
@@ -333,6 +354,7 @@ def run_screener(coins, rule_ids, days=DEFAULT_DAYS, direction='long',
                 'rule':         rule['id'],
                 'rule_name':    rule['name_cn'],
                 'direction':    score['direction'],
+                'last_hit':     score['last_hit'],
                 'trigger_rate': round(score['trigger_rate'] * 100, 2),   # %
                 'n_triggers':   score['n_triggers'],
                 'n_bars':       len(df) if df is not None else 0,
@@ -360,8 +382,20 @@ def run_screener(coins, rule_ids, days=DEFAULT_DAYS, direction='long',
 
     # 3. 排名 + 输出
     print(f"\n[3/3] Ranking & output...")
+
+    # 末根(已收盘)bar 触发 = 此刻可执行的信号,放在前面。
+    # 下面的 trigger_rate 排名量的是历史累计频率,不是当前状态。
+    hits = df_res[df_res['last_hit']]
+    print(f"\n=== 末根(已收盘)bar 触发 — {len(hits)} 个(币,规则)对 ===")
+    if len(hits) == 0:
+        print("  (无 — 此刻没有规则触发。这不是失败:低频规则集在任意时刻本来就多数无信号)")
+    else:
+        for r in hits.itertuples():
+            print(f"  {r.coin:<14} {r.rule:<4} {r.rule_name:<16} "
+                  f"{'做多' if r.direction == 'long' else '做空'}   N={r.n_triggers:>3}")
+
     # 综合评分:对每条规则单独取 top,然后也输出"跨规则综合"top
-    print(f"\n=== Top {top_n} per rule ===")
+    print(f"\n=== Top {top_n} per rule (历史触发率,不是当前状态) ===")
     summary_per_rule = {}
     for rule in rules:
         sub = df_res[df_res['rule'] == rule['id']].sort_values('trigger_rate', ascending=False)

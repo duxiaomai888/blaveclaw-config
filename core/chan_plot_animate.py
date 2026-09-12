@@ -49,8 +49,7 @@ from Chan import CChan
 from ChanConfig import CChanConfig
 from Common.CEnum import AUTYPE, DATA_SRC, KL_TYPE
 
-from chan_plot import (load_kline_parquet, df_to_klu_list, compute_chan,
-                       PLOT_CONFIG_DEFAULT)
+from chan_plot import (load_kline_parquet, df_to_klu_list, PLOT_CONFIG_DEFAULT)
 
 
 # ── 视图定义 ────────────────────────────────────

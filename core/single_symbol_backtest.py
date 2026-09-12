@@ -22,7 +22,7 @@ from lib.data import (
 )
 from lib.analysis import backtest
 from rules_catalog.catalog import (
-    ALL_RULES, get_active_rules, get_rules_by_category,
+    get_active_rules, get_rules_by_category,
     resolve_param_space, get_total_count, get_active_count
 )
 

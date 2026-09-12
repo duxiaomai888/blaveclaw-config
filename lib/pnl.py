@@ -1,5 +1,4 @@
 import glob, json, math, os
-import pandas as pd
 
 
 def daily_returns_typeA(pf_ret):

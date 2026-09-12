@@ -21,7 +21,6 @@ import time
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 from matplotlib.patches import Rectangle
 
 
@@ -211,7 +210,6 @@ def scan_grid(data, compute_signals_fn, row_vals, col_vals,
     """
     import warnings
     warnings.filterwarnings('ignore', category=FutureWarning)
-    import pandas as pd
     from lib.analysis import precise_pnl, compute_stats
 
     row_vals = list(row_vals)
