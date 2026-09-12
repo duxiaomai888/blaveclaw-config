@@ -34,7 +34,7 @@ BBAC-D 通过 `trigger_load()` **直接喂 CKLine_Unit**,完全不走 chan.py �
 
 - `DataAPI/CommonStockAPI.py` — 空 stub 基类,只为了让 `Chan.py` 的 type hint 不报错
 - **没有** `BaoStockAPI.py` / `AkshareAPI.py` / `ccxt.py` / `csvAPI.py` — 这些会拉入外部依赖
-- 如果未来需要从某个交易所拉数据,直接在 BBAC-D 的 `lib/data.py` 取数,然后喂 `trigger_load()`
+- 如果未来需要从某个交易所拉数据,直接在 BBAC-D 的 `lib.data` 取数,然后喂 `trigger_load()`
 
 ## 升级
 

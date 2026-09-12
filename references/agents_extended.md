@@ -94,7 +94,7 @@ Examples:外资 z-score、多因子轮动、跨市场配置、ETF 周期 rebalan
 
 工作区有共享库在 `lib/`,避免策略间重复代码。**永远 import,不要 inline 写:**
 
-### `lib/data.py` — 数据抓取(chunking + cache 内建)
+### `lib.data` — 数据抓取(chunking + cache 内建)
 
 **Kline / 加密 alpha:**
 - `fetch_db_kline(dataset, symbol, schema, start, end, headers)` → CME/NYMEX/ICE OHLCV + `instrument_id` 列;datasets: `GLBX.MDP3` (CL, GC), `IFEU.IMPACT` (BRN);schemas: `ohlcv-1m` / `ohlcv-1h` / `ohlcv-1d`

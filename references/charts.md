@@ -30,7 +30,7 @@ Layout rules:
 
 Two rules, both verified on a live machine (2026-08-06, 2317 1m):
 
-1. **The index is UTC — shift before display.** All `lib/data.py` OHLCV indexes are tz-naive UTC. For Taiwan-market charts add 8 hours before plotting, or the 09:00–13:30 session shows up at 01:00–05:30 while the axis says "Taipei":
+1. **The index is UTC — shift before display.** All `lib.data` OHLCV indexes are tz-naive UTC. For Taiwan-market charts add 8 hours before plotting, or the 09:00–13:30 session shows up at 01:00–05:30 while the axis says "Taipei":
 
 ```python
 df.index = df.index + pd.Timedelta(hours=8)   # UTC → Taipei, display only

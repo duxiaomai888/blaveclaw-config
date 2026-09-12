@@ -3,11 +3,11 @@
 > 台股資料（日K、三大法人、融資融券、股權分級、財報、月營收、分點買賣超）由 [FinMind](https://finmindtrade.com) 提供；
 > 股票清單/基本資料（industry_code、listing_date）例外，來自 TWSE/TPEx 官方公司資料，非 FinMind。
 
-**⚠️ 一律優先用下面這些 `lib/data.py` 函式(不只是寫策略時,單純聊天問答也一樣),函式裡沒有的資料才去外面找。** `lib/data.py` 已經做好新鮮度、fallback、cache,手寫腳本沒有這層保護,拿到舊資料或直接崩潰都有可能。若 `lib/data.py` 的呼叫本身失敗,回報失敗,不要改用手寫腳本、更不要拿崩潰前的部分輸出當答案。
+**⚠️ 一律優先用下面這些 `lib.data` 函式(不只是寫策略時,單純聊天問答也一樣),函式裡沒有的資料才去外面找。** `lib.data` 已經做好新鮮度、fallback、cache,手寫腳本沒有這層保護,拿到舊資料或直接崩潰都有可能。若 `lib.data` 的呼叫本身失敗,回報失敗,不要改用手寫腳本、更不要拿崩潰前的部分輸出當答案。
 
 ## 股票池（Universe）建立
 
-用 `fetch_twstock_list(headers)`（見 `lib/data.py`）—— 回傳 DataFrame，index 為 `stock_id`，
+用 `fetch_twstock_list(headers)`（見 `lib.data`）—— 回傳 DataFrame，index 為 `stock_id`，
 欄位 `name`、`close`、`industry_code`、`listing_date`（`YYYY-MM-DD`）。涵蓋上市 + 上櫃全市場
 （含 ETF，`industry_code`/`listing_date` 為 `None`）。基本資料一天更新一次，函式內建 1 天快取。
 
@@ -116,7 +116,7 @@ quotes = fetch_twstock_quote_batch(['2330', '2317'], headers)
 
 ## Minute-Line OHLCV（現股分線）— preferred
 
-Use `fetch_twstock_ohlcv` / `fetch_twstock_ohlcv_symbols` in `lib/data.py` — do not
+Use `fetch_twstock_ohlcv` / `fetch_twstock_ohlcv_symbols` in `lib.data` — do not
 hand-roll requests (the lib layer adds retry, chunking, monthly parquet cache, and
 OHLC sanity checks).
 
@@ -218,7 +218,7 @@ def fetch_twstock_market_value(stock_id: str, start: str, end: str, headers: dic
 
 ### Whole-market market-cap ranking (全市場市值排名)
 
-`fetch_twstock_market_value_all(headers, top=None)` in `lib/data.py` returns the latest
+`fetch_twstock_market_value_all(headers, top=None)` in `lib.data` returns the latest
 market-cap ranking of the whole market in ONE call — use it whenever a question or a
 screen is about market cap (前十大權值股, top-N pool by market cap). Never rebuild the
 ranking from per-stock shares × price (that is ~2,000 calls and minutes of waiting).
@@ -279,7 +279,7 @@ bank_net = (df.groupby("bank_name")["buy"].sum() - df.groupby("bank_name")["sell
 
 ## PE / PB / 殖利率
 
-用 `fetch_twstock_per(stock_id, start, end, headers)`（見 `lib/data.py`）—— DatetimeIndex
+用 `fetch_twstock_per(stock_id, start, end, headers)`（見 `lib.data`）—— DatetimeIndex
 （與價格／法人等 fetcher 對齊，可直接 reindex），欄位 `dividend_yield`、`PER`、`PBR`，
 資料從 2005-10-01 起。
 

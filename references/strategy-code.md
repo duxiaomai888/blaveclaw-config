@@ -374,7 +374,7 @@ def compute_signals(df):
 
 ## Blave API Headers
 
-All `lib/data.py` functions accept a `headers` dict. Construct it as:
+All `lib.data` functions accept a `headers` dict. Construct it as:
 
 ```python
 from dotenv import load_dotenv; load_dotenv()
@@ -518,7 +518,7 @@ Let `compute_signals` do per-rebalance ranking using only the lookback window av
 
 **`END = None`, always** — backtest, weight optimisation, and live all fetch to the
 latest data. There is no cache-hit reason to pin a date: the monthly-delta cache (used
-by nearly every fetcher — see lib/data.py for the one exact-range exception) keeps
+by nearly every fetcher — see lib.data for the one exact-range exception) keeps
 past months cached and only re-fetches the current month. A pinned END is a production
 bug — nothing on the live path overrides END, so a deployed strategy freezes its
 signals at that date forever. `lib/quality_check.py` flags any non-None END as

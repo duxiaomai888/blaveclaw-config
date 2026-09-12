@@ -10,7 +10,7 @@ Coin Screener — 批量币种 × 规则信号扫描
   python core/coin_screener.py --rules A05,A08 --direction short --top 10
   python core/coin_screener.py --rules D01 --days 60 --top 30
 
-数据源: lib/data.py 的 fetch_kline / fetch_holder_concentration /
+数据源: lib.data 的 fetch_kline / fetch_holder_concentration /
         fetch_market_sentiment / fetch_taker_intensity / fetch_whale_hunter
 规则源: rules_catalog/catalog.py (50 条规则)
 """

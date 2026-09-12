@@ -1,6 +1,6 @@
 """
 fetcher.py — Blave API 实时拉取 5 个 α 指标 (1h 周期)
-复用 BBAC-D lib/data.py 的 fetch 函数, 但用我们自己的缓存路径避免和 BBAC-D 冲突
+复用 BBAC-D lib.data 的 fetch 函数, 但用我们自己的缓存路径避免和 BBAC-D 冲突
 """
 import os
 import sys

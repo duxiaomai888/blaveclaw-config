@@ -5,7 +5,7 @@ BBAC-D 精简版 csvAPI — stub
 但 CChan.__init__ 仍会 import 它(检查 data_src)。
 
 这里只放最小 stub,让 CChan 能正常实例化。
-真正取数据请用 lib/data.py + core/chan_plot.py 的 trigger_load 流程。
+真正取数据请用 lib.data + core/chan_plot.py 的 trigger_load 流程。
 """
 from .CommonStockAPI import CCommonStockApi
 

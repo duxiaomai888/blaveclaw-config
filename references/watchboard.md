@@ -154,7 +154,7 @@ hdrs = headers_from_env()                     # reads the workspace .env; no BLA
 write_data("<widget_id>", block)
 ```
 
-Rules of thumb: fetch through `lib/data.py` only (`references/lib.md`) — its caches are
+Rules of thumb: fetch through `lib.data` only (`references/lib.md`) — its caches are
 what make an every-few-minutes script cheap; keep the fetch window to what the block
 needs (a 5-minute KPI does not need 90 days of history every run); build the block with
 `lib.report_templates.kpi`, `kpi_row`, `table`, `line_chart` when they fit (shape by
