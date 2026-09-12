@@ -21,6 +21,19 @@ Rules Catalog v4.0
 保证跨规则、跨币种、跨周期的数字可比。
 """
 import numpy as np
+import json as _json
+import os as _os
+
+# ── 校准方向加载 ──────────────────────────────────
+# direction_best = 实测最优方向(从 batch_50_summary.csv 投票得出)
+# direction_doc = 文档原始方向(教学/历史参考)
+# 如果 calibration.json 存在,给每条规则注入 direction_best;否则用 direction_doc
+_CAL_PATH = _os.path.join(_os.path.dirname(__file__), 'calibration.json')
+_CAL_MAP = {}
+if _os.path.exists(_CAL_PATH):
+    with open(_CAL_PATH, encoding='utf-8') as _f:
+        _CAL_DATA = _json.load(_f)
+    _CAL_MAP = _CAL_DATA.get('rules', {})
 
 # ── A: 主力动作 (8) ──────────────────────────────────
 A_RULES = [
@@ -466,8 +479,104 @@ J_RULES = [
     },
 ]
 
+# ── K: 量价配合 (3) ──────────────────────────────────
+# 成交量是最基础的技术指标,原 50 条规则未使用 Volume 列。
+# 这组规则把量价关系引入,补全成交量维度。
+K_RULES = [
+    {
+        'id': 'K01', 'category': 'K', 'name_cn': '放量突破',
+        'name_short': 'vol>=2x+new high',
+        'business_logic': '成交量 ≥ 2 倍均量 + 价格 24h 新高,放量突破确认',
+        'direction_doc': 'long',
+        'param_space': {'vol_mult': [1.5, 2.0, 2.5, 3.0]},
+        'cond_builder': lambda df, p: (df['Volume'] > p['vol_mult'] * df['Volume'].rolling(24).mean().shift(1)) & df['new_high_24h'],
+    },
+    {
+        'id': 'K02', 'category': 'K', 'name_cn': '缩量回调',
+        'name_short': 'vol<=0.5x+price down',
+        'business_logic': '成交量 ≤ 0.5 倍均量 + 价格回调,缩量洗盘,主力未出逃',
+        'direction_doc': 'long',
+        'param_space': {'vol_mult': [0.3, 0.4, 0.5, 0.6]},
+        'cond_builder': lambda df, p: (df['Volume'] < p['vol_mult'] * df['Volume'].rolling(24).mean().shift(1)) & (df['ret_24h'] < -0.01),
+    },
+    {
+        'id': 'K03', 'category': 'K', 'name_cn': '量价背离',
+        'name_short': 'vol up+price down',
+        'business_logic': '成交量放大但价格下跌,抛压加重,量价背离预警',
+        'direction_doc': 'short',
+        'param_space': {'vol_mult': [1.5, 2.0, 2.5]},
+        'cond_builder': lambda df, p: (df['Volume'] > p['vol_mult'] * df['Volume'].rolling(24).mean().shift(1)) & (df['ret_1h'] < -0.005),
+    },
+]
+
+# ── L: 跨指标背离 (3) ──────────────────────────────────
+# 原规则多用单指标或简单 AND,背离模式揭示隐藏的派发/吸筹。
+# 背离 = 两个指标给出矛盾信号,往往是反转前兆。
+L_RULES = [
+    {
+        'id': 'L01', 'category': 'L', 'name_cn': 'HC-TI 背离',
+        'name_short': 'hc up+ti down',
+        'business_logic': 'HC 持续增(筹码集中)但 TI 下降(主动买盘减弱),暗渡陈仓式派发',
+        'direction_doc': 'short',
+        'param_space': {'hc_th': [0.5, 1.0, 1.5]},
+        'cond_builder': lambda df, p: (df['HC'] > p['hc_th']) & (df['hc_delta'] > 0) & (df['TI'] < df['TI'].shift(1)),
+    },
+    {
+        'id': 'L02', 'category': 'L', 'name_cn': '巨鲸逆势建仓',
+        'name_short': 'wh up+price down',
+        'business_logic': 'WH 上升(巨鲸加仓)但价格下跌,巨鲸在回调中吸筹',
+        'direction_doc': 'long',
+        'param_space': {'wh_th': 'quantile_50_95'},
+        'cond_builder': lambda df, p: (df['WH'] > p['wh_th']) & (df['WH'] > df['WH'].shift(1)) & (df['ret_24h'] < -0.01),
+    },
+    {
+        'id': 'L03', 'category': 'L', 'name_cn': '情绪筹码极端背离',
+        'name_short': 'ms extreme+hc opposite',
+        'business_logic': 'MS 极端乐观但 HC 为空(筹码集中空头),散户看多但主力做空',
+        'direction_doc': 'short',
+        'param_space': {'ms_th': [1.5, 2.0, 2.5]},
+        'cond_builder': lambda df, p: (df['MS'] > p['ms_th']) & (df['HC'] < -0.5),
+    },
+]
+
+# ── M: 动量反转 (3) ──────────────────────────────────
+# 原规则偏趋势跟踪,这组补均值回归/反转模式。
+# 反转 = 极端状态 + 开始回归,捕捉顶/底。
+M_RULES = [
+    {
+        'id': 'M01', 'category': 'M', 'name_cn': 'TI 极端反转',
+        'name_short': '|ti|>=3+sign change',
+        'business_logic': 'TI 绝对值极端(≥3)后出现符号翻转,动能耗尽反转',
+        'direction_doc': 'long',
+        'param_space': {'ti_th': [2.0, 2.5, 3.0]},
+        'cond_builder': lambda df, p: (df['abs_TI'] > p['ti_th']) & (df['ti_sign'] != df['ti_sign'].shift(1)),
+    },
+    {
+        'id': 'M02', 'category': 'M', 'name_cn': 'HC 过度集中回归',
+        'name_short': '|hc|>=2.5+revert',
+        'business_logic': '|HC| 极端(≥2.5)后开始回落,筹码过度集中后释放,反向布局',
+        'direction_doc': 'short',
+        'param_space': {'abs_hc_th': [2.0, 2.5, 3.0]},
+        'cond_builder': lambda df, p: (df['abs_HC'] > p['abs_hc_th']) & (df['hc_delta'] < 0),
+    },
+    {
+        'id': 'M03', 'category': 'M', 'name_cn': '爆仓+筹码反转',
+        'name_short': '|lm| extreme+hc align',
+        'business_logic': '极端爆仓 + HC 同向(主力在爆仓方向布局),爆仓后主力接盘反转',
+        'direction_doc': 'long',
+        'param_space': {'lm_th': [2.0, 2.5, 3.0]},
+        'cond_builder': lambda df, p: (df['LM'].abs() > p['lm_th']) & (df['hc_sign'] * df['lm_sign'] > 0),
+    },
+]
+
 # ── 合并所有规则 ──────────────────────────────────
-ALL_RULES = A_RULES + B_RULES + C_RULES + D_RULES + E_RULES + F_RULES + G_RULES + H_RULES + I_RULES + J_RULES
+ALL_RULES = A_RULES + B_RULES + C_RULES + D_RULES + E_RULES + F_RULES + G_RULES + H_RULES + I_RULES + J_RULES + K_RULES + L_RULES + M_RULES
+
+# ── 注入校准方向 (direction_best) ──────────────────────
+# 每条规则注入 direction_best:有校准数据用校准值,否则用 direction_doc
+for _r in ALL_RULES:
+    _rid = _r['id']
+    _r['direction_best'] = _CAL_MAP.get(_rid, _r['direction_doc'])
 
 
 # ── 启动时校验 ──────────────────────────────────

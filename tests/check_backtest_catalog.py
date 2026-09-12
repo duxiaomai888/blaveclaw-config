@@ -4,7 +4,7 @@ entry: a one-bar shift in entry timing or a dropped fee silently changes every
 Sharpe/total the whole project reports, so this pins its contract to the
 docstring (next-bar entry at close[i], exit at close[i+hold], single-side fee,
 overlap-skipping position model, min_trades gate). catalog.py is the single
-source of truth for 50 rules: unique ids, required fields, callable
+source of truth for 59 rules: unique ids, required fields, callable
 cond_builders, valid directions, and the active/skip counts the README advertises.
 
 Run: cd <workspace> && .venv/Scripts/python tests/check_backtest_catalog.py
@@ -120,8 +120,8 @@ check(abs(rf['total'] - ((110-100)/100 - fee)*100) < 1e-9,
 
 
 # ─── catalog integrity ───────────────────────────────────────────────────────
-check(get_total_count() == 50, f"catalog has 50 rules total ({get_total_count()})")
-check(len(ALL_RULES) == 50, f"ALL_RULES len == 50 ({len(ALL_RULES)})")
+check(get_total_count() == 59, f"catalog has 59 rules total ({get_total_count()})")
+check(len(ALL_RULES) == 59, f"ALL_RULES len == 59 ({len(ALL_RULES)})")
 
 ids = [r['id'] for r in ALL_RULES]
 check(len(ids) == len(set(ids)), f"no duplicate rule ids (dups={set([x for x in ids if ids.count(x)>1])})")
@@ -139,16 +139,18 @@ for r in ALL_RULES:
     else:
         check('skip_reason' in r, f"skipped rule {rid} has skip_reason")
 
-# A-J categories all present and non-empty
+# A-M categories all present and non-empty
 cats = {r['category'] for r in ALL_RULES}
-check(cats == set('ABCDEFGHIJ'), f"all 10 categories A-J present ({sorted(cats)})")
-for cat in 'ABCDEFGHIJ':
+check(cats == set('ABCDEFGHIJKLM'), f"all 13 categories A-M present ({sorted(cats)})")
+for cat in 'ABCDEFGHIJKLM':
     check(len(get_rules_by_category(cat)) > 0, f"category {cat} non-empty")
 
-# active vs skip counts: README says 50 total (45 active, 5 skipped: E05 E06 J01 J02 J03)
+# active vs skip counts: 59 total = 54 active + 5 skipped (E05 E06 J01 J02 J03, the
+# BTC/sector cross-coin rules that need multi-coin data). K/L/M (9 new rules) are
+# active but un-backtested — direction_best falls back to direction_doc.
 skip_ids = [r['id'] for r in ALL_RULES if r.get('skip', False)]
 check(len(skip_ids) == 5, f"5 skipped rules ({skip_ids})")
-check(get_active_count() == 45, f"45 active rules ({get_active_count()})")
+check(get_active_count() == 54, f"54 active rules ({get_active_count()})")
 check(set(skip_ids) == {'E05', 'E06', 'J01', 'J02', 'J03'},
       f"skipped ids are the BTC/sector cross-coin rules ({skip_ids})")
 

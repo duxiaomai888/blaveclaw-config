@@ -1,24 +1,24 @@
 # BBAC-D: 市场状态规则量化系统
 
-> **量化策略反向工程框架** — 50 条规则 + 自动参数扫描 + 跨周期验证 + 文档校准
+> **量化策略反向工程框架** — 59 条规则 + 自动参数扫描 + 跨周期验证 + 文档校准
 
 ## 🎯 项目目标
 
 把"业务规则"(文档定义)→"实测验证"(回测数据)→"文档校准"(v4.4 附录)形成闭环,
-让 50 条规则有**数据支撑**,不再靠业务假设。
+让 59 条规则有**数据支撑**,不再靠业务假设。
 
-## 📋 系统状态(2026-09-06)
+## 📋 系统状态(2026-09-12)
 
 | 模块 | 状态 | 备注 |
 |---|---|---|
-| 规则文档 v4.0 | ✅ | 50 条,见 `文档模板.md`(v4.4:口径明文,版本号统一) |
-| 规则结构化 catalog | ✅ | 50 条(45 active),见 `rules_catalog/catalog.py` |
+| 规则文档 v4.0 | ✅ | 59 条(A-J 原始 50 + K-M 新增 9),见 `文档模板.md`(v4.4:口径明文,版本号统一) |
+| 规则结构化 catalog | ✅ | 59 条(54 active,5 skip),见 `rules_catalog/catalog.py` |
 | 单币种回测框架 | ✅ | catalog-driven + 双方向 + 死币跳过 |
 | 批量回测框架(统一入口) | ✅ | `core/run_batch.py`,增量/多周期 |
 | 回测执行口径 | ✅ | 明文契约:下一根开仓 / 收盘价成交(上界) / 参数锁定,见 `lib/analysis.py` › `backtest()` |
 | 跨周期验证 | ✅ | 36 币(90d)+ 14 币(180d) |
 | 反向工程报告 v4.4 | ✅ | 见 `cache/v4.4_calibration.md` |
-| 跨周期稳健规则 | ✅ | **13 条 Stab=100%**(2026-09-06 重建) |
+| 跨周期稳健规则 | ✅ | **13 条 Stab=100%**(2026-09-12 重建) |
 | ★★★ 强推 | ✅ | **2 条**(报告按当前数据动态生成) |
 | **币对筛选器 coin_screener** | ✅ | `core/coin_screener.py`,8 keys 轮询 + 分 key 限流 |
 | **用户策略** | ✅ | `strategies/`:4 个已落盘 + `apps/vote_dashboard/`(桌面投票仪表盘) |
@@ -30,16 +30,16 @@
 
 | 策略 | 符号 | IS Sharpe | OOS Sharpe | MCPT p | 结论 |
 |---|---|---|---|---|---|
-| `btc_a05_short` | BTCUSDT 1h | 1.40 | — | — | ✅ 通过,在组合内(74.6%) |
-| `eth_a08_short` | ETHUSDT 1h | 0.65 | — | — | ✅ 通过,在组合内(18.6%) |
-| `btc_ti_hc_wh_1h_long` | BTCUSDT 1h | 1.42 | — | — | ⏸️ 未跑三层验证 |
+| `btc_a05_short` | BTCUSDT 1h | 2.76 | 4.07 | 0.026 | ✅ **三层全通过**,在组合内(57.9%) |
+| `eth_a08_short` | ETHUSDT 1h | 2.04 | 2.03 | 0.019 | ✅ **三层全通过**,在组合内(42.1%) |
+| `btc_ti_hc_wh_1h_long` | BTCUSDT 1h | 1.37 | 1.88 | 0.002 | ❌ **IS FAIL**(Sharpe<2.0);OOS+MCPT 通过 |
 | `btc_hc_2side_1h` | BTCUSDT 1h | **1.02** | **0.63** | 0.003 | ❌ **IS+OOS FAIL,不可部署** |
 
 ## 📁 项目结构
 
 ```
 BBAC-D/
-├── 文档模板.md                  50 条规则 v4.0 + v4.4 实测校准附录(自动生成)
+├── 文档模板.md                  59 条规则 v4.0 + v4.4 实测校准附录(自动生成)
 ├── VERSION                      当前版本标记(版本号单一来源)
 ├── AGENTS.md                    给 AI agent 的项目操作说明
 │
@@ -53,7 +53,7 @@ BBAC-D/
 │   ├── validate_strategy.py     三层验证(IS/OOS/MCPT)
 │   └── prune_cache.py           cache 治理(默认干跑,--apply 才动手)
 │
-├── rules_catalog/               50 条结构化规则(catalog 唯一真理源)
+├── rules_catalog/               59 条结构化规则(catalog 唯一真理源)
 ├── symbols.xlsx                 币池(539 币)
 ├── midcap_symbols.csv           币池(40 币,coin_screener 默认源)
 │
@@ -156,7 +156,7 @@ python core/validate_strategy.py strategies/<name>
 ## 🛠️ 详细文档
 
 - `AGENTS.md` — Claude Agent 工作指令(系统提示,带 TOC + 🔴 标记)
-- `文档模板.md` — 50 条规则 + v4.4 实测校准附录
+- `文档模板.md` — 59 条规则 + v4.4 实测校准附录
 - `core/README.md` — 核心入口用法与限流参数
 - `references/` — 部署/策略/TW 股票/**coin_screener** 参考
 - `cache/v4.4_calibration.md` — 最新实测校准报告

@@ -12,7 +12,7 @@ Coin Screener — 批量币种 × 规则信号扫描
 
 数据源: lib.data 的 fetch_kline / fetch_holder_concentration /
         fetch_market_sentiment / fetch_taker_intensity / fetch_whale_hunter
-规则源: rules_catalog/catalog.py (50 条规则)
+规则源: rules_catalog/catalog.py (59 条规则, A-M)
 """
 import sys, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
