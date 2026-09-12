@@ -47,6 +47,6 @@ jobs:
             python "$t"
           done
       - name: Lint (unused imports / redefined names / syntax errors)
-        run: ruff check lib core strategies rules_catalog allocators manager
+        run: ruff check lib core strategies rules_catalog allocators manager tests
       # ruff 用自己的 parser 读取并解析上述目录里的每个文件,语法错误以 E999
       # 报出 —— 原先单独 ast.parse 4 个脚本的 step 已冗余,且覆盖面更小。

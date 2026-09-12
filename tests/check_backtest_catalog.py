@@ -12,7 +12,6 @@ Run: cd <workspace> && .venv/Scripts/python tests/check_backtest_catalog.py
 import os
 import sys
 import math
-import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("MPLBACKEND", "Agg")
