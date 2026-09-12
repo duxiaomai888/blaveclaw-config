@@ -40,16 +40,18 @@
 ```
 BBAC-D/
 ├── 文档模板.md                  50 条规则 v4.0 + v4.4 实测校准附录(自动生成)
-├── VERSION                      当前版本标记
+├── VERSION                      当前版本标记(版本号单一来源)
+├── AGENTS.md                    给 AI agent 的项目操作说明
 │
-├── core/                         ★ 7 个主入口 + 10 个遗留/绘图脚本
+├── core/                         ★ 7 个主入口(下),其余为辅助/绘图/治理脚本
 │   ├── single_symbol_backtest.py 单币种回测(catalog 驱动)
-│   ├── run_batch.py             统一批量入口
+│   ├── run_batch.py             统一批量入口(--workers 并行)
 │   ├── cross_period_analysis.py 跨周期统计
 │   ├── analyze_results.py       出 v4.4 校准报告
 │   ├── update_doc_v43.py        报告写回 文档模板.md(幂等)
 │   ├── coin_screener.py         批量币种筛选
-│   └── validate_strategy.py     三层验证(IS/OOS/MCPT)
+│   ├── validate_strategy.py     三层验证(IS/OOS/MCPT)
+│   └── prune_cache.py           cache 治理(默认干跑,--apply 才动手)
 │
 ├── rules_catalog/               50 条结构化规则(catalog 唯一真理源)
 ├── symbols.xlsx                 币池(539 币)
@@ -59,19 +61,22 @@ BBAC-D/
 ├── manager/                     组合管理 + reconciler
 ├── allocators/                  自定义权重分配器
 │
-├── rules_catalog/               50 条结构化规则(catalog 唯一真理源)
-├── examples/                    ─┐ 参考策略(Type A/C)
-├── strategies/                  │ 用户策略 + TEMPLATE_A/C
-├── skills/                      │ Blave API / 交易所 / 台股
-├── references/                  │ 部署/策略/市场参考文档
-└── vendor/chan/                 ┘ 缠论框架(内嵌,chan_plot 用)
+├── examples/                    独立参考策略(btc/台股/台指期,写同类前先读)
+├── strategies/                  用户策略 + TEMPLATE_A/C
+├── apps/vote_dashboard/         vote 面板(Flask + desktop,独立于 strategies/)
+├── skills/                      Blave API / 交易所 / 台股
+├── references/                  部署/策略/市场参考文档
+├── tests/                       check_*.py 自包含校验(CI 全跑,无需网络)
+└── vendor/chan/                 缠论框架(内嵌,chan_plot 用)
 │
 ├── cache/
 │   ├── v4.4_calibration.md      ★ 实测校准报告(analyze_results 产物)
-│   ├── csv/                     回测结果(batch_*_summary.csv 等)
+│   ├── csv/                     回测结果(平铺布局是硬编码契约,勿移动文件)
 │   └── *.parquet                Blave 原始数据缓存
 │
-└── .github/workflows/ci.yml     CI(跑 tests/check_*.py)
+├── requirements.in              依赖宽松声明(改依赖只动这里)
+├── requirements.lock            3.12 hash 锁定快照(uv pip compile 生成)
+└── .github/workflows/ci.yml     CI(check_*.py + ruff,lock 按 Python 版本选)
 ```
 
 ## 🚀 快速开始
