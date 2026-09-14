@@ -49,7 +49,9 @@ DEFAULT_DAYS       = 30
 # 限流默认值(per-key):每秒 1.67 个请求(= 服务器 500/5min 预算,
 # 口径同官方 blaveclaw-config lib/data.py: per-IP 500/5min;blave-quant
 # SKILL.md 的 "100 req / 5 min" 是旧值,已以 config 仓库为准),
-# key 切换间隔 0.3s,批 100 币 sleep 5s。实测 2.0 超预算触发 429 反而更慢。
+# key 切换间隔 0.3s,批 100 币 sleep 5s。真测出非保守值:2026-09-14
+# 单 key 冷启动扫描,1.67 req/s 持续 172s/284 req 零 429,2.0 req/s 在第
+# 221 req(110s)触发 429——500/5min 是硬上限,1.67 是安全线。
 DEFAULT_RPS_PER_KEY    = 1.67
 DEFAULT_KEY_COOLDOWN   = 0.3
 DEFAULT_BATCH_SIZE     = 100

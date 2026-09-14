@@ -46,7 +46,9 @@ python core/coin_screener.py --rules D01 --coins my20.txt --days 7 --top 10
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--rps-per-key` | **2.0** | 每 key 每秒请求数(8 keys → 16 req/s 总) |
+| `--rps-per-key` | **1.67** | 每 key 每秒请求数(**实测安全上限**,非保守值;2026-09-14
+单 key 冷启动扫描:1.67 req/s 持续 172s/284 req 零 429,2.0 req/s 在第 221
+req(110s)触发 429。证实服务器 500/5min per-IP 是硬上限,1.67 刚好不超预算) |
 | `--key-cooldown` | 0.3 | 同 key 连续请求最小间隔秒 |
 | `--batch-size` | 100 | 每批多少币 |
 | `--batch-sleep` | 5.0 | 批间 sleep,等限流冷却 |
@@ -58,33 +60,39 @@ python core/coin_screener.py --rules D01 --coins my20.txt --days 7 --top 10
 | 场景 | 命令片段 |
 |---|---|
 | **保守稳跑**(不踩限流) | `--rps-per-key 1.0 --batch-size 50 --batch-sleep 10` |
-| **快速 539 币** | `--rps-per-key 2.0 --batch-size 100 --batch-sleep 5`(默认) |
-| **急跑接受 429** | `--rps-per-key 5.0 --no-batch` |
+| **快速 539 币**(默认) | `--rps-per-key 1.67 --batch-size 100 --batch-sleep 5` |
+| **急跑接受 429**(不推荐) | `--rps-per-key 3.0 --no-batch` |
 
 ## API Keys 配置
 
-`.env` 文件支持 1-10 个 Blave API key(最多 10 个,KeyRotator 硬编码 `range(1, 11)`):
+`.env` 文件支持最多 20 个 Blave API key(`lib/data/http.py` 的 `_load_key_pairs()`
+读 `blave_api_key` + `_key2.._key20`):
 
 ```bash
 # 第一个用 blave_api_key / blave_secret_key(无后缀)
 blave_api_key=...
 blave_secret_key=...
 
-# 后续用 _2, _3, ... _10
+# 后续用 _2, _3, ... _20
 blave_api_key2=...
 blave_secret_key2=...
 ...
-blave_api_key10=...
-blave_secret_key10=...
+blave_api_key20=...
+blave_secret_key20=...
 ```
 
-**当前默认 8 keys**(`key1`-`key8`)。**重启 Python 进程**才能加载新 key(`lib.data` 的
+**当前 9 keys**(`key1`-`key9`)。**重启 Python 进程**才能加载新 key(`lib.data` 的
 `_KEY_PAIRS` 是模块级缓存,懒加载一次)。
 
-**判断够不够**(每个 key 2 req/s):
-- 6 keys:够用(12 req/s)
-- 8 keys:留 2x 余量(16 req/s,当前上限,推荐)
-- 8+ keys:改 `lib.data` 的 `_load_key_pairs()` 里 `range(2, 9)` 的上界
+**安全限速 = 1.67 req/s/key**(= 服务器 per-IP 500/5min 硬上限,**实测**验证非保守值:
+2026-09-14 单 key 冷启动扫描,1.67 持续 172s/284 req 零 429,2.0 在第 221 req(110s)
+触发 429)。口径同官方 blaveclaw-config `lib/data.py`。`--rps-per-key` 硬上限取
+1.67,不要超。
+
+**判断够不够**(每个 key 1.67 req/s):
+- 6 keys:够用(≈10 req/s)
+- 9 keys:当前配置(≈15 req/s,推荐)
+- 更多 key:`lib/data/http.py` 已支持到 _key20,加 key 即可线性提速
 
 ## 输出
 
@@ -97,7 +105,7 @@ blave_secret_key10=...
 **Q1: 跑得很慢 / 卡住?**
 - 看 `[safe_get] 429` 出现频率
   - 0-5 个:正常,在安全范围
-  - >10 个:降 `--rps-per-key` 到 1.0 或加 key
+  - >10 个:降 `--rps-per-key` 到 1.0 或加 key(默认 1.67 是安全上限,不应再超)
 - 看 cache 命中率:`cache/kline_1h_*USDT_*.parquet` 文件数 ≈ 缓存覆盖度
 
 **Q2: 12% 失败率正常吗?**

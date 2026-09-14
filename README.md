@@ -20,7 +20,7 @@
 | 反向工程报告 v4.4 | ✅ | 见 `cache/v4.4_calibration.md` |
 | 跨周期稳健规则 | ✅ | **13 条 Stab=100%**(2026-09-12 重建) |
 | ★★★ 强推 | ✅ | **2 条**(报告按当前数据动态生成) |
-| **币对筛选器 coin_screener** | ✅ | `core/coin_screener.py`,8 keys 轮询 + 分 key 限流 |
+| **币对筛选器 coin_screener** | ✅ | `core/coin_screener.py`,9 keys 轮询 + 分 key 限流(安全 1.67 req/s/key) |
 | **用户策略** | ✅ | `strategies/`:4 个已落盘 + `apps/vote_dashboard/`(桌面投票仪表盘) |
 | 三层验证 | ✅ | IS/OOS/MCPT,`core/validate_strategy.py` |
 | 实盘部署 | ⏸️ 测试阶段 | 组合配置在 `manager/portfolio_config.json` |
@@ -96,7 +96,7 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv -r requirements.lock
 
 cp .env.example .env
-# 编辑 .env 填入 Blave API key(支持 blave_api_key / _key2 .. _key8)
+# 编辑 .env 填入 Blave API key(支持 blave_api_key / _key2 .. _key20;安全 1.67 req/s/key)
 ```
 
 > **Windows 必须**:设系统环境变量 `PYTHONUTF8=1`

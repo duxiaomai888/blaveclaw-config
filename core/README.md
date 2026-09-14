@@ -51,11 +51,14 @@
 
 ## coin_screener 限流(2026-06 新增)
 
-8 keys × 2.0 req/s = 16 req/s 默认。**详细见 `references/coin_screener.md`。**
+9 keys × 1.67 req/s ≈ 15 req/s 默认(**实测安全上限 = 1.67 req/s/key**,非保守值;
+2026-09-14 单 key 冷启扫描:1.67 持续 172s/284 req 零 429,2.0 在第 221 req(110s)
+触发 429 → 证实服务器 500/5min per-IP 是硬上限)。
+**详细见 `references/coin_screener.md`。**
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--rps-per-key` | 2.0 | 每 key 每秒请求数 |
+| `--rps-per-key` | 1.67 | 每 key 每秒请求数(**安全上限,勿超**) |
 | `--batch-size` | 100 | 每批多少币 |
 | `--batch-sleep` | 5.0 | 批间 sleep |
 | `--no-batch` | — | 不分批 |
