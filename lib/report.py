@@ -2,7 +2,7 @@
 Report helper — build a report and drop it in `workspace/reports/`.
 
 A report is a JSON document the platform stores and the web workspace renders in
-the sidebar (charts, KPI rows, tables, prose). The machine publishes one by
+its Reports list (charts, KPI rows, tables, prose). The machine publishes one by
 landing a file at `workspace/reports/<id>.json`. **The write is the finish line:**
 the runtime's uploader (a 2-minute timer) ships it and moves the file to
 `reports/sent/`, or to `reports/failed/` plus a line in
@@ -67,7 +67,7 @@ _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # the uploader's call, and it reports through reports/upload_errors.log.
 _FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 FILES_SUFFIX = ".files"
-# ≈ 40 CJK / 80 Latin: a shared page would cut a title at ~50 CJK, so this leaves a margin.
+# ≈ 40 CJK / 80 Latin: the public share page cuts a title at ~50 CJK, so this leaves a margin.
 RESEARCH_TITLE_WIDTH = 80
 
 
@@ -82,7 +82,7 @@ def _research_warnings(title, blocks):
     width = sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in str(shown))
     if width > RESEARCH_TITLE_WIDTH:
         out.append(f"research title is {width} wide (CJK counts 2), over {RESEARCH_TITLE_WIDTH}; "
-                   "the sidebar truncates it, state the claim shorter "
+                   "the report list truncates it, state the claim shorter "
                    "(references/reports.md 7b)")
     i = 1
     if i < len(blocks) and isinstance(blocks[i], dict) and blocks[i].get("variant") == "lead":
@@ -91,6 +91,25 @@ def _research_warnings(title, blocks):
         out.append("research report has no kpi_row right after the lead; its first item is the "
                    "key number readers see first (references/reports.md 7b)")
     return out
+
+
+def _shareable_warnings(type, meta):
+    """`meta.shareable` (references/reports.md 7b B7) is the research self-check record and no
+    longer gates sharing, so a missing one only nags; a non-bool is refused by the api."""
+    return _shareable_only(type, meta)
+
+
+def _shareable_only(type, meta):
+    if "shareable" not in meta:
+        return ["research report has no meta.shareable; record it true or false on purpose "
+                "(references/reports.md 7b B7)"] if type == "research" else []
+    if not isinstance(meta["shareable"], bool):
+        return [f"meta.shareable must be true or false, got {meta['shareable']!r}; the api "
+                "refuses the report (references/reports.md 7b B7)"]
+    if type != "research":
+        return [f"meta.shareable has no meaning on a {type} report, only on research; "
+                "leave it out (references/reports.md 7b B7)"]
+    return []
 
 
 def _write_bytes(path, data):
@@ -119,15 +138,17 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
                 deterministic id makes a re-run idempotent, and a per-run id
                 (a date, a timestamp) keeps every run. Do NOT use the runtime's
                 own ids (`daily-YYYY-MM-DD`, `wk-YYYY-MM-DD`).
-    title       1–200 chars; shown in the sidebar list and the push notification.
+    title       1–200 chars; shown in the report list and the push notification.
     blocks      the block list (see `references/reports.md`). A `meta` block is
                 prepended unless blocks[0] already is one.
-    type        `performance` / `morning` / `research` — sidebar grouping.
+    type        `performance` / `morning` / `research` — report list grouping.
     report_type display string for the report header ("績效週報", "一次性");
                 defaults to `type`.
     created_at  unix seconds, int; defaults to now.
     meta        extra props for the generated meta block (`period`, `account`,
-                `benchmark`, `origin`, `machine`, `extra`).
+                `benchmark`, `origin`, `machine`, `extra`, and on research the
+                `shareable` boolean of references/reports.md 7b B7, which makes the
+                report schema 1.3).
     images      `{file name: bytes}` for the picture sidecar `<id>.files/`, named
                 from an `image` block as `{"type": "image", "file": "perm.png",
                 "alt": ...}`. The uploader carries the bytes and swaps `file` for
@@ -141,7 +162,9 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
     the platform accepts. A rejected report lands in `reports/failed/` with the
     api's message (it names the offending field path) in `upload_errors.log`.
     For `type="research"` two points of the §7b skeleton (title width, a `kpi_row`
-    right after the lead) are printed as `WARNING:` lines — advice, never a refusal.
+    right after the lead) and a missing `meta.shareable` are printed as `WARNING:`
+    lines, as is a `shareable` that is not a bool or sits on another type — advice,
+    never a refusal.
     """
     if not isinstance(report_id, str) or not _ID_RE.fullmatch(report_id):
         raise ValueError(f"report id {report_id!r} must match [A-Za-z0-9_-]{{1,64}}")
@@ -158,10 +181,15 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
                 "report_type": report_type or type, "generated_at": created_at}
         head.update(meta or {})
         blocks.insert(0, head)
-    # 1.2 only when a candlestick is present: a report without one stays 1.1, so it is
-    # still accepted by an api that has not been upgraded to 1.2 yet.
-    version = "1.2" if any(isinstance(b, dict) and b.get("type") == "candlestick"
-                           for b in blocks) else "1.1"
+    # Each bump only when its content is present, so a report without it is still accepted
+    # by an api one version behind. The 1.3 meta flags count by presence: an explicit false
+    # is still a prop a 1.1/1.2 validator refuses.
+    if "shareable" in blocks[0] or "involves_futures" in blocks[0]:
+        version = "1.3"
+    elif any(isinstance(b, dict) and b.get("type") == "candlestick" for b in blocks):
+        version = "1.2"
+    else:
+        version = "1.1"
     doc = {"schema_version": version, "id": report_id, "type": type,
            "title": title, "created_at": created_at, "blocks": blocks}
 
@@ -192,14 +220,15 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
         raise
     # ASCII only: a report job's stdout goes to run.log in the Windows locale codec (cp950),
     # and an unencodable advisory line would fail a run whose report is already written.
-    if type == "research":
-        for w in _research_warnings(title, blocks):
-            print(f"WARNING: {w}")
+    warnings = _research_warnings(title, blocks) if type == "research" else []
+    warnings += _shareable_warnings(type, blocks[0])
+    for w in warnings:
+        print(f"WARNING: {w}")
     # Agents re-read reports/<id>.json to "verify" and hit FileNotFoundError once the uploader
     # has moved it (uid=1: five times in three turns) — say where the file goes before they try.
     print(f"[report] {report_id}.json written. The uploader moves it to reports/sent/, so do not "
           f"read reports/{report_id}.json back; if you need it again, open "
-          f"reports/sent/{report_id}.json. It appears in the workspace sidebar shortly. "
+          f"reports/sent/{report_id}.json. It appears in the workspace Reports list (More > Reports) shortly. "
           "Nothing to check; reply now.")
     return path
 

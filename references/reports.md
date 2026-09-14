@@ -1,7 +1,7 @@
 # Reports — publishing a rendered report to the workspace
 
 A **report** is a JSON document this machine writes and the platform renders in the
-web workspace sidebar: KPI rows, charts, tables and prose, laid out by the web from
+web workspace's Reports list (More › Reports): KPI rows, charts, tables and prose, laid out by the web from
 structured data — not a screenshot, not a wall of Telegram text. Use it for anything
 the user will want to read again later: a performance review, a morning briefing on a
 watchlist, an MCPT / research write-up, a post-mortem of a live week.
@@ -10,9 +10,22 @@ The platform pushes a short summary notification once the report is stored, so t
 report reaches the user even when this machine is asleep — never send your own
 Telegram message about a report as well, that duplicates every alert.
 
-**There is no public share link for any report.** If a user asks to share one publicly, say
-reports cannot be shared publicly — do not promise or speculate whether or when that will
-exist, and never point them to a share button.
+**A `research` or `morning` report (a morning brief, a close recap, a weekly, …) can be
+shared publicly, and only by the user; a `performance` report never can.** In the workspace,
+the report's title bar has a 「分享」 button; the user confirms each report on its own (a
+consent checkbox, then confirm) and gets a link `blave.org/<lang>/r/<code>`. What is public is
+a snapshot of the report at that moment: writing the same id again later does not change it.
+While a report is public its title bar shows a public status row instead; once you have
+rewritten it, the workspace adds a notice with a 「檢查後更新公開版本」 button, which updates
+the public version under the same link. They can cancel at any time;
+sharing again after cancelling gives a new link. Deleting the machine or the account revokes
+every public link. The platform does not review content: whether a report is fit to publish
+is the user's call, made in the consent checkbox. Nothing you write into a report (including
+`meta.shareable`, §7b B7) decides whether it can be shared, so never tell the user a research or
+morning report cannot be shared, and never hold one back for that reason.
+**You cannot share, update or cancel a report for the user** — there is no API or tool for it
+on this machine; point them to the button. Never promise view counts, a report-abuse flow,
+takedown notices or anything else not described here.
 
 §1–§6 are the **format** contract; **§7 is the content bar** — what a report has to
 actually say to be worth reading. A report can satisfy every rule in §1–§6 and still
@@ -74,12 +87,12 @@ status("mcpt-2317-20260901")   # 'pending' | 'sent' | 'failed: <reason>' | 'unkn
 write a file, so it must not be a path) — every other rule is enforced downstream,
 where the error message is more precise than anything this side could reproduce. It
 writes the pictures before the JSON, in the order the drop dir requires. For
-`type="research"` it also prints two advisory `WARNING:` lines from the §7b skeleton
-(title too long, no `kpi_row` right after the lead). They never stop the write.
+`type="research"` it also prints advisory `WARNING:` lines from §7b (title too long, no
+`kpi_row` right after the lead, no `meta.shareable` — B7). They never stop the write.
 
 **The write is the finish line.** Once the JSON is in the drop dir the report is
 produced and you are done — tell the user it has been produced and will show up in the
-workspace sidebar shortly, then move on. Shipping it is the runtime's job: a 2-minute
+Reports list (More › Reports in the workspace) shortly, then move on. Shipping it is the runtime's job: a 2-minute
 timer picks the file up, so in the normal case the report appears within about two
 minutes. **Do not poll `status()`, and do not wait for `pending` to turn into `sent`
 before replying** — every extra tool call there is the user paying to watch a timer that
@@ -97,7 +110,7 @@ and already pruned from `sent/`".
 
 Old BlaveClaw machines (pre-Blave-Agent runtime) have no uploader; files just
 accumulate in `reports/`. If `reports/sent/` does not exist on this machine, do not tell
-the user the report will appear in the sidebar.
+the user the report will appear in the Reports list.
 The sidecar is newer than the rest of this page: a runtime that predates it passes a
 `file` field straight through to the api, which refuses it as an unknown prop. If a
 report lands in `failed/` for that reason, this machine's runtime is too old — upload
@@ -116,7 +129,7 @@ from lib.report_templates import tw_market_brief, tw_close_brief, crypto_market_
 
 pack = tw_market_brief()                 # today (Taipei); headers come from the workspace .env
 print(pack.describe())                   # every figure the pack carries, one line each — cite these
-#   [tw-market-20260902] 台股大盤晨報          ← title has no date: the sidebar row shows when it was made
+#   [tw-market-20260902] 台股大盤晨報          ← title has no date: the list row shows when it was made
 #     加權指數: 46,948.72(+1.78%),前 20 日高 46,512.35
 #     三大法人: 外資 +267.0 億(昨 -144.0 億)、投信 +131.0 億、自營 +163.0 億、合計 +561.0 億
 #     外資期貨淨多單: +12,300 口(+2,500 口,09-01)
@@ -231,9 +244,9 @@ reads `blave_api_key` / `blave_secret_key` from the workspace `.env` (see `refer
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | `"1.2"` when the report contains a `candlestick` block, `"1.1"` otherwise. `write_report` sets it for you; hand-written JSON must follow the same rule — a `candlestick` under `"1.1"` is refused. |
+| `schema_version` | string | `"1.3"` when the `meta` block carries `shareable` or `involves_futures` (`true` **or** `false`, §7b B7; 1.3 also covers `candlestick`); otherwise `"1.2"` when the report contains a `candlestick` block; `"1.1"` otherwise. `write_report` sets it for you; hand-written JSON must follow the same rule — a `candlestick` under `"1.1"`, or either flag under `"1.1"` / `"1.2"`, is refused. |
 | `id` | string | `[A-Za-z0-9_-]{1,64}`, equal to the file name stem. |
-| `type` | string | `performance` / `morning` / `research` — sidebar grouping. |
+| `type` | string | `performance` / `morning` / `research` — report list grouping. **Hard rule: any report that carries the user's account assets, positions, orders or live strategy P&L is `performance`, even when it is shaped as a morning brief or a close recap.** `research` and `morning` reports can be shared publicly by the user and `performance` cannot, so a wrong `type` publishes account numbers. |
 | `title` | string | 1–200 chars. |
 | `created_at` | int | **unix seconds, UTC** — never milliseconds, never a string. |
 | `blocks` | array | 1–120 blocks. |
@@ -253,10 +266,10 @@ the small print below it — put the measurement basis there).
 
 | Block | Required props | Limits / notes |
 |---|---|---|
-| `meta` | `title`, `report_type`, `generated_at` | **Exactly one, always first.** Optional: `period` `{from, to}` display strings ≤32 (`"08/25"`), `account` `{aum: number, currency}`, `benchmark`, `origin` (`scheduled`/`chat`), `machine`, `extra` (≤3 `{label, value}`). `period` + `account` + `benchmark` + `extra` ≤4 header cells in total. |
+| `meta` | `title`, `report_type`, `generated_at` | **Exactly one, always first.** Optional: `period` `{from, to}` display strings ≤32 (`"08/25"`), `account` `{aum: number, currency}`, `benchmark`, `origin` (`scheduled`/`chat`), `machine`, `extra` (≤3 `{label, value}`), `shareable` (boolean, `research` only — §7b B7); `involves_futures` is still accepted but read by nothing, so leave it out. `period` + `account` + `benchmark` + `extra` ≤4 header cells in total. |
 | `kpi_row` | `items[{label, value, tone}]` | 1–6 items; **the first is the focus** and renders largest. `label` ≤40, `value` a formatted string, `tone` = `pos`/`neg`/`neutral` (unsigned numbers such as Sharpe or win-rate are `neutral` — a wall of green means nothing). Optional `unit` ≤16, `delta`. |
 | `line_chart` | `series[{name, role, points}]` | 1–4 series; `role` = `primary` (solid, **at most one**) or `benchmark` (dashed); `points` = 1–5000 `[t, v]`, `t` unix seconds int, `v` finite number. Optional `y_unit` (≤8, see *Axis units* below), `bands` (≤2 `{from, to, label}`, unix seconds, label ≤32) and `reflines` (≤4 `{y, label, emphasis}`, `emphasis: true` = red loss level). |
-| `candlestick` | `candles` | 2–120 bars `[t, open, high, low, close]`; `t` unix seconds int, **strictly increasing**; the four prices finite numbers with `low ≤ min(open, close)` and `max(open, close) ≤ high` on every bar. Optional `y_unit` and `reflines` (≤4 horizontal price levels such as the prior 20-day high/low), both exactly as on `line_chart`. No `bands`, no volume pane, no moving-average overlay. The x-axis is one slot per bar, not real time (no weekend or overnight gaps), so it does **not** line up date-for-date with a neighbouring `line_chart` / `drawdown` — expected, not a bug. Needs `schema_version` `"1.2"`. `lib/report_templates.candlestick(title, df, y_unit=…, reflines=…)` builds one from an OHLC DataFrame. |
+| `candlestick` | `candles` | 2–120 bars `[t, open, high, low, close]`; `t` unix seconds int, **strictly increasing**; the four prices finite numbers with `low ≤ min(open, close)` and `max(open, close) ≤ high` on every bar. Optional `y_unit` and `reflines` (≤4 horizontal price levels such as the prior 20-day high/low), both exactly as on `line_chart`. No `bands`, no volume pane, no moving-average overlay. The x-axis is one slot per bar, not real time (no weekend or overnight gaps), so it does **not** line up date-for-date with a neighbouring `line_chart` / `drawdown` — expected, not a bug. Needs `schema_version` `"1.2"` or later. `lib/report_templates.candlestick(title, df, y_unit=…, reflines=…)` builds one from an OHLC DataFrame. |
 | `drawdown` | `points` | 1–5000 `[t, v]`, `v` a **negative percent** (−9.84 = −9.84%). Optional `maxdd` `{value, from, to}` (unix seconds). No unit field — the contract pins this chart to negative percent. |
 | `heatmap` | `variant`, `values` (+ `rows`,`cols` or `labels`) | `variant` = `calendar` (needs `rows` ≤40 years, `cols` ≤20 months — an annual / total column goes in `cols` too) or `matrix` (needs `labels` ≤40, values −1…1). `values` is 2-D, shaped rows×cols / labels×labels; `null` renders as an em-dash (future months, the diagonal). Optional **`emphasis_cols`** (**calendar only**): unique integer indices into `cols` marking the columns to render with added weight — that annual / total column. The web cannot tell which column is the total (`cols` is plain strings and not every calendar has one), so say it here. On a `matrix` heatmap `emphasis_cols` is an unknown prop → refused. |
 | `bar_chart` | `variant` + `items` or `segments` | `variant` = `bars` (`items` ≤60 `{label, value}`, signed, zero axis) or `stacked` (`segments` **2–4** `{label, value}`, value ≥0, normalised into widths). Only four category colours exist, so a 5th segment would repeat one. **Merging the tail into an "Other" segment is your decision, not the web's** — it cannot know which segments to fold or how to say so; fold them here and explain the fold in `caption`. No unit field on either variant. |
@@ -444,7 +457,10 @@ transient failure. Same status code, different channel, opposite handling.
    `reports/<id>.files/` and was written before the report JSON.
 10. A `candlestick` holds 2–120 bars, its `t` strictly increasing, and every bar has
     `low ≤ min(open, close)` and `max(open, close) ≤ high`; it only appears in a report whose
-    `schema_version` is `"1.2"`.
+    `schema_version` is `"1.2"` or `"1.3"`.
+11. `shareable` and `involves_futures` sit only on `meta`, are `true` or `false` (never a
+    string), belong on `type: "research"` only, and only appear in a report whose
+    `schema_version` is `"1.3"`.
 
 ## 7. Content standards — the report has to say something
 
@@ -562,9 +578,9 @@ section headings in the report's language.
   reading of the data (§7 rule 1), never a call: no direction for the days ahead, no
   target, no timing (§1b's levels-are-statistics rule applies to the title too).
   `write_report` copies `title` into
-  `meta.title`, so this governs both. *Why:* the title is what the sidebar and the
-  notification show, and for research it would head a shared page (B), where a title past
-  about 50 CJK characters gets cut; 40 leaves room. A topic name tells a reader
+  `meta.title`, so this governs both. *Why:* the title is what the report list and the
+  notification show, and for research it heads the public page when the user shares it
+  (B), where a title past about 50 CJK characters gets cut; 40 leaves room. A topic name tells a reader
   who sees only the title nothing. The api's 1–200 limit (§2) still stands; this is a
   readability cap, not a format rule.
 - **A2. The lead: one falsifiable claim** (§7 rule 1), the `text` block with
@@ -589,12 +605,12 @@ section headings in the report's language.
   report it is the figure behind the lead (「法人淨賣超 367 億」), not the index level: a
   template brief opens on 加權指數 because the template fixes its KPI row, and yours chooses
   its own. *Why:* it is the first figure a
-  reader sees, and a shared page would show it as the key number. A context figure there,
+  reader sees, and a public page shows it as the key number. A context figure there,
   such as a price level or a sample size, advertises a claim it does not support.
 - **A5. The first chart block is the one that shows the claim**, not a context chart. A
   price chart is a `candlestick` (§3); anything else uses its native block. *Why:* it is
-  the first thing a reader looks at, and for research it would be the main image of a
-  shared page.
+  the first thing a reader looks at, and for research it is the main image of a public
+  page.
 - **A6. Key points: one `text` block with 3–5 bullets, each one sentence carrying one
   number** (§7 rule 2, the swap test). *Why:* a reader who stops here should still hold
   the argument.
@@ -612,11 +628,10 @@ section headings in the report's language.
 
 ### B. Research rules — `type: "research"` only
 
-Write a research report as if it will be shared publicly. This is an internal design
-assumption, not something to tell the user (see the top of this page). A shared page would
-be read by someone who never saw the chat, and it would lead with the **title**, the
-**lead**, the **first item of the first `kpi_row`** and the **first chart**, so A1, A2, A4
-and A5 have to carry the claim on their own.
+Write every research report so it can be shared publicly: the user can make it public from
+the workspace (see the top of this page). A public page is read by someone who never saw the
+chat, and it leads with the **title**, the **lead**, the **first item of the first
+`kpi_row`** and the **first chart**, so A1, A2, A4 and A5 have to carry the claim on their own.
 
 - **B1. Findings, not calls: a hard line.** A research report states findings as historical
   statistics and conditions ("in the last 10 launches the median 10-day return was
@@ -626,7 +641,9 @@ and A5 have to carry the claim on their own.
   investment advisory rules, telling that public when or at what price to trade a named
   instrument can amount to running an advisory business without a licence. If the user
   explicitly asks for such a call, write it, but keep it out of the title, the lead and the
-  `kpi_row`, and say in chat that a report carrying it must not be published.
+  `kpi_row`, and set `shareable` to `false` (B7). If the user then wants to share it, say
+  once, in one sentence, that a version without the call is safer to publish, and offer to
+  write it; the decision stays theirs.
 - **B2. Historical only, never connected to today.** A research report states the
   historical finding and stops there. It does not say the condition is being met now
   ("margin has risen for 8 days in a row"), and it does not project the next N days from
@@ -643,7 +660,7 @@ and A5 have to carry the claim on their own.
   ahead.
 
   B1 and B2 win over §7 wherever they meet (§7's examples read today's market, which fits
-  a morning brief, not a report that may later be shared publicly), and they govern B3–B6.
+  a morning brief, not a research report), and they govern B3–B6.
 - **B3. Evidence against: a mandatory section** (「哪些數據不支持這個結論」). List the
   figures that do not fit the claim, each with its number and what it does to the claim's
   strength. If you found none, list what you checked. *Why:* §7 rule 4 — if every figure
@@ -681,14 +698,41 @@ and A5 have to carry the claim on their own.
   section. This is not a word count. A section the data cannot fill says "the data is not
   sufficient to judge X" plus what would settle it (§7 rule 6). That is a complete section;
   padding is not.
+- **B7. `meta.shareable`: your self-check record on every research report.** A boolean on the
+  `meta` block (`write_report(..., meta={"shareable": ...})`) recording whether the report,
+  as written, meets the research rules in full. It is a record, not a gate: the workspace
+  and the platform do not read it, and a `false` report can still be shared by the user.
+  Never name the field to the user, and never tell them a report cannot be shared because of
+  it. Set it on purpose every time.
+  - **`true`** only when all of these hold: B1 and B2 hold everywhere in the report, not
+    only in the title, the lead and the `kpi_row`; B3–B5 are all there; and it cites,
+    backtests or describes no strategy sold in the Marketplace (`references/marketplace.md`
+    › *Strategy categories*), whether the user bought it or sells it.
+  - **`false`, always**, when any of these is true: it gives buy / sell timing, a price
+    target, an entry, exit, support or resistance level, or a long / short call on a named
+    instrument — including one the user explicitly asked for (B1's exception); it says a
+    condition is being met now or projects from today (B2); it cites a Marketplace strategy
+    as above (official, shared-with-me and unlisted private strategies do not count); or any
+    of B1–B5 is missing. When unsure, `false`.
+  - `research` only. Leave it off `morning` and `performance`.
+  - The flag records the report; it never changes what you write. B1–B6 apply to every
+    research report whatever the flag says, and you do not drop what the user asked for to
+    earn a `true`.
+  - It needs `schema_version` `"1.3"` (§2); `write_report` sets that.
+
+  *Why:* a shared research report is read by people outside the chat, and writing the flag
+  down forces an explicit check against B1–B5 each time. A report that names a trade, reads
+  today's market or promotes a paid strategy whose seller earns a share of each sale must
+  never be recorded as `true`.
 
 **Order in a research report:** `meta` → lead (A2) → `kpi_row` (A4) → first chart (A5) →
 key points (A6) → 3–5 argument sections (A7) → evidence against (B3) → robustness (B4) →
 what would break this (B5) → `footnote` (A8).
 
 For a `research` report only, `write_report` prints a `WARNING:` (it never refuses) when
-the title is over the A1 cap or when the lead is not followed by a `kpi_row`. Everything
-else here is yours to check, in research and in a hand-written morning report alike.
+the title is over the A1 cap, when the lead is not followed by a `kpi_row`, or when
+`meta.shareable` is missing (B7; a reminder to record it, not a sharing gate). Everything else here is yours to check, in research and in
+a hand-written morning report alike.
 
 ## 8. Scheduled reports — a job directory, not a cron line
 
