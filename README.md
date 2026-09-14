@@ -42,8 +42,10 @@ BBAC-D/
 ├── 文档模板.md                  59 条规则 v4.0 + v4.4 实测校准附录(自动生成)
 ├── VERSION                      当前版本标记(版本号单一来源)
 ├── AGENTS.md                    给 AI agent 的项目操作说明
+├── auth_service.py              独立鉴权微服务(token/session);仅旧 openclaw 运行时启动,
+│                                Blave Agent 运行时不运行它,不属于主系统
 │
-├── core/                         ★ 7 个主入口(下),其余为辅助/绘图/治理脚本
+├── core/                         ★ 9 个主入口(下),其余为辅助/绘图/治理脚本
 │   ├── single_symbol_backtest.py 单币种回测(catalog 驱动)
 │   ├── run_batch.py             统一批量入口(--workers 并行)
 │   ├── cross_period_analysis.py 跨周期统计
@@ -51,7 +53,8 @@ BBAC-D/
 │   ├── update_doc_v43.py        报告写回 文档模板.md(幂等)
 │   ├── coin_screener.py         批量币种筛选
 │   ├── validate_strategy.py     三层验证(IS/OOS/MCPT)
-│   └── prune_cache.py           cache 治理(默认干跑,--apply 才动手)
+│   ├── prune_cache.py           cache 治理(默认干跑,--apply 才动手)
+│   └── calibrate_directions.py  从批量回测投票方向,回写 catalog 的 direction_best
 │
 ├── rules_catalog/               59 条结构化规则(catalog 唯一真理源)
 ├── symbols.xlsx                 币池(539 币)
@@ -64,15 +67,20 @@ BBAC-D/
 ├── examples/                    独立参考策略(btc/台股/台指期,写同类前先读)
 ├── strategies/                  用户策略 + TEMPLATE_A/C
 ├── apps/vote_dashboard/         vote 面板(Flask + desktop,独立于 strategies/)
-├── skills/                      Blave API / 交易所 / 台股
+├── skills/                      blave-quant(Blave API/交易所/台股) + bbac-rules(59 条规则扫描)
 ├── references/                  部署/策略/市场参考文档
 ├── tests/                       check_*.py 自包含校验(CI 全跑,无需网络)
-└── vendor/chan/                 缠论框架(内嵌,chan_plot 用)
+├── vendor/chan/                 缠论框架(内嵌,chan_plot 用)
 │
 ├── cache/
 │   ├── v4.4_calibration.md      ★ 实测校准报告(analyze_results 产物)
 │   ├── csv/                     回测结果(平铺布局是硬编码契约,勿移动文件)
 │   └── *.parquet                Blave 原始数据缓存
+│
+├── archive/                     已归档,不参与运行:
+│   ├── live_eval/               实时行情评估系统(自带 core/ + 形态识别 + 综合打分;
+│   │                            方法学不同于主系统,未合并)
+│   └── backups/                 旧策略快照(仅 stats/validation.json,无 strategy.py)
 │
 ├── requirements.in              依赖宽松声明(改依赖只动这里)
 ├── requirements.lock            3.12 hash 锁定快照(uv pip compile 生成)

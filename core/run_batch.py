@@ -42,9 +42,12 @@ from lib.data import get_all_headers, set_global_limiter, _KeyAwareRateLimiter
 # DEFAULT_SYMBOLS is imported from lib.symbols above.
 # To add a coin, edit lib/symbols.py once.
 
-# 限流默认值(总预算 = n_keys × rps_per_key;服务器 500/5min ≈ 1.67 req/s/key,
-# 6 keys → ~10 req/s。低于此预算的 worker 数不会触发 429 指数退避。)
-DEFAULT_RPS_PER_KEY = 2.0
+# 限流默认值(总预算 = n_keys × rps_per_key;服务器 500/5min = 1.67 req/s/key,
+# 口径同官方 blaveclaw-config lib/data.py: per-IP 500/5min;blave-quant SKILL.md
+# 的 "100 req / 5 min" 是旧值,已以 config 仓库为准)。
+# 9 keys → ~15 req/s。低于此预算的 worker 数不会触发 429 指数退避;
+# 实测 2.0 超预算触发 429 反而更慢,故取 1.67 刚好卡预算线。)
+DEFAULT_RPS_PER_KEY = 1.67
 
 
 def run_one(sym, days, hold):

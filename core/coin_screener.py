@@ -46,8 +46,11 @@ DEFAULT_OUT_DIR    = 'cache/csv'
 DEFAULT_INTERVAL   = '1h'
 DEFAULT_WORKERS    = 20
 DEFAULT_DAYS       = 30
-# 限流默认值(per-key):每秒 2 个请求,key 切换间隔 0.3s,批 100 币 sleep 5s
-DEFAULT_RPS_PER_KEY    = 2.0
+# 限流默认值(per-key):每秒 1.67 个请求(= 服务器 500/5min 预算,
+# 口径同官方 blaveclaw-config lib/data.py: per-IP 500/5min;blave-quant
+# SKILL.md 的 "100 req / 5 min" 是旧值,已以 config 仓库为准),
+# key 切换间隔 0.3s,批 100 币 sleep 5s。实测 2.0 超预算触发 429 反而更慢。
+DEFAULT_RPS_PER_KEY    = 1.67
 DEFAULT_KEY_COOLDOWN   = 0.3
 DEFAULT_BATCH_SIZE     = 100
 DEFAULT_BATCH_SLEEP    = 5.0
@@ -139,7 +142,8 @@ def fetch_all_coins_parallel(coins, start, end, workers=DEFAULT_WORKERS,
     用 get_all_headers() 给每个 worker 分配不同 API key,避免单 key 限流。
 
     限流参数:
-      rps_per_key: 每秒每 key 允许的请求数(默认 2/s,= 6 keys 合计 12/s)
+      rps_per_key: 每秒每 key 允许的请求数(默认 1.67/s,= 服务器 500/5min 预算;
+                   口径同官方 blaveclaw-config lib/data.py,非 blave-quant SKILL.md 的 100/5min)
       key_cooldown: 同一 key 连续请求间隔(秒)
       batch_size:   每批跑多少币;批间 sleep batch_sleep 秒,等限流冷却
       batch_sleep:  批间 sleep 秒数
@@ -449,7 +453,7 @@ def main():
     parser.add_argument('--out', default=None, help='输出 CSV 路径')
     # 限流参数
     parser.add_argument('--rps-per-key', type=float, default=DEFAULT_RPS_PER_KEY,
-                        help=f'每 key 每秒请求数 (default {DEFAULT_RPS_PER_KEY}; 6 keys → 12 req/s)')
+                        help=f'每 key 每秒请求数 (default {DEFAULT_RPS_PER_KEY}; = 服务器 500/5min 预算,同官方 blaveclaw-config lib/data.py)')
     parser.add_argument('--key-cooldown', type=float, default=DEFAULT_KEY_COOLDOWN,
                         help=f'同 key 连续请求最小间隔秒 (default {DEFAULT_KEY_COOLDOWN})')
     parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE,

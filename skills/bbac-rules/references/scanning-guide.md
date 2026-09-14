@@ -38,6 +38,7 @@ python core/coin_screener.py --rules D01 --rps-per-key 1.5 --batch-size 50 --bat
 | `--days` | 30 | 回看天数(决定触发率统计窗口) |
 | `--direction` | `long` | `long`/`short`/`both`;`both` = 不覆盖,用每条规则自己的方向 |
 | `--top` | 20 | 每规则输出 top N |
+| `--out` | (无) | 结果写 CSV 的路径;不给就只打印到终端 |
 | `--threshold` | `default` | `default` = 规则固定阈值;`adaptive` = 每币 p90 |
 | `--workers` | 20 | 并行 worker |
 | `--rps-per-key` | 2.0 | 每 key 每秒请求数(6 keys → 12 req/s) |
@@ -82,9 +83,11 @@ python core/coin_screener.py --rules D01 --rps-per-key 1.5 --batch-size 50 --bat
   提示检查 `cond_builder` 依赖的列(`abs_HC`/`hc_delta`/`ret_1h` 等)是否在 `fetch_coin_data` 生成。
   修过 31/45 条规则静默失效的 bug,靠的就是这个显式报告。
 
-## K/L/M 新规则(未回测)
+## K/L/M 新规则(已部分校准,小样本)
 
-K01-K03 / L01-L03 / M01-M03 共 9 条是 v4.4 新增,**未经回测校准**。
-- `calibration.json` 没有它们的条目 → `direction_best` 回退到 `direction_doc`。
-- 扫描可用,但方向用的是文档推演值,不是实测值。
-- 标记见 `references/rules-catalog.md` 方向校准表的 🆕 未回测 行。
+K01-K03 / L01-L03 / M01-M03 共 9 条是 v4.4 新增。其中 8 条已从 `batch_50_summary.csv` 投票校准 `direction_best`(M01 因触发不足 min_trades 无数据,回退 `direction_doc`)。
+- 校准已写进 `rules_catalog/calibration.json` → `direction_best` 自动注入。
+- **样本小**(每规则 1–7 个币种),置信度低于 A–J(后者每规则也只有 1–16 个币种)。
+- K/L/M 在 `cross_period_rule_summary.csv` 里**一行都没有** —— 这 9 条只有单周期数据,没有跨周期验证。
+- 扫描可用;方向置信度请对照 `references/rules-catalog.md` 方向校准表的「小样本」标注。
+- 5 条翻转(K01/K03/L01/L03/M03)、3 条一致(K02/L02/M02)、1 条无数据(M01)。

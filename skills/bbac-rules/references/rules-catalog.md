@@ -3,7 +3,8 @@
 ## 方向校准表（最重要）
 
 > **扫描时必须用 `direction_best`，不要用 `direction_doc`。**
-> 19 条规则文档方向与实测方向相反。
+> 共 **24 条**翻转 = 19 条 A–J（`batch_50_summary.csv`，44 个币种）+ 5 条 K/L/M（小样本，1–7 币）。
+> 占 58 条已回测规则的 41%。下表「状态」列已逐条标注，K/L/M 另标「小样本」。
 
 | 规则 | 名称 | 文档方向 | 实测方向 | 状态 |
 |---|---|---|---|---|
@@ -57,15 +58,15 @@
 | J01 | BTC 联动 | long | long | 🔒 skip |
 | J02 | BTC 背离 | long | long | 🔒 skip |
 | J03 | 板块内联动 | long | long | 🔒 skip |
-| K01 | 放量突破 | long | long | 🆕 未回测 |
-| K02 | 缩量回调 | long | long | 🆕 未回测 |
-| K03 | 量价背离 | short | short | 🆕 未回测 |
-| L01 | HC-TI 背离 | short | short | 🆕 未回测 |
-| L02 | 巨鲸逆势建仓 | long | long | 🆕 未回测 |
-| L03 | 情绪筹码极端背离 | short | short | 🆕 未回测 |
-| M01 | TI 极端反转 | long | long | 🆕 未回测 |
-| M02 | HC 过度集中回归 | short | short | 🆕 未回测 |
-| M03 | 爆仓+筹码反转 | long | long | 🆕 未回测 |
+| K01 | 放量突破 | long | **short** | ⚠️ 翻转(小样本) |
+| K02 | 缩量回调 | long | long | ✅ 一致(小样本) |
+| K03 | 量价背离 | short | **long** | ⚠️ 翻转(小样本) |
+| L01 | HC-TI 背离 | short | **long** | ⚠️ 翻转(小样本) |
+| L02 | 巨鲸逆势建仓 | long | long | ✅ 一致(小样本) |
+| L03 | 情绪筹码极端背离 | short | **long** | ⚠️ 翻转(小样本) |
+| M01 | TI 极端反转 | long | long | ⏸️ 无数据(fallback) |
+| M02 | HC 过度集中回归 | short | short | ✅ 一致(小样本) |
+| M03 | 爆仓+筹码反转 | long | **short** | ⚠️ 翻转(小样本) |
 
 ---
 
@@ -114,7 +115,7 @@
 | D03 | 主力吸筹(加强) | `HC > hc_th & MS < -ms_th & abs(ret_24h) < 0.01` |
 | D04 | 主力派发(加强) | `HC < -hc_th & MS > ms_th & new_high_24h` |
 
-### E: 板块联动 (6, 3 skip)
+### E: 板块联动 (6, 2 skip)
 
 | ID | 名称 | 条件 | skip |
 |---|---|---|---|
@@ -134,7 +135,7 @@
 | F03 | HC 强 + 价格横盘 | `HC > hc_th & abs(ret_24h) < 0.01` |
 | F04 | MS 极度乐观 + 价格新高 | `MS > ms_th & new_high_24h` |
 | F05 | MS 极度悲观 + 价格新低 | `MS < -ms_th & new_low_24h` |
-| F06 | 长上影线 + 高位 | shadow_ratio & `ret_24h > 0.05` |
+| F06 | 长上影线 + 高位 | `(High − max(Open,Close)) > shadow_ratio × (max−min)` & `ret_24h > 0.05` |
 
 ### G: 极端反转 (5)
 

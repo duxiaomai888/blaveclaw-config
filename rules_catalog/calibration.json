@@ -51,6 +51,15 @@
     "I03": "short",
     "J01": "long",
     "J02": "long",
-    "J03": "long"
+    "J03": "long",
+
+    "K01": "short",
+    "K02": "long",
+    "K03": "long",
+    "L01": "long",
+    "L02": "long",
+    "L03": "long",
+    "M02": "short",
+    "M03": "short"
   }
 }

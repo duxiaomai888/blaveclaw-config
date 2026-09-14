@@ -76,8 +76,8 @@ BASE      = 'https://api.blave.org'
 _CACHE_DIR = Path(__file__).parent.parent.parent / 'cache'
 
 # ── Blave API key rotation ─────────────────────────────────────────────────
-# .env may hold up to 8 key pairs (blave_api_key / blave_secret_key through
-# _key8/_secret_key8). Each pair is a distinct per-IP rate-limit budget, so a
+# .env may hold up to 20 key pairs (blave_api_key / blave_secret_key through
+# _key20/_secret_key20). Each pair is a distinct per-IP rate-limit budget, so a
 # cold multi-year fetch that fans out over chunk workers hammers one key —
 # hitting 429s and exponential backoff. Rotating per REQUEST spreads the same
 # traffic over every key present (request-level rotation). We also drop a key
@@ -102,7 +102,7 @@ def _load_key_pairs():
     except Exception:
         pass
     pairs = []
-    for i in [''] + [str(n) for n in range(2, 9)]:
+    for i in [''] + [str(n) for n in range(2, 21)]:
         api = os.environ.get(f'blave_api_key{i}')
         if api:
             pairs.append((api, os.environ.get(f'blave_secret_key{i}', '') or ''))
@@ -263,7 +263,10 @@ def _drop_bad_key(headers=None):
 def _retry_get(url, max_retries=6, **kwargs):
     """GET with exponential backoff on transient failures (2, 4, 8, 16, 32, 64 s).
 
-    Retries 429 (Blave per-IP rate limit, 500/5min), 5xx (incl. 503, which the
+    Retries 429 (Blave per-IP rate limit, 500/5min — authoritative figure per
+    official blaveclaw-config lib/data.py; the blave-quant SKILL.md's
+    "100 req / 5 min" is a legacy/conservative value superseded by the config
+    repo), 5xx (incl. 503, which the
     API returns when upstream FinMind itself rate-limits), and connection/read
     timeouts (a slow batch endpoint under load — e.g. a big multi-symbol crypto
     kline request — reads exactly like this; previously an unlucky timeout just

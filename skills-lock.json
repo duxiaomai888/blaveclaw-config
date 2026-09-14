@@ -6,6 +6,12 @@
       "sourceType": "github",
       "skillPath": "SKILL.md",
       "computedHash": "928297ccef186ff798cf8cbcd8632e0a7d42ce4894fdd9f552a609106b2c48e5"
+    },
+    "bbac-rules": {
+      "source": "skills/bbac-rules",
+      "sourceType": "local",
+      "skillPath": "SKILL.md",
+      "computedHash": "22ca040961bd941bce7287d0a1b4bd00cd1e38b10c34409477f6254202b85171"
     }
   }
 }
