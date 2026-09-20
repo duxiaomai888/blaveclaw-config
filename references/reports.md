@@ -131,16 +131,19 @@ pack = tw_market_brief()                 # today (Taipei); headers come from the
 print(pack.describe())                   # every figure the pack carries, one line each — cite these
 #   [tw-market-20260902] 台股大盤晨報          ← title has no date: the list row shows when it was made
 #     加權指數: 46,948.72(+1.78%),前 20 日高 46,512.35
+#     收盤位置: 高於前 20 日高 0.94%,高於 60 日均 3.21%   ← the same sentence the block titles carry
 #     三大法人: 外資 +267.0 億(昨 -144.0 億)、投信 +131.0 億、自營 +163.0 億、合計 +561.0 億
+#     外資 20 日均: -40.2 億                              ← the caption's baseline; cite it, don't recompute
 #     外資期貨淨多單: +12,300 口(+2,500 口,09-01)
 #     缺少:  - 台指期 2026-09-01 無夜盤 bar(…)      ← a missing series is a missing block, never a guess
-#     narrative slots: lead≤600, read≤2400, watch≤1500, risk≤900
+#     narrative slots: lead≤600(一個可證偽的主張), read≤300(3–5 條,每條一個數字加它的基準;或 3–5 個 ### 子標), watch=表格 2–3 列(條件/門檻/現在值), risk≤100(一句可證偽的)
 
 publish(pack, narrative={
     "lead":   "外資現貨與期貨同日轉多,量能放大六成——這是資金回補,不是空窗反彈。",
-    "read":   "…what the numbers say and why (markdown, §4 subset)…",
-    "watch":  "…which indicator / 籌碼 conditions to watch, and at what thresholds…",
-    "risk":   "外資連兩日淨賣超逾 150 億,或淨多單回落到 1 萬口以下,這份解讀作廢。",
+    "read":   "- 外資買超 267 億,20 日均是 −40 億。\n- 投信連三買,今日 131 億。\n- 成交值 9,000 億,較前 10 日均高六成。",
+    "watch":  [("外資期貨淨多單", "回落到 1 萬口以下", "+12,300 口"),      # 2–3 列,不是散文
+               ("外資現貨買超", "轉為連兩日淨賣超", "+267.0 億")],
+    "risk":   "外資連兩日淨賣超逾 150 億,這份解讀作廢。",
 })
 ```
 
@@ -165,9 +168,41 @@ publish(pack, narrative={
   *Taiwan market calendar*). A skip on a holiday-table day ends with that attribution
   (also `pack.context['休市表出處']`); a reply telling the user the market is closed carries
   it verbatim too.
-- Slots: `lead` becomes the opening card (one falsifiable claim), `read` (判讀) / `watch`
-  (觀察重點) become sections after the data, `risk` a warning callout before the footnote. Each
-  has a character cap (`pack.slots`); `publish` raises past it — cut, do not summarise.
+- Slots: `lead` becomes the opening card (one falsifiable claim, ≤600), `read` (判讀) the one
+  section after the data (≤300), `watch` the 觀察重點 table, `risk` a warning callout before
+  the footnote (≤100). **A cap is the target, not room to fill** — `publish` raises past it,
+  naming how many characters over you are; cut, do not summarise the summary. *Why:* four
+  generous slots produced a wall — 80% of readers are gone by 350 words (Axios), and the blocks
+  already carry every number with its baseline.
+- **`read` is skimmed, not read — 3–5 items, in one of two forms,** and `publish`
+  refuses anything else:
+  - 3–5 `- ` bullets, each carrying **one number and the baseline it is read against**; or
+  - 3–5 `### ` sub-headings that each state a claim (「### 外資買超集中在電子權值股」, not
+    「### 籌碼面」), a sentence under each.
+
+  A range, not a fixed count: some days have three things worth saying and some have five.
+  The 300-character cap is what keeps the range honest — five items means five short ones.
+
+  Never prose, never a mix of the two: 300 characters of unbroken paragraph is shorter than
+  the old wall and just as unscannable. `publish` puts the `## 判讀` heading above the slot,
+  so your own headings inside it are `### ` (§4 renders both). *Why:* a reader finds things in
+  a report by scanning, and that only works when the point is in the bullet or the heading.
+  Same bar as §7b A6 / A7.
+- **`watch` is a table, not prose** — 2–3 rows of `(條件, 門檻, 現在值)`, each cell ≤40 chars,
+  passed as Python tuples (see the example above). `publish` builds the 觀察重點 `table` block
+  from them (a string in this slot is refused). One row = one condition, its threshold, and
+  where that number stands today; the reasoning belongs in `read`. A condition whose 現在值 you
+  cannot state is a condition you cannot watch — drop the row. Thresholds stay indicator /
+  籌碼 conditions, never a price (the rule below).
+- **`risk` is one falsifiable sentence** (≤100): the indicator threshold that voids the `lead`.
+- **The blocks already carry their own baselines — do not re-state them in prose.** Every
+  chart and table in the pack has a `caption` holding its measurement basis *and* the figure
+  it is read against (前 20 日高, the 20-session average, the previous 10 sessions), and the
+  `kpi_row` and the first chart (the price chart where there is one) state the day's headline
+  fact in their `title` (「加權指數 +1.78%,高於前 20 日高 0.94%」), the `收盤位置` line in
+  `describe()`. `describe()` prints every one of those numbers:
+  cite them and build on them. A narrative slot that says again what a caption already says
+  spends the reader's attention on nothing.
 - **Levels are statistics, not calls.** 前 20 日高/低 and the moving averages are listed as
   figures. The narrative never calls them 支撐 / 壓力 (support / resistance) or an entry, exit
   or target price, never tells a reader who is flat or holding what to do (進場, 加碼, 減碼,
@@ -263,6 +298,16 @@ Strings are ≤200 chars unless stated. `?` marks optional.
 Most visual blocks (`kpi_row`, all charts, `metric_table`, `table`, `code`, `image`)
 also accept `title?` (≤80, the section heading above the block) and `caption?` (≤300,
 the small print below it — put the measurement basis there).
+
+**In a template brief neither is optional.** `lib/report_templates.py` writes a `caption` on
+every chart and table it builds — the measurement basis **plus** the baseline the figure is
+read against (§7b A3) — and writes the day's headline fact into the `title` of the `kpi_row`
+and of the first chart (the price chart where there is one), which is the only conclusion a
+data-only scheduled run carries (§1b).
+The one exception is a block that measures nothing (the 今日總經事件 schedule): basis alone,
+because it has no baseline and a made-up one is worse than none. The standard holds for a
+chart you build by hand too: a caption that says again what the chart already draws is not a
+caption.
 
 | Block | Required props | Limits / notes |
 |---|---|---|
@@ -474,7 +519,7 @@ one into a report that shouldn't have it is its own failure.
 
 | `type` | What applies |
 |---|---|
-| `research`, `morning` | **All six rules.** These exist to answer "what do you think, and why". A hand-written one also follows §7b's presentation rules (A); `research` adds §7b's research rules (B), while a `morning` report keeps §1b's form for levels and conditions. A template brief is shaped by §1b. |
+| `research`, `morning` | **All six rules.** These exist to answer "what do you think, and why". A hand-written one also follows §7b's presentation rules (A); `research` adds §7b's research rules (B), while a `morning` report keeps §1b's form for levels and conditions. A template brief (§1b) splits the work: the template already carries A3 (a baseline in every caption), A4 (the focus KPI, plus the day's headline in its `title`), A5 (the claim chart first) and A8 (the method footnote) in the blocks it hands you — leave those alone — and you still owe A2 in `lead` and A6 / A7 in `read` / `watch`, in the form §1b defines. |
 | `performance` | **Rules 5 and 6 only** (plus rule 2 on any sentence that explains *why* a number moved — stating the number itself is the point of the report and needs no thesis). A performance report is a state snapshot: numbers, attribution, what changed since last time. Do **not** invent an investment view to fill a section; the clean snapshot is the correct output. The runtime produces no report of its own — every performance report is one the user asked for, one-off or as a registered job (§8). §7b does not apply: a snapshot's title names its period, not a thesis. |
 
 ### 1. One falsifiable claim, carried by the `lead`
@@ -563,8 +608,8 @@ rules:
 
 | Rules | Apply to |
 |---|---|
-| **A. Presentation** (A1–A8) | Every hand-written report **except `performance`**, which is a state snapshot whose title names its period, not a thesis (§7 scope table). A template brief (§1b) is shaped for you and is out of scope too. |
-| **B. Research rules** (B1–B6) | `type: "research"` only. A hand-written `morning` report keeps §1b's rules instead: levels are statistics, never calls, and its conditions section takes the 觀察重點 (`watch`) form. |
+| **A. Presentation** (A1–A8) | Every hand-written report **except `performance`**, which is a state snapshot whose title names its period, not a thesis (§7 scope table). A template brief (§1b) is only **half** out of scope: its envelope title is fixed by the template (a topic name by design — the list row carries the date, §1b — so A1 is not in play), the template implements A3, A4, A5 and A8 in the blocks it builds, and the narrative you write into it still follows A2, A6 and A7 — §1b says what that looks like in `read` / `watch`. |
+| **B. Research rules** (B1–B8) | `type: "research"` only. A hand-written `morning` report keeps §1b's rules instead: levels are statistics, never calls, and its conditions section takes the 觀察重點 (`watch`) form. |
 
 Blocks are flat (§3). A section is a `text` block that opens with its `## ` heading,
 followed by the chart / table blocks that back it. Nothing nests inside markdown. Write the
@@ -596,7 +641,8 @@ section headings in the report's language.
   a call.
 - **A3. Every headline number stands next to its baseline**: random trading days, the
   same-period average, the out-of-sample half, the prior period. Put the baseline in the
-  same sentence, in the cell's `delta`, or as a `benchmark` series on the chart. *Why:*
+  same sentence, in the cell's `delta`, in the chart's `caption` (§3), or as a `benchmark`
+  series on the chart. *Why:*
   "−2% in the 10 days after a launch" means nothing until the reader sees what an ordinary
   10 days does. This is §7 rule 2's comparison, made visible.
 - **A4. `kpi_row` directly after the lead; its first item is the number the claim rests
@@ -675,6 +721,12 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
     the real effect has to stand clear of that distribution. State the number of draws and
     report it as "beats N of M random dates". It is not MCPT, so never label it a p-value
     from MCPT (AGENTS.md › MCPT).
+  - *Another source or another definition*: re-measure the same claim from a second data
+    source, or with a second way of computing the figure (another smoothing, another
+    bucketing of the same raw series). Only a same-direction result counts as a pass.
+    Most series here have one source only — when there is no second one, say in the
+    report that the finding rests on a single source, rather than skipping the check
+    silently.
   - *Strategy research*: cite what the strategy already has — `"MCPT p-value"` in
     `strategies/<name>/stats.json` (automatic on every Type A backtest; rerun with
     `lib.validation.mcpt` only for a different `n`), peak vs plateau from `scan.json`
@@ -705,7 +757,7 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
   Never name the field to the user, and never tell them a report cannot be shared because of
   it. Set it on purpose every time.
   - **`true`** only when all of these hold: B1 and B2 hold everywhere in the report, not
-    only in the title, the lead and the `kpi_row`; B3–B5 are all there; and it cites,
+    only in the title, the lead and the `kpi_row`; B3–B5 and B8 are all there; and it cites,
     backtests or describes no strategy sold in the Marketplace (`references/marketplace.md`
     › *Strategy categories*), whether the user bought it or sells it.
   - **`false`, always**, when any of these is true: it gives buy / sell timing, a price
@@ -713,9 +765,9 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
     instrument — including one the user explicitly asked for (B1's exception); it says a
     condition is being met now or projects from today (B2); it cites a Marketplace strategy
     as above (official, shared-with-me and unlisted private strategies do not count); or any
-    of B1–B5 is missing. When unsure, `false`.
+    of B1–B5 or B8 is missing. When unsure, `false`.
   - `research` only. Leave it off `morning` and `performance`.
-  - The flag records the report; it never changes what you write. B1–B6 apply to every
+  - The flag records the report; it never changes what you write. B1–B6 and B8 apply to every
     research report whatever the flag says, and you do not drop what the user asked for to
     earn a `true`.
   - It needs `schema_version` `"1.3"` (§2); `write_report` sets that.
@@ -724,6 +776,16 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
   down forces an explicit check against B1–B5 each time. A report that names a trade, reads
   today's market or promotes a paid strategy whose seller earns a share of each sale must
   never be recorded as `true`.
+
+- **B8. A median or an average never travels alone.** Wherever one carries the finding —
+  the title, the lead, a `kpi_row` item, a section's claim — the same sentence or the same
+  block gives the spread behind it: the hit rate ("6 of the 10"), the worst single case, or
+  the distribution itself (`histogram` / `box`, §3). Name the sample size every time; a
+  central tendency over a handful of events is one more reason the reader needs the spread,
+  not a reason to leave it out. *Why:* "the median 10-day return over the last 10 launches
+  was −0.87%" and "6 of those 10 were positive" describe the same ten events, and a reader
+  given only the first takes a coin flip for a rule. A3 puts a figure next to its baseline;
+  this puts it next to its own dispersion — the more common way a true number misleads.
 
 **Order in a research report:** `meta` → lead (A2) → `kpi_row` (A4) → first chart (A5) →
 key points (A6) → 3–5 argument sections (A7) → evidence against (B3) → robustness (B4) →
@@ -737,19 +799,20 @@ a hand-written morning report alike.
 ## 8. Scheduled reports — a job directory, not a cron line
 
 A recurring report is **one directory plus one registration file**. You write the script and
-the registration; the runtime owns the schedule (it installs, pauses and removes the crontab
-line / scheduled task itself), runs the script, records every run and reports the list to the
-web, where the user can pause, resume, run now and delete without you. **Never touch crontab
-or schtasks for a report.** `lib.report.register_schedule` writes both files correctly:
+the registration; the runtime owns the schedule (it reads the registration and fires the script
+itself — nothing is ever installed in crontab or a scheduled task), records every run and
+reports the list to the web, where the user can pause, resume, run now and delete without you.
+**Never touch crontab or schtasks for a report.** `lib.report.register_schedule` writes both
+files correctly:
 
 ```python
-from lib.report import register_schedule, list_schedules, remove_schedule
+from lib.report import register_schedule, list_schedules, remove_schedule, set_timezone
 
 register_schedule(
     "perf-4h",                                   # id: [a-z0-9][a-z0-9-]{0,39}, a slug
     "每 4 小時運行狀況",                          # title, 1–80
     "每 4 小時給我一份各策略運行狀況：倉位、當日損益、最近訊號、有沒有錯誤。",  # the user's words, verbatim
-    "0 */4 * * *",                               # cron, 5 fields, this machine's local time
+    "0 */4 * * *",                               # cron, 5 fields, in the USER's wall-clock time
     "每 4 小時",                                  # the schedule in words — the only form the user sees
     script,                                      # full text of run.py
 )
@@ -771,7 +834,7 @@ convenience):
 ```json
 {"id": "perf-4h", "title": "每 4 小時運行狀況",
  "prompt": "每 4 小時給我一份各策略運行狀況：倉位、當日損益、最近訊號、有沒有錯誤。",
- "schedule": {"human": "每 4 小時", "cron": "0 */4 * * *"},
+ "schedule": {"human": "每 4 小時", "cron": "0 */4 * * *", "tz": "Asia/Taipei"},
  "enabled": true, "created_at": 1756800000, "updated_at": 1756800000, "pending": null}
 ```
 
@@ -782,8 +845,8 @@ convenience):
   When you decide to re-register a job with a different cron, edit its `run.py`, change the
   report id it writes, or remove it — a bug fix, a side edit, or re-registering over an
   existing job while handling a differently worded request — tell the user what changes,
-  before → after (「tw-weekly:本機 `52 21 * * 5`(台北週六 05:52)→ `52 13 * * 5`(台北週五
-  21:52)」), and do it only once they confirm. A fix you are sure of is proposed the same way,
+  before → after in their own wall-clock time (「tw-weekly:每週五 21:52 → 每週五 13:52」),
+  and do it only once they confirm. A fix you are sure of is proposed the same way,
   never applied on the side. A user instruction that names the change (「把 tw-weekly 刪掉」,
   「tw-weekly 改成 22:00」) or the web's edit flow (end of this section) is its own
   confirmation: do it and state the before → after in the reply.
@@ -791,34 +854,27 @@ convenience):
   overwrites what the job published. Give it its own (`tw-weekly-narr-20260911`).
 - `prompt` is the user's own request, not your rewrite; the web shows it back as the
   report's description and hands it to you again when they edit it.
-- `schedule.cron` is standard 5-field cron in the machine's local time — no `@daily`,
-  no seconds field, no month/weekday names. The web never displays the cron; it displays
-  `schedule.human` and the next run time the runtime computes from the cron, which is how a
-  mis-parse becomes visible — so restate the schedule when you register it (AGENTS.md).
-- **Time zone: the user's, converted to this machine's.** A time the user gives without a zone
-  is in the user's own zone — Asia/Taipei for a Taiwan user. The cron runs on this machine's
-  clock, which is often UTC. Check it once with
-  `python3 -c "import datetime; print(datetime.datetime.now().astimezone().strftime('%z'))"`
-  (`+0000` = UTC, `+0800` = Taipei), convert, and write both sides in the restatement:
-  「台北 08:30 = 本機 UTC 00:30 → `30 0 * * *`」. A conversion that crosses midnight moves the
-  weekday or date too: 台北週一 05:00 = UTC 週日 21:00 → `0 21 * * 0`. `schedule.human` is in
-  the user's time (「每週五 21:52(台北)」). *Why:* a Friday 21:52 Taipei report registered as
-  `52 21 * * 5` on a UTC machine runs at 05:52 on Saturday, Taipei time.
+- `schedule.cron` is standard 5-field cron — no `@daily`, no seconds field, no month/weekday
+  names. The web never displays the cron; it displays `schedule.human` and the next run time
+  the runtime computes from the cron, which is how a mis-parse becomes visible — so restate
+  the schedule when you register it (AGENTS.md).
+- **Time zone: write the user's wall-clock time, unconverted.** 台北 08:30 is `30 8 * * *`,
+  台北週一 05:00 is `0 5 * * 1` — nothing else. The zone the runtime reads that cron in is
+  `schedule.tz`, which `register_schedule` fills from the machine's own setting
+  (`state/timezone`, written by the platform from the user's browser), and it handles daylight
+  saving on its own. **Never convert to the machine's clock and never compute an offset
+  yourself**: the runtime would then apply the zone on top of your conversion and the report
+  would run at the wrong time twice over. `schedule.human` is the same wall-clock time in
+  words (「每週五 21:52」). If `register_schedule` raises because the machine has no time zone
+  on record, ask the user which time zone they are in, record it with
+  `set_timezone("Asia/Taipei")`, then register — never guess it and never substitute this
+  machine's clock. (The platform's own write keeps whatever you set, so you only do this once.)
 - **Say in the restatement that the scheduled report is data only.** A scheduled run has no
   agent behind it (§1b), so it carries the numbers and no 判讀; a reading only comes from
   asking in chat. Tell the user before they confirm, e.g. 「排程版只有數據、沒有判讀;要判讀請在
   對話裡叫我出。」
-- **Windows machines** only run this subset: `*/N * * * *` with N in
-  1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30; `M */N * * *` with N in 1, 2, 3, 4, 6, 8, 12 (steps
-  that divide the hour / day — for any other N the task scheduler counts from creation time
-  and the next-run time shown to the user would be wrong); `M H * * *`; `M H * * D` (one
-  weekday digit); `M H D * *`. `register_schedule` does **not** refuse anything else (it only
-  checks cron grammar): a `1-5` range, a `9,18` list or `*/7` is written, never installed, and
-  shows in the user's list as `schedule not supported on Windows`. Check the form before you
-  register. 每週一至週五 08:30 (`30 0 * * 1-5` on a UTC machine) becomes five jobs,
-  `30 0 * * 1` … `30 0 * * 5`, each with its own id (`tw-morning-mon` … `tw-morning-fri`) and
-  all five counting toward the 20-job cap. For anything else, pick the nearest expressible
-  schedule and say so.
+- **Linux and Windows run the same expression.** There is no scheduled-task subset to work
+  around: 每週一至週五 08:30 is one job, `30 8 * * 1-5`, on either platform.
 
 `run.py` constraints — it runs exactly like a scheduled strategy:
 

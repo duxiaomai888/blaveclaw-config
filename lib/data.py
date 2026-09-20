@@ -39,8 +39,20 @@ class _RateLimiter:
                     self._calls = [t for t in self._calls if now - t < self._period]
             self._calls.append(time.time())
 
-BASE      = 'https://api.blave.org'
+# Overridable so the desktop build (free software, user's own machine) can point
+# the whole lib somewhere else. Unset on every fleet machine → unchanged.
+BASE      = os.environ.get('BLAVE_API_BASE', 'https://api.blave.org')
 _CACHE_DIR = Path(__file__).parent.parent / 'cache'
+
+
+def _kline_source():
+    """'blave' (default) or 'binance' — where fetch_kline gets its bars.
+
+    Read per call rather than at import so a shell that exports it after this
+    module is loaded still takes effect. Opt-in by design: an unset variable is
+    the fleet's behaviour, byte for byte.
+    """
+    return os.environ.get('BLAVE_KLINE_SOURCE', 'blave').strip().lower()
 
 
 def _retry_get(url, max_retries=6, **kwargs):
@@ -53,6 +65,9 @@ def _retry_get(url, max_retries=6, **kwargs):
     silently dropped that whole chunk's symbols with no retry). 403 is NOT
     retried — the API returns it only for a missing/invalid api-key, a permanent
     error that backing off would just delay surfacing.
+
+    A non-retried 4xx raises requests.HTTPError with the response body appended
+    (truncated to 200 chars) — the 4xx bodies carry the only explanation there is.
     """
     for attempt in range(max_retries):
         try:
@@ -65,7 +80,15 @@ def _retry_get(url, max_retries=6, **kwargs):
             time.sleep(wait)
             continue
         if r.status_code != 429 and r.status_code < 500:
-            r.raise_for_status()
+            try:
+                r.raise_for_status()
+            except requests.HTTPError as exc:
+                # raise_for_status()'s message is status + URL only. The API puts the
+                # reason in the body ("start must not be after end", "Invalid start
+                # date, expected YYYY-MM-DD"), and a strategy author who never sees it
+                # cannot tell a bad argument from a broken endpoint. Same type and
+                # .response as before so the callers switching on status still work.
+                raise requests.HTTPError(f'{exc} — {r.text[:200]}', response=r) from exc
             return r
         wait = 2 ** (attempt + 1)
         print(f"  {r.status_code} transient — retrying in {wait}s ({url.split('/')[-2]}/{url.split('/')[-1]})")
@@ -649,6 +672,26 @@ def _extend_cache_single(prefix, params, fetch_raw_fn, start, end):
     upper  = tomorrow if req_to >= current_ym else f'{_next_month(req_to)}-01'
     stamp  = now.strftime(_META_TS_FMT)
 
+    # When the caller left `end` to us and the requested start is past even tomorrow,
+    # the window simply has not happened yet (a forward settlement date, a scheduled
+    # backfill span) and the honest answer is "no rows yet". The API cannot tell that
+    # from a reversed range — it sees start > end and returns 400 — so decide it here
+    # and skip the pointless call. "Tomorrow" is Taipei's, not the machine's: this is
+    # a Taiwan dataset and the boxes run UTC. UTC being 8 h behind happens to make the
+    # naive compare safe (tomorrow_utc >= Taipei today), but that is an accident of
+    # sign holding up a silently-empty answer, so it is pinned instead. Two cases
+    # deliberately still reach the API: an explicit `end` (a caller who wrote the
+    # order backwards made a typo and should read the message) and a malformed
+    # `start` (nothing to compare; the 400 names the expected format).
+    if end is None:
+        tpe_tomorrow = (datetime.now(_TPE) + timedelta(days=1)).strftime('%Y-%m-%d')
+        if tpe_tomorrow < start:
+            try:
+                datetime.strptime(start, '%Y-%m-%d')
+                return pd.DataFrame()
+            except ValueError:
+                pass
+
     df, meta = _read_single(prefix, params)
     changed = False
     if df is None:
@@ -844,14 +887,24 @@ def fetch_kline(symbol, interval, start, end, headers):
     requests are chunked 30 days each server-side, so deep 1min backtests pull
     history month-by-month on first run. Cache namespace is kline2 — the old
     kline cache has Volume hard-zeroed and must not be mixed with real volume.
+
+    With BLAVE_KLINE_SOURCE=binance (the desktop build's BYO data) the bars come
+    straight from Binance's public endpoint instead, `headers` unused. Same
+    market (USDT-M perps), same columns, same kline2 cache. Not literally the
+    same bars: measured 2026-09-19, 8 of 41,335 1h BTCUSDT bars come back from
+    /kline as placeholders (O=H=L=C, Volume 0) where Binance has the real bar,
+    so a cache dir fed by both sources is a mixed one.
     """
     # Venue forms like 'BTC/USDT' → Binance 'BTCUSDT'; the API 400s on
     # separator forms and the separator would leak into the cache dir name.
     symbol = normalize_symbol(symbol)
+    if _kline_source() == 'binance':
+        fetch_raw = lambda s, e: _fetch_binance_kline_raw(symbol, interval, s, e)
+    else:
+        fetch_raw = lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers)
     df = _extend_cache_monthly(
         'kline2', {'symbol': symbol, 'period': interval},
-        lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers),
-        start, end,
+        fetch_raw, start, end,
     )
     return _sanity_check_ohlc(df, f'{symbol} {interval} kline')
 
@@ -865,8 +918,14 @@ def fetch_kline_batch(symbols, interval, start, end, headers):
     Uses the same monthly cache dir naming as fetch_kline ('kline2_{interval}_{symbol}')
     so single-symbol and batch calls share cache — a symbol already cached via
     fetch_kline is a warm hit here too, and vice versa. Warm ids are extended through
-    the batch endpoint too (not one call per symbol) — see _fetch_batch_cached."""
+    the batch endpoint too (not one call per symbol) — see _fetch_batch_cached.
+
+    Under BLAVE_KLINE_SOURCE=binance there is no batch endpoint to call, so this
+    fans out to fetch_kline per symbol — otherwise a desktop Type C backtest
+    would quietly keep pulling its prices from api.blave.org."""
     symbols = [normalize_symbol(s) for s in symbols]
+    if _kline_source() == 'binance':
+        return {sid: fetch_kline(sid, interval, start, end, headers) for sid in symbols}
     def _parse(records):
         df = pd.DataFrame(records)
         df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
@@ -973,6 +1032,136 @@ def fetch_bingx_kline(symbol, interval, start, end):
     return _sanity_check_ohlc(df, f'{symbol} {interval} bingx_kline')
 
 
+# ── BYO kline source: Binance fapi, no key ────────────────────────────────────
+# The desktop build is free software running on the user's own machine, so its
+# market data is BYO: with BLAVE_KLINE_SOURCE=binance, fetch_kline pages the
+# public Binance endpoint directly instead of api.blave.org. Off unless that
+# variable is set, so the fleet never reaches this code.
+
+# USDT-M perpetuals, deliberately — that is the market /kline serves and the
+# collector stores. Pointing this at spot (api.binance.com/api/v3/klines) would
+# make the same strategy backtest differently on the desktop than in the cloud,
+# because basis and funding live in the perp price and not in the spot price.
+_BINANCE_KLINES = 'https://fapi.binance.com/fapi/v1/klines'
+_BINANCE_PAGE   = 1000          # server cap per response, not a preference
+
+# fapi's own exchangeInfo reports 2400 request-weight per minute and a 1000-bar
+# kline page costs 5 (measured off the x-mbx-used-weight-1m header, not the
+# docs). 400 pages/min = 2000 weight, leaving headroom for whatever else the box
+# is doing; the 429 handling below is the backstop, not the throttle.
+_BINANCE_LIMITER = _RateLimiter(400, 60)
+
+# Binance and BingX spell intervals identically, so the lib's own '1min' family
+# maps onto both. Binance spellings map to themselves: lib/paper_data calls
+# fetch_kline with '1m'.
+_BINANCE_INTERVALS = {**_BINGX_INTERVALS, **{v: v for v in _BINGX_INTERVALS.values()}}
+
+
+def _binance_get(url, params, max_retries=6, timeout=30):
+    """GET a public Binance endpoint, honouring Retry-After on 429/418.
+
+    Deliberately not _retry_get: that one is the fleet's path to our own API and
+    its fixed 2/4/8… backoff is tuned for it. Binance answers a rate-limit with
+    the exact number of seconds to wait and escalates an ignored 429 into a 418
+    IP ban, so guessing the wait here is the wrong move.
+    """
+    for attempt in range(max_retries):
+        _BINANCE_LIMITER.acquire()
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = 2 ** (attempt + 1)
+            print(f'  {type(e).__name__} transient — retrying in {wait}s (binance klines)')
+            time.sleep(wait)
+            continue
+        if r.status_code in (429, 418) or r.status_code >= 500:
+            if attempt == max_retries - 1:
+                break
+            try:
+                wait = int(r.headers.get('Retry-After', ''))
+            except ValueError:
+                wait = 2 ** (attempt + 1)
+            print(f'  {r.status_code} from Binance — retrying in {wait}s')
+            time.sleep(min(wait, 300))
+            continue
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as exc:
+            # Binance puts the reason in the body ({"code":-1121,"msg":"Invalid
+            # symbol."}); raise_for_status() alone would say only "400".
+            raise requests.HTTPError(f'{exc} — {r.text[:200]}', response=r) from exc
+        return r
+    r.raise_for_status()
+    return r
+
+
+def _binance_klines_to_df(rows):
+    """Binance's array-of-arrays → the five-column frame every lib consumer eats.
+
+    Index 0 is the bar's open time in ms, 1-4 OHLC, 5 the base-asset volume;
+    everything after (close time, quote volume, taker splits) is dropped.
+    """
+    cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame([row[:6] for row in rows], columns=['time'] + cols)
+    df['time'] = pd.to_datetime(df['time'].astype('int64'), unit='ms', utc=True)
+    df = df.set_index('time').sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    return df[cols].astype(float)
+
+
+def _fetch_binance_kline_raw(symbol, interval, start, end):
+    """_fetch_kline_raw's twin against Binance. Same 30/365-day chunking, so the
+    monthly cache sees the same spans either way; inside a chunk we page forward
+    on startTime because one response is capped at 1000 bars — a 30-day 1min
+    chunk is 43,200 of them.
+    """
+    bn_interval = _BINANCE_INTERVALS.get(interval)
+    if bn_interval is None:
+        raise ValueError(f"fetch_kline (binance source): unsupported interval {interval!r} "
+                         f"(supported: {', '.join(sorted(_BINANCE_INTERVALS))})")
+    s = datetime.strptime(start, '%Y-%m-%d')
+    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
+    chunks, cursor = [], s
+    chunk_days = 30 if _is_sub_5min(interval) else 365
+    while cursor < e:
+        chunk_end = min(cursor + timedelta(days=chunk_days), e)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end
+
+    to_ms = lambda d: int((d - _EPOCH).total_seconds() * 1000)
+
+    def _fetch_one(cs, ce):
+        rows, cursor_ms, end_ms = [], to_ms(cs), to_ms(ce)
+        while cursor_ms <= end_ms:
+            page = _binance_get(_BINANCE_KLINES, {
+                'symbol': symbol, 'interval': bn_interval,
+                'startTime': cursor_ms, 'endTime': end_ms, 'limit': _BINANCE_PAGE,
+            }).json()
+            if not page:
+                break
+            rows.extend(page)
+            nxt = int(page[-1][0]) + 1
+            if nxt <= cursor_ms:
+                break                      # no progress — stop instead of spinning forever
+            cursor_ms = nxt
+            if len(page) < _BINANCE_PAGE:
+                break                      # short page = this window is exhausted
+        return rows
+
+    rows = []
+    progress = Progress(f'fetch {symbol} {interval} (binance)', len(chunks), 'chunks')
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [pool.submit(_fetch_one, cs, ce) for cs, ce in chunks]
+        for future in as_completed(futures):
+            rows.extend(future.result())
+            progress.tick()
+    return _binance_klines_to_df(rows)
+
+
 # ── Alpha data ────────────────────────────────────────────────────────────────
 
 def _fetch_alpha_raw(endpoint, params, headers, start, end):
@@ -1025,10 +1214,15 @@ def fetch_holder_concentration(symbol, interval, start, end, headers):
                         {'symbol': symbol, 'period': interval}, headers, start, end)
 
 
-def fetch_funding_rate(symbol, interval, start, end, headers):
-    """資金費率 Funding Rate (Binance). Returns DataFrame with 'alpha' column (alpha = funding rate × 100)."""
-    return _fetch_alpha('funding_rate/get_alpha',
-                        {'symbol': symbol, 'period': interval}, headers, start, end)
+def fetch_funding_rate(symbol, interval, start, end, headers, exchange='binance'):
+    """資金費率 Funding Rate. Returns DataFrame with 'alpha' column (alpha = funding rate × 100).
+    exchange: 'binance' (default) / 'okx' / 'bingx' / 'bybit' — the perp whose funding is read;
+    close price is always the Binance perp."""
+    params = {'symbol': symbol, 'period': interval}
+    # default omitted so the cache dir of every existing Binance fetch stays valid
+    if exchange != 'binance':
+        params['exchange'] = exchange
+    return _fetch_alpha('funding_rate/get_alpha', params, headers, start, end)
 
 
 def fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h'):
@@ -1066,8 +1260,41 @@ def fetch_liquidation(symbol, interval, start, end, headers, timeframe='24h'):
                         headers, start, end)
 
 
+def fetch_liquidation_coin(symbol, headers):
+    """每幣爆倉 Liquidation by coin — one coin's forced liquidations across the exchange
+    feeds Blave collects (binance / bybit / gate / okx / htx / bitfinex), as USD notional.
+    Returns a dict — NOT a DataFrame, since it is a point-in-time snapshot with no date
+    range to index on:
+      windows{'1'|'4'|'12'|'24'}: rolling window ending at the latest 5-minute bucket —
+        total_liq_usd / long_liq_usd / short_liq_usd, long_pct / short_pct (None when the
+        window is 0), covered_hours, by_exchange{name: {total/long/short_liq_usd}} (an
+        exchange with no event in the window has no key)
+      series: bucket_seconds=3600, points = 24 hourly {ts, long_liq_usd, short_liq_usd},
+        old → new on clock hours, the last one = the current hour so far (zeros, never gaps)
+      exchanges[]: exchange, listed (True / False / None = unknown), last_event_at,
+        price_basis, coverage, time_basis — every feed, including ones with no event
+      rank (1–50 by 24 h total across exchanges, else None), detail_complete (False when
+        the coin may have been cut from a full bucket → windows can under-count),
+        updated_at
+    `windows['24']` is the same rolling frame as the exchange matrix (same number for the
+    same coin); `series` is clock hours, so Σ points ≠ windows['24'] by design — read
+    totals from windows, timing from points.
+    `symbol` accepts BTC / BTCUSDT / btc. Returns None for a symbol no feed lists (the
+    API's 404). A 503 (upstream feed not answering) propagates as requests.HTTPError after
+    _retry_get's backoff. No local cache — the server holds a 5-minute cache; every call
+    means "now"."""
+    try:
+        r = _retry_get(f'{BASE}/liquidation/get_coin', headers=headers,
+                       params={'symbol': symbol}, timeout=30)
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None
+        raise
+    return r.json().get('data', {})
+
+
 def fetch_market_direction(interval, start, end, headers):
-    """市場方向 Market Direction (BTC only, no symbol). Returns DataFrame with 'alpha' column."""
+    """市場方向 Market Direction (market-wide, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('market_direction/get_alpha',
                         {'period': interval}, headers, start, end)
 
@@ -1085,7 +1312,7 @@ def fetch_market_sentiment(symbol, interval, start, end, headers):
 
 
 def fetch_top_trader_exposure(interval, start, end, headers):
-    """Blave頂尖交易員曝險 Top Trader Exposure (BTC only, no symbol). Returns DataFrame with 'alpha' column."""
+    """Blave頂尖交易員曝險 Top Trader Exposure (market-wide, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('blave_top_trader/get_exposure',
                         {'period': interval}, headers, start, end)
 
@@ -1900,39 +2127,72 @@ def fetch_twstock_market_value_all(headers, top=None):
     """全市場市值排名快照 (whole-market market-cap ranking). 上市 + 上櫃 + ETF
     (興櫃 excluded, ETNs have no data) — about 2,400 rows. DataFrame with columns
     rank (1-based, market_value desc), stock_id, name, market_value (NTD 元,
-    integer); the as-of publication date rides along in `df.attrs['date']`
-    ('YYYY-MM-DD'). Updated once a day after the close; server caches 30 min.
+    integer), market ('TWSE' 上市 / 'TPEx' 上櫃), is_etf (bool); the as-of
+    publication date and the 上市 ex-ETF market-cap total ride along in
+    `df.attrs['date']` ('YYYY-MM-DD') and `df.attrs['twse_ex_etf_market_value']`
+    (NTD 元, int). Updated once a day after the close; server caches 30 min.
 
     `top` (int 1–3000) keeps the first N ranks, None = all. This is the first-layer
     screening filter for anything market-cap based (top-N pool, top-10 權值股) —
-    never rebuild it from per-stock shares × price across the market. ETFs are in
-    the ranking (ETFs such as 0050 rank among the large caps); drop ETFs with
-    `df[~df['stock_id'].str.startswith('00')]`.
+    never rebuild it from per-stock shares × price across the market.
+
+    ETFs are in the ranking (0050 is rank 6) — filter them with the `is_etf`
+    column: `df[~df['is_etf']]`. Never by stock_id prefix ('00' is a market
+    convention rather than a contract, and it misses REITs like '01010T') and never
+    by fetching a classification yourself — is_etf IS that classification (FinMind
+    industry_category), and it is the same criterion the denominator uses, so the
+    two can never disagree. is_etf False means 'not in the ETF set', NOT 'confirmed
+    not an ETF': a security FinMind publishes no category for (REIT '01010T') is
+    False and stays inside the denominator. `market` is a listing-board tag, not an
+    ETF flag.
+
+    `attrs['twse_ex_etf_market_value']` is the index-weight (權值比重) denominator:
+    the sum of the market == 'TWSE' rows that are not ETFs on the same as-of day,
+    whole-market regardless of `top` (REITs and preferred shares are NOT excluded
+    from it). So market_value / twse_ex_etf_market_value is a weight only
+    for a row whose market is 'TWSE' and which is not an ETF — over a TPEx or ETF
+    row it is not a weight. `rank` is on a different universe — still 上市 + 上櫃
+    including ETFs — so never present the ratio and the rank as one ranking.
 
     Single-file cache like fetch_twmarket_dividend_points: the FULL ranking is
     fetched once (one call, ~2.4k rows) and kept 1 hour, `top` is sliced locally,
-    so repeat calls with different `top` are free within the hour. attrs survive
-    the parquet round-trip, so cache hits keep the as-of date."""
+    so repeat calls with different `top` are free within the hour. Whether attrs
+    survive the parquet round-trip is pandas-version dependent, so it is NOT
+    relied on: a cache hit that came back without the new column or without either
+    attr is discarded and refetched. The returned frame therefore always carries
+    both attrs, whatever the machine's pandas version."""
     if top is not None and (not isinstance(top, numbers.Integral)
                             or isinstance(top, bool) or not 1 <= top <= 3000):
         raise ValueError(f'top must be an int in 1–3000 or None, got {top!r}')
     path = _CACHE_DIR / 'twstock_market_value_all.parquet'
     df = _load_fundamental_cache(path, max_age_days=1 / 24)
+    # Old cache file, or a pandas whose parquet writer drops DataFrame.attrs: either way
+    # a field would silently go missing and callers would filter on a column that is not
+    # there. Every field this function promises is checked. `not in` rather than a falsy
+    # test — a genuine null denominator must not refetch on every call.
+    if df is not None and ('market' not in df.columns or 'is_etf' not in df.columns
+                           or 'date' not in df.attrs
+                           or 'twse_ex_etf_market_value' not in df.attrs):
+        df = None
     if df is None:
         r = _retry_get(f'{BASE}/studio/market/twstock/market_value/all',
                        headers=headers, timeout=60)
         payload = r.json()
         data = payload.get('data', [])
         if not data:
-            out = pd.DataFrame(columns=['rank', 'stock_id', 'name', 'market_value'])
+            out = pd.DataFrame(
+                columns=['rank', 'stock_id', 'name', 'market_value', 'market', 'is_etf'])
             out.attrs['date'] = payload.get('date')
+            out.attrs['twse_ex_etf_market_value'] = payload.get('twse_ex_etf_market_value')
             return out
-        df = pd.DataFrame(data)[['rank', 'stock_id', 'name', 'market_value']]
+        df = pd.DataFrame(data)[['rank', 'stock_id', 'name', 'market_value', 'market',
+                                 'is_etf']]
         df = df.sort_values('rank').reset_index(drop=True)
         df.attrs['date'] = payload.get('date')
+        df.attrs['twse_ex_etf_market_value'] = payload.get('twse_ex_etf_market_value')
         _save_fundamental_cache(path, df)
     out = df if top is None else df.head(top).copy()
-    out.attrs = dict(df.attrs)   # slicing must not drop the as-of date
+    out.attrs = dict(df.attrs)   # slicing must not drop the as-of date / denominator
     return out
 
 

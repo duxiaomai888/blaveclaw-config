@@ -5,6 +5,7 @@
 - `manager/management_backtest.py` — portfolio walk-forward backtest
 - `manager/manager.py` — portfolio optimizer
 - `manager/reconciler.py` — position reconciler (polling loop)
+- `manager/stop_strategy.py` / `manager/close_symbol.py` — stop one strategy / close one coin (see *Stopping one strategy / closing one coin*)
 - `manager/portfolio_config.json` — gitignored; written by manager.py; also contains `"exchanges"` dict (see below)
 
 **CRITICAL — `manager/` holds platform scripts and their own output.** All output (portfolio_config.json, pnl.png, stats.json) is written by the scripts themselves. Never create a `manager/manager/` or any other nested folder — it breaks path resolution in all three scripts. Never delete any file in `manager/` when removing strategies.
@@ -42,7 +43,7 @@ python3 manager/manager.py --members a,b,c --allocator equal --apply    # write 
 
 **Members with different history — the backtest clips, the proposal fills.** The members rarely start and stop together, and the two scripts handle that differently on purpose.
 
-`management_backtest.py` clips its **whole run** — fitting window included — to the **overlap**, the days every member has data. Outside the overlap a "portfolio" is one or two live members plus dead capital in the legs that do not exist yet, so the curve there measures which member is oldest, not the weighting method: 32321's six members spanned 4576 days on the union but only 1306 together, and 78% of that headline was a single strategy, diluted. `stats.json` records `member_spans` (each member's first/last backtest day) and `overlap` (`start`/`end`/`eval_days`, now the same period as `start`/`end`), and the stdout says how many days were dropped and which member set each bound. Nothing is filled, so there is no `absent_fill_annual_pct` / `absent_days` in a backtest result. Two ways it refuses (both exit 3, reason on the last stderr line): the members share **no** day → `no overlapping days: …` (re-run the stale member or drop one; shrinking the window cannot help), or the overlap is not longer than `--lookback` → the usual `insufficient history: N days <= lookback L`, which the page turns into 「改跑 N 天」. The page's own pre-check still bounds by the **union**, deliberately: `blaveclaw-config` updates are user-initiated, so a page that pre-blocked on the overlap would lock out every machine still running the old union backtest. It therefore under-blocks, and the machine's exit 3 supplies the truth.
+`management_backtest.py` clips its **whole run** — fitting window included — to the **overlap**, the days every member has data. Outside the overlap a "portfolio" is one or two live members plus dead capital in the legs that do not exist yet, so the curve there measures which member is oldest, not the weighting method: 32321's six members spanned 4576 days on the union but only 1306 together, and 78% of that headline was a single strategy, diluted. `stats.json` records `member_spans` (each member's first/last backtest day) and `overlap` (`start`/`end`/`eval_days`, now the same period as `start`/`end`), and the stdout says how many days were dropped and which member set each bound. Nothing is filled, so there is no `absent_fill_annual_pct` / `absent_days` in a backtest result. Two ways it refuses (both exit 3, reason on the last stderr line): the members share **no** day → `no overlapping days: …` (re-run the stale member or drop one; shrinking the window cannot help), or the overlap is not longer than `--lookback` → the usual `insufficient history: N days <= lookback L`, which the page turns into 「改跑 N 天」. The page's own pre-check still bounds by the **union**, deliberately: `blave-agent` updates are user-initiated, so a page that pre-blocked on the overlap would lock out every machine still running the old union backtest. It therefore under-blocks, and the machine's exit 3 supplies the truth.
 
 `manager.py` cannot clip — a member that joined 60 days ago still has to be sized today — so it proposes from the last `lookback` days of the **union**, and a day a strategy had **no data at all** is charged `ABSENT_FILL_ANNUAL` (−2%/yr) *while the method fits*, counted as 0 everywhere the numbers are reported. Filling with 0 on both sides is what produced the old failure: the built-in methods maximise a ratio, an absent leg adds neither return nor variance, so its weight cancels out of the objective and the optimiser allocated to strategies with no history at random, redrawing every day. The charge is proportional to how much of the window is missing, so it decays as a young strategy accumulates days — and, being small, it barely dents a leg that has merely gone stale for a few weeks. The proposal records `absent_fill_annual_pct` and prints the missing days per member. Non-trading days are not absent: every strategy is resampled to calendar days with an explicit 0. Check: `python3 manager/check_absent_fill.py`.
 
@@ -305,6 +306,25 @@ built into `flatten()` itself instead.
 
 **Deleting a strategy:** delete only its own directory (e.g. `strategies/btc_kd_long/`). Never touch `manager/`.
 
+### Stopping one strategy / closing one coin
+
+When the user asks to stop ONE running strategy (and optionally close its position) — not everything, which is the HALT kill switch — do not hand-write a script or `grep -v` the crontab. Both tools print everything they read and did; relay that output.
+
+```
+python3 manager/stop_strategy.py <name> [--also <registry-name> ...] \
+    [--flatten --venue <id> --symbol <SYM> --side long|short --key-name <N> --secret-name <N> [--passphrase-name <N>] [--demo-name <N>]]
+python3 manager/close_symbol.py --venue <id> --symbol <SYM> --side long|short \
+    --key-name <N> --secret-name <N> [--passphrase-name <N>] [--demo-name <N>] [--dry-run]
+```
+
+- `stop_strategy.py` removes every schedule line that runs `<name>` or an `--also` name (`run_strategy.sh <name>`, `wait_for_bar.py <name>`, and any line referencing `strategies/<name>/`, monitors included), waits up to ~90s for their python/bash processes to finish, kills survivors, optionally closes the position through `close_symbol`, then removes every name from `state/deployments.json` and verifies nothing is left. Pass `--also` for registry entries under another name (e.g. a daemon `xrp_v2_monitor` for strategy `xrp_5x_v2`) — look in `state/deployments.json` first, otherwise the healthcheck keeps alerting on the leftover. Strategy files and `state.json` are kept; the global HALT is not tripped, but scoped halts `state/HALT_<scope>` are — code that checks `lib.guard.halted_for` stays blocked. Scopes = the directory name + every literal slug the strategy's `.py` files pass to `halted_for` / `trip_halt_for` / `halt_info_for` / `clear_halt_for` or set as `STRATEGY_SLUG` + each `--halt-scope <slug>` (repeatable; use it when the code builds the slug at runtime). `--also` names get none. A scope whose file already exists is kept untouched (its reason/ts may be the strategy's own breaker); each scope is printed. If the crontab write fails, the halts stay written, nothing else is done, and the exit code is 1. To re-enable a stopped strategy (only on the user's explicit request): `ls state/HALT_*`, clear every halt belonging to that strategy with `clear_halt_for('<scope>', 'user')`, then re-deploy per `references/deployment.md`.
+- With `--flatten`, every check that can refuse — keys, conflicts, a read-only look at the exchange (hedge mode, key works) — runs BEFORE any schedule is touched. If the close itself then fails, the strategy stays stopped and unregistered and the exit code is 1: tell the user the position is still open. `--flatten` that finds no position still lists any open or conditional orders left on the symbol — tell the user.
+- A 下單設定 portfolio member (any type picked on the web, as `<name>` or `--also`) is refused: the user removes it on the web 自動下單 page. Windows machines are refused: remove the scheduled tasks by hand and tell the user.
+- `close_symbol.py` is perp only (`@spot` and non-crypto venues are refused; `-SWAP` suffixes are accepted). It waits briefly for in-flight executions on the symbol, prints the key name in use, demo on/off, equity, the position, open and conditional orders; cancels that symbol's orders, re-reads the position, closes it with a reduce-only order of that size, then re-reads and prints what is left. No position on that side → nothing is sent and orders are left alone (they are listed). Once orders are cancelled, any later failure prints `OPEN and UNPROTECTED` — tell the user immediately that the position has no stop left; if the position re-read fails, the pre-cancel size is closed reduce-only. A symbol that also holds an opposite-side position (hedge mode) is refused. Run `--dry-run` first when unsure which account holds the position.
+- Keys: pass the `.env` NAMES the strategy trades on — read the strategy's own code to find them (e.g. `--key-name BINGX_API_KEY_XRP_V2 --secret-name BINGX_SECRET_KEY_XRP_V2`; the venue's plain `BINGX_API_KEY` / `BINGX_SECRET_KEY` for the main account). Only those names are used: a missing name refuses and lists the credential names in `.env` (never values), and nothing falls back to another key. The demo flag is also by name (`--demo-name`); without it the close goes to the LIVE endpoints.
+- Conflict check (heuristic): refused when another live strategy — a schedule line or a running python/bash process references it, or it is a portfolio member on this venue — has code or config files (`.py`, `.json` such as `params.json`, `.yaml`/`.yml`, `.toml`, `.txt`, `.env`/`.ini`/`.cfg`/`.conf` — not `.csv` or logs) that mention the symbol on the same key. Same key = the key name appears; for the venue's plain key, either the plain name appears, or no other key name of the venue appears but the files name the venue (`order_<venue>` or the venue word). The output lists every strategy it scanned. Tell the user which strategies conflict and stop them first if they agree.
+- Exit codes (same for both): 0 done and verified (sub-minimum dust may remain — printed); 1 a step failed or something is left — incl. a cancel/close failure, a venue lib that could not list/cancel its conditional orders, an unverifiable result, or (stop) leftover schedule lines/processes/registry entries; 2 refused or the exchange could not be read before anything changed; 3 (`stop_strategy.py` only) no schedule line, process or registry entry matched any name — nothing changed; if the user still wants the coin closed, run `close_symbol.py` instead; 4 no position on that side — nothing sent (for `stop_strategy.py`: stopped and verified, nothing to close).
+
 **Changing `account_value` (capital):** edit `portfolio_config.json["account_value"]` by hand — the ONLY way, and only when the user explicitly asks to change capital (never as a side effect of a weight update). Procedure: (1) the value is total account equity in the account currency (USD) — use the real figure, never a placeholder like 10000; (2) editing resizes every live position, so show the user the old → new value and get explicit confirmation BEFORE writing, same as `--apply`; (3) no restart needed — the reconciler re-reads the file on its next poll. `manager.py` never writes this field.
 
 **Order-qty UNITS pitfall (measured live 2026-08, sCode 51008):** the order libs'
@@ -338,21 +358,21 @@ systemctl is-active blave-agent-reconciler.service
   placing orders, and a tmux daemon started alongside it doubles every order.
 - Only when the unit file does not exist (older machines) use the tmux session:
 ```
-tmux new-session -d -s reconciler 'cd $BLAVECLAW_HOME/workspace && bash manager/start_reconciler.sh'
+tmux new-session -d -s reconciler 'cd $BLAVE_AGENT_HOME/workspace && bash manager/start_reconciler.sh'
 ```
-(resolve `$BLAVECLAW_HOME` first — same env var as `references/deployment.md`'s cron entries; when unset the default is runtime-dependent — `/root/.openclaw` on old BlaveClaw machines, `/opt/blave-agent` on Blave Agent machines — resolve it per that doc's layout signal, never assume one path)
+(resolve `$BLAVE_AGENT_HOME` first — same env var as `references/deployment.md`'s cron entries; when unset the default is runtime-dependent — `/root/.openclaw` on old BlaveClaw machines, `/opt/blave-agent` on Blave Agent machines — resolve it per that doc's layout signal, never assume one path)
 To check status: `tmux attach -t reconciler`. To stop: `tmux kill-session -t reconciler`.
 Note: the systemd unit deliberately has no `[Install]` section — the reconciler must
 NOT auto-start on reboot; the user re-enables trading explicitly after a reboot.
 
 **Windows — NSSM service:**
 ```
-nssm install blaveclaw-reconciler powershell.exe "-ExecutionPolicy Bypass -File %BLAVECLAW_HOME%\workspace\manager\start_reconciler_windows.ps1"
-nssm set blaveclaw-reconciler AppDirectory %BLAVECLAW_HOME%\workspace
+nssm install blaveclaw-reconciler powershell.exe "-ExecutionPolicy Bypass -File %BLAVE_AGENT_HOME%\workspace\manager\start_reconciler_windows.ps1"
+nssm set blaveclaw-reconciler AppDirectory %BLAVE_AGENT_HOME%\workspace
 nssm set blaveclaw-reconciler Start SERVICE_DEMAND_START
 nssm start blaveclaw-reconciler
 ```
-(`%BLAVECLAW_HOME%` — resolve the actual env var on this machine before running these commands, don't type the literal placeholder; defaults to `C:\openclaw` if unset)
+(`%BLAVE_AGENT_HOME%` — resolve the actual env var on this machine before running these commands, don't type the literal placeholder; defaults to `C:\openclaw` if unset)
 To check status: `nssm status blaveclaw-reconciler`. To stop: `nssm stop blaveclaw-reconciler`.
 Note: `SERVICE_DEMAND_START` is required, never `SERVICE_AUTO_START` — same policy as the
 Linux unit above: the reconciler must NOT auto-start on reboot; the user re-enables trading

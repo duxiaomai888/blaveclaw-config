@@ -349,7 +349,7 @@ Every round gets its own `plot_heatmap` PNG (`heatmap.png`, `heatmap_round2.png`
 
 - Backtest loop — handled by `lib/runner.py`
 - `main()` function — handled by `lib/runner.py`
-- `place_order()` — handled by `strategies/reconciler/reconciler.py`
+- `place_order()` — handled by `manager/reconciler.py`
 - Logging setup — handled by `lib/runner.py`
 - Chart / stats / notify — handled by `lib/runner.py`
 
@@ -444,15 +444,15 @@ Run this at session start, before any strategy run or notification:
 
 ```python
 import json, os, platform
-# Same BLAVECLAW_HOME resolution as lib/notify.py — the unset-default is
+# Same BLAVE_AGENT_HOME resolution as lib/notify.py — the unset-default is
 # runtime-dependent, never a single hardcoded path: old BlaveClaw machines use
 # /root/.openclaw, the Blave Agent runtime uses /opt/blave-agent (detected by
 # its openclaw.json FILE existing — not just the directory, or a half-provisioned
 # machine passes falsely). A wrong home doesn't error here: paired just reads
 # False on a machine that IS paired.
 def _blaveclaw_home():
-    if os.environ.get("BLAVECLAW_HOME"):
-        return os.environ["BLAVECLAW_HOME"]
+    if os.environ.get("BLAVE_AGENT_HOME"):
+        return os.environ["BLAVE_AGENT_HOME"]
     if platform.system() == "Windows":
         return r"C:\openclaw"
     if os.path.isfile("/opt/blave-agent/openclaw.json"):

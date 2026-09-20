@@ -1,0 +1,782 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: zh\n"
+
+msgid "cn.h"
+msgstr "Blave 不內建 AI。"
+
+msgid "cn.blave.title"
+msgstr "用 Blave 的 AI"
+
+msgid "cn.blave.desc"
+msgstr "首次綁卡送 100 TWD 的 AI 額度，之後按用量計費"
+
+msgid "cn.blave.btn"
+msgstr "登入 Blave"
+
+msgid "cn.blave.switch"
+msgstr "切換"
+
+msgid "cn.local.label"
+msgstr "本機 agent"
+
+msgid "cn.local.desc"
+msgstr "你的 Claude Code 或 Codex，Blave 不收 AI 費用"
+
+msgid "cn.redetect"
+msgstr "重新偵測"
+
+msgid "cn.detecting"
+msgstr "偵測中…"
+
+msgid "cn.connect"
+msgstr "連結"
+
+msgid "cn.foot"
+msgstr "連結後可以隨時更換。"
+
+msgid "st.signedIn"
+msgstr "已登入"
+
+msgid "st.notSignedIn"
+msgstr "尚未登入"
+
+msgid "st.notFound"
+msgstr "未偵測到"
+
+msgid "oauth.waiting"
+msgstr "等待瀏覽器授權…"
+
+msgid "oauth.cancel"
+msgstr "取消等待"
+
+msgid "oauth.opened"
+msgstr "已在瀏覽器開啟授權頁，完成後會自動回到這裡。"
+
+msgid "oauth.failed"
+msgstr "授權失敗。"
+
+msgid "OAUTH_CANCELLED"
+msgstr "已取消。要用 Blave 的 AI 再按一次。"
+
+msgid "OAUTH_TIMEOUT"
+msgstr "授權逾時（5 分鐘）。"
+
+msgid "OAUTH_STATE_MISMATCH"
+msgstr "回來的授權跟這次請求對不上，已擋下。"
+
+msgid "OAUTH_NO_CODE"
+msgstr "瀏覽器回來了，但沒有帶授權碼。"
+
+msgid "OAUTH_DENIED"
+msgstr "你在瀏覽器取消了授權。"
+
+msgid "KEYCHAIN_UNAVAILABLE"
+msgstr "這台電腦無法安全儲存憑證（Keychain 不可用），沒有保存。"
+
+msgid "TOKEN_EXCHANGE_FAILED"
+msgstr "授權碼換不到 token。"
+
+msgid "ws.chatExample"
+msgstr "回測一支 BTC 20/50 均線策略"
+
+msgid "ws.strategies"
+msgstr "策略"
+
+msgid "ws.noStrategies"
+msgstr "還沒有策略。"
+
+msgid "ws.placeholder"
+msgstr "跟 agent 說一句話"
+
+msgid "ws.send"
+msgstr "送出"
+
+msgid "ws.settings"
+msgstr "設定"
+
+msgid "turn.process"
+msgstr "思考過程"
+
+msgid "turn.thinking"
+msgstr "思考中"
+
+msgid "turn.running"
+msgstr "執行中 · 第 {n} 步"
+
+msgid "turn.busy"
+msgstr "上一輪還在跑。"
+
+msgid "turn.engineFailed"
+msgstr "引擎準備失敗：{msg}"
+
+msgid "turn.exit"
+msgstr "引擎退出碼 {code}"
+
+msgid "turn.error"
+msgstr "出錯了：{msg}"
+
+msgid "fault.authInvalid"
+msgstr "這台電腦的 Blave 登入已失效，這一輪沒有跑。"
+
+msgid "fault.authBtn"
+msgstr "重新登入 Blave"
+
+msgid "fault.noCredit"
+msgstr "Blave 餘額用完了，這一輪沒有跑。"
+
+msgid "fault.noCreditBtn"
+msgstr "儲值"
+
+msgid "conn.expired"
+msgstr "Blave 登入已失效，重新登入後繼續。"
+
+msgid "engine.workspace"
+msgstr "建立工作區 ~/Blave/workspace …"
+
+msgid "engine.deps"
+msgstr "正在安裝策略需要的 Python 套件（pandas、numpy…），只有第一次…"
+
+msgid "engine.preparing"
+msgstr "正在準備引擎（第一次會安裝，約一分鐘）…"
+
+msgid "mp.model"
+msgstr "模型"
+
+msgid "mp.effort"
+msgstr "思考深度"
+
+msgid "mp.default"
+msgstr "預設"
+
+msgid "mp.aria"
+msgstr "模型與思考深度：{model}，{effort}"
+
+msgid "mp.ariaNoEffort"
+msgstr "模型：{model}"
+
+msgid "mp.cap"
+msgstr "{model} 的預設是「{level}」。越高想得越久、用得越多。"
+
+msgid "mp.none"
+msgstr "這個模型沒有思考深度可調。"
+
+msgid "lv.low"
+msgstr "低"
+
+msgid "lv.medium"
+msgstr "中"
+
+msgid "lv.high"
+msgstr "高"
+
+msgid "lv.xhigh"
+msgstr "超高"
+
+msgid "lv.max"
+msgstr "最高"
+
+msgid "lv.ultra"
+msgstr "Ultra"
+
+msgid "fault.noModel"
+msgstr "你的帳號用不了「{model}」，這一輪沒有跑。"
+
+msgid "fault.noModelSwitched"
+msgstr "你的帳號用不了「{model}」，這一輪沒有跑。已換回「{to}」。"
+
+msgid "fault.noModelBtn"
+msgstr "選別的模型"
+
+msgid "mp.na"
+msgstr "你的方案沒有"
+
+msgid "rp.tab.backtest"
+msgstr "回測數據"
+
+msgid "rp.tab.trades"
+msgstr "進出場紀錄"
+
+msgid "rp.tab.code"
+msgstr "程式碼"
+
+msgid "bt.fee"
+msgstr "手續費"
+
+msgid "bt.totalReturn"
+msgstr "總報酬"
+
+msgid "bt.benchmark"
+msgstr "基準報酬"
+
+msgid "bt.benchmarkRank"
+msgstr "贏過 {n}% 隨機投組"
+
+msgid "bt.sharpe"
+msgstr "Sharpe"
+
+msgid "bt.maxDrawdown"
+msgstr "最大回撤"
+
+msgid "bt.trades"
+msgstr "交易次數"
+
+msgid "bt.mcpt"
+msgstr "MCPT p 值"
+
+msgid "bt.mcptTipSig"
+msgstr "隨機打亂 {n} 次，只有 {pct} 的結果比它好；低於 0.05 是慣用門檻。"
+
+msgid "bt.mcptTipNs"
+msgstr "隨機打亂 {n} 次，有 {pct} 的結果比它好——沒過 0.05 的慣用門檻，這組結果分不出是實力還是運氣。"
+
+msgid "bt.equity"
+msgstr "權益"
+
+msgid "bt.drawdown"
+msgstr "回撤"
+
+msgid "bt.chartAria"
+msgstr "回測期間的權益曲線與回撤"
+
+msgid "bt.monthly"
+msgstr "月報酬"
+
+msgid "bt.year"
+msgstr "全年"
+
+msgid "bt.empty"
+msgstr "這支策略沒有回測資料。"
+
+msgid "tr.empty"
+msgstr "這支策略沒有進出場紀錄。"
+
+msgid "tr.chartError"
+msgstr "圖表畫不出來，下方的進出場紀錄仍可查看。"
+
+msgid "tr.list"
+msgstr "進出場紀錄"
+
+msgid "tr.count"
+msgstr "{n} 筆"
+
+msgid "tr.buy"
+msgstr "買進"
+
+msgid "tr.sell"
+msgstr "賣出"
+
+msgid "tr.kind.open"
+msgstr "開倉"
+
+msgid "tr.kind.close"
+msgstr "平倉"
+
+msgid "tr.kind.flip"
+msgstr "翻向"
+
+msgid "tr.position"
+msgstr "部位 {n}"
+
+msgid "bt.grpReturns"
+msgstr "報酬"
+
+msgid "bt.grpRisk"
+msgstr "風險"
+
+msgid "bt.grpTrading"
+msgstr "交易"
+
+msgid "bt.annReturn"
+msgstr "年化報酬"
+
+msgid "bt.annVol"
+msgstr "年化波動率"
+
+msgid "bt.sortino"
+msgstr "Sortino"
+
+msgid "bt.omega"
+msgstr "Omega"
+
+msgid "bt.winRate"
+msgstr "日勝率"
+
+msgid "bt.totalFees"
+msgstr "總手續費"
+
+msgid "bt.mcptDistTitle"
+msgstr "MCPT · 隨機打亂 {n} 次的 Sharpe 分佈，p = {p}"
+
+msgid "bt.mcptDistActual"
+msgstr "實際 Sharpe {v}"
+
+msgid "bt.mcptDistUnit"
+msgstr "次"
+
+msgid "ws.resizeSide"
+msgstr "調整策略欄寬度"
+
+msgid "ws.resizeChat"
+msgstr "調整聊天欄寬度"
+
+msgid "ws.sideCollapse"
+msgstr "收合策略欄"
+
+msgid "ws.sideExpand"
+msgstr "展開策略欄"
+
+msgid "ws.chatCollapse"
+msgstr "收合聊天欄"
+
+msgid "ws.chatExpand"
+msgstr "展開聊天欄"
+
+# 設定 modal
+msgid "set.close"
+msgstr "關閉"
+
+msgid "set.cats"
+msgstr "設定分類"
+
+msgid "set.cat.display"
+msgstr "顯示"
+
+msgid "set.cat.model"
+msgstr "模型接入"
+
+msgid "set.lang"
+msgstr "語言"
+
+msgid "cn.current"
+msgstr "使用中"
+
+# 對話列 / 對話清單
+msgid "cs.all"
+msgstr "所有對話"
+
+msgid "cs.back"
+msgstr "返回對話"
+
+msgid "cs.new"
+msgstr "新對話"
+
+msgid "cs.del"
+msgstr "刪除對話"
+
+msgid "cs.delConfirm"
+msgstr "刪除？"
+
+msgid "strat.del"
+msgstr "移到垃圾桶"
+
+# 回測指標的 tooltip(定義照 lib/analysis.py、lib/runner.py 的算法)
+msgid "bt.tip.totalReturn"
+msgstr "整段回測期間的累計報酬，已扣手續費。"
+
+msgid "bt.tip.annReturn"
+msgstr "把總報酬換算成一年的複利報酬，方便跟不同長度的回測比較。"
+
+msgid "bt.tip.benchmark"
+msgstr "同一段期間買進後一直持有這個標的的報酬。策略要贏過它，才算比什麼都不做好。"
+
+msgid "bt.tip.benchmarkRank"
+msgstr "跟隨機挑標的、買進持有的投組比，這支策略的總報酬贏過其中多少。"
+
+msgid "bt.tip.annVol"
+msgstr "每日報酬的標準差換算成一年。數字越大，權益的起伏越劇烈。"
+
+msgid "bt.tip.maxDrawdown"
+msgstr "權益從高點跌到之後最低點的最大跌幅，也就是最壞的時候帳面會少掉多少。"
+
+msgid "bt.tip.sharpe"
+msgstr "每承擔一單位波動換到多少報酬（年化，無風險利率以 0 計）。越高越好。"
+
+msgid "bt.tip.sortino"
+msgstr "算法同 Sharpe，但只把下跌的波動當成風險，上漲的波動不扣分。"
+
+msgid "bt.tip.omega"
+msgstr "所有賺錢時段的報酬總和，除以所有虧錢時段的虧損總和。大於 1 表示賺的比賠的多。"
+
+msgid "bt.tip.trades"
+msgstr "部位有變動的次數：進場、出場、加減碼各算一次。"
+
+msgid "bt.tip.winRate"
+msgstr "有損益的日子裡，賺錢的日子佔多少。這不是每筆交易的勝率。"
+
+msgid "bt.tip.totalFees"
+msgstr "整段期間付出的手續費加總，以佔資金的百分比表示。"
+
+# 刪對話確認框
+msgid "del.title"
+msgstr "刪除「{title}」？"
+
+msgid "del.titleCur"
+msgstr "刪除目前這個對話？"
+
+msgid "del.body"
+msgstr "這條對話的聊天記錄會刪除，無法復原。策略不受影響。"
+
+msgid "del.bodyCur"
+msgstr "聊天記錄會刪除，無法復原。刪除後會開一條新對話。策略不受影響。"
+
+msgid "del.cancel"
+msgstr "取消"
+
+msgid "del.ok"
+msgstr "刪除"
+
+msgid "chat.imageAlt"
+msgstr "agent 傳來的圖"
+
+# 本機 agent 重新登入
+msgid "cn.signIn"
+msgstr "登入"
+
+msgid "login.opened"
+msgstr "已在瀏覽器開啟 {name} 登入頁，完成後回到這裡。"
+
+msgid "login.ok"
+msgstr "{name} 已登入。"
+
+msgid "login.failed"
+msgstr "{name} 登入沒有完成。"
+
+msgid "fault.localAuth"
+msgstr "{name} 目前沒有登入，這一輪沒有跑。"
+
+msgid "fault.localAuthBtn"
+msgstr "登入 {name}"
+
+msgid "chat.imageZoom"
+msgstr "放大檢視"
+
+# 回合失敗卡的狀態機
+msgid "login.cancel"
+msgstr "取消等待"
+
+msgid "login.failedCmd"
+msgstr "也可以在終端機執行 {cmd}。"
+
+msgid "login.retry"
+msgstr "再試一次"
+
+msgid "fault.resend"
+msgstr "再送一次"
+
+msgid "fault.resendDone"
+msgstr "已重新送出"
+
+msgid "fault.authOk"
+msgstr "Blave 已重新登入。"
+
+msgid "cn.blave.signOut"
+msgstr "登出"
+
+msgid "cn.blave.signOutLocalOnly"
+msgstr "這台電腦已登出，但連不上伺服器、沒能撤銷這台裝置的授權。到 blave.org 的設定 › 裝置再撤銷一次。"
+
+# Blave 的 AI:綁卡 / 儲值預檢
+msgid "acct.noCard"
+msgstr "Blave 的 AI 還不能用：這個帳號還沒綁卡。"
+
+msgid "acct.noCredit"
+msgstr "Blave 的 AI 還不能用：餘額是 0。"
+
+msgid "acct.addCard"
+msgstr "前往綁卡"
+
+msgid "acct.sub"
+msgstr "首次綁卡有 {q} TWD 的 AI 額度，{t} 天內電腦版也拿得到 Blave 的資料。"
+
+msgid "acct.ready"
+msgstr "可以開始了。"
+
+msgid "acct.creditIn"
+msgstr "額度到了，可以再送了。"
+
+msgid "fault.needCard"
+msgstr "用 Blave 的 AI 要先綁卡，這一輪沒有跑。"
+
+msgid "fault.checking"
+msgstr "這一輪沒有跑，正在確認帳號狀態。"
+
+msgid "set.cat.plan"
+msgstr "資料與雲端方案"
+
+msgid "plan.st.running"
+msgstr "已啟動 · 主機運行中"
+
+msgid "plan.st.stopped"
+msgstr "已停機 · 餘額低於 {m} TWD"
+
+msgid "plan.st.stoppedNoAmt"
+msgstr "已停機 · 餘額不足"
+
+msgid "plan.bill"
+msgstr "計費"
+
+msgid "plan.month"
+msgstr "{p} TWD／月"
+
+msgid "plan.hour"
+msgstr "以 30 天計 ＝ 每個整點從餘額扣 {h} TWD"
+
+msgid "plan.trialFree"
+msgstr "{d}前免主機費，之後照上面的價格。"
+
+msgid "plan.topup"
+msgstr "餘額低於 {a} TWD 時，會從綁定的卡自動儲值 {b} TWD；可以在網頁關閉。"
+
+msgid "plan.start"
+msgstr "啟動方案"
+
+msgid "plan.starting"
+msgstr "啟動中…"
+
+msgid "plan.addCredit"
+msgstr "前往儲值"
+
+msgid "plan.addCard"
+msgstr "前往綁卡"
+
+msgid "plan.openWs"
+msgstr "前往工作頁"
+
+msgid "plan.manage"
+msgstr "前往網頁停用"
+
+msgid "plan.manageStopped"
+msgstr "前往網頁管理"
+
+msgid "cf.title"
+msgstr "啟動 Blave Agent 雲端方案？"
+
+msgid "cf.body1"
+msgstr "會替這個帳號開一台雲端主機，通常 1 分鐘左右。Blave 的資料一啟動就能用。"
+
+msgid "cf.body2"
+msgstr "開好後每個整點從餘額扣 {h} TWD（每月 {p} TWD，以 30 天計）；主機存在就會扣，不管有沒有在用。"
+
+msgid "cf.body2Trial"
+msgstr "{d}前免主機費；之後每個整點從餘額扣 {h} TWD，主機存在就會扣，不管有沒有在用。"
+
+msgid "cf.body3"
+msgstr "要停止收費，需到網頁刪除主機。"
+
+msgid "cf.ok"
+msgstr "啟動"
+
+msgid "plan.err.credit"
+msgstr "餘額不足，沒有啟動。"
+
+msgid "plan.err.nocard"
+msgstr "這個帳號還沒綁卡，沒有啟動。"
+
+msgid "plan.err.relogin"
+msgstr "啟動方案前要重新登入一次。聊天與策略不受影響。"
+
+msgid "plan.relogin"
+msgstr "重新登入"
+
+msgid "plan.err.server"
+msgstr "啟動沒有完成。再按一次不會重複開主機。"
+
+msgid "plan.err.rate"
+msgstr "按得太頻繁了，請過一陣子再試。不會重複開主機。"
+
+msgid "plan.err.slow"
+msgstr "比平常久。主機還在啟動，不需要再按一次。"
+
+msgid "plan.recheck"
+msgstr "重新查看"
+
+msgid "data.starting"
+msgstr "雲端主機啟動中；Blave 的資料馬上就能用。"
+
+msgid "plan.done"
+msgstr "雲端主機開好了。"
+
+msgid "side.trial"
+msgstr "試用剩 {n} 天"
+
+msgid "side.starting"
+msgstr "啟動中"
+
+msgid "side.stopped"
+msgstr "已停機"
+
+msgid "data.ready"
+msgstr "Blave 的資料可以用了。"
+
+msgid "pv.h.offer"
+msgstr "首次綁卡，送 {t} 天 Blave 的資料"
+
+msgid "pv.h.offerNoNum"
+msgstr "首次綁卡，送一段試用期的 Blave 資料"
+
+msgid "pv.h.plan"
+msgstr "策略上線的雲端主機，含 Blave 的資料"
+
+msgid "pv.h.ready"
+msgstr "Blave 的資料可以用了"
+
+msgid "pv.h.starting"
+msgstr "雲端主機啟動中，通常 1 分鐘左右"
+
+msgid "pv.h.running"
+msgstr "策略可以在雲端主機上線了"
+
+msgid "pv.h.stopped"
+msgstr "主機停機了，但還在扣款"
+
+msgid "pv.h.unknown"
+msgstr "查不到這個帳號的狀態"
+
+msgid "pv.d.offer.cli"
+msgstr "AI 照用你的 {name}。想讓策略全天候自動執行，這 {t} 天開雲端主機也免主機費。"
+
+msgid "pv.d.offer.blave"
+msgstr "另有 {q} TWD 的 AI 額度。想讓策略全天候自動執行，這 {t} 天開雲端主機也免主機費。"
+
+msgid "pv.d.noTrial"
+msgstr "Blave Agent 雲端方案：{p} TWD／月。這個帳號沒有首次綁卡的試用，綁卡後要回來啟動方案才有資料。"
+
+msgid "pv.d.trial"
+msgstr "到 {d}為止，不用啟動方案。之後，資料在 Blave Agent 雲端方案裡：{p} TWD／月。"
+
+msgid "pv.d.plan"
+msgstr "Blave Agent 雲端方案：{p} TWD／月。策略在這台主機上照排程執行、自動下單；電腦版不啟動也能用，只是沒有 Blave 的資料。"
+
+msgid "pv.d.included"
+msgstr "想讓策略全天候自動執行，才需要啟動 Blave Agent 雲端方案：{p} TWD／月。"
+
+msgid "pv.d.starting"
+msgstr "Blave 的資料現在就能用，不用等主機開好。可以關掉這個視窗。"
+
+msgid "pv.d.running"
+msgstr "到工作頁在這台主機上新增策略、設定定期報告、連接交易所。電腦上做的策略留在電腦上，兩邊各是一份。"
+
+msgid "pv.d.stopped"
+msgstr "停機期間仍每小時扣 {h} TWD。餘額歸零時主機會刪除，主機上的策略與資料一併清除。"
+
+msgid "pv.d.noPrice"
+msgstr "AI 照用你現在的設定。試用結束後要資料，再啟動 Blave Agent 雲端方案。"
+
+msgid "pv.d.unknown"
+msgstr "可能是網路問題。重新查看不會花錢。"
+
+msgid "pv.f.out"
+msgstr "{t} 天後要資料，再啟動雲端方案（{p} TWD／月）。"
+
+msgid "pv.f.offer"
+msgstr "綁卡時收 {v} TWD 驗證金，全額進你的餘額，並開啟自動儲值。{t} 天後要資料，再啟動雲端方案（{p} TWD／月）。"
+
+msgid "pv.f.noTrial"
+msgstr "綁卡時最少儲值 {b} TWD，全額進你的餘額，並開啟自動儲值。"
+
+msgid "pv.f.trial"
+msgstr "想讓策略全天候自動執行，現在就能啟動：{d}前免主機費，之後主機存在就扣，刪除才停。"
+
+msgid "pv.f.plan"
+msgstr "每個整點從餘額扣 {h} TWD。主機存在就扣，停機照扣，刪除才停。"
+
+msgid "pv.f.running"
+msgstr "每個整點從餘額扣 {h} TWD（{p} TWD／月）。停用＝到網頁刪除主機，主機上的策略與資料一併清除。"
+
+msgid "pv.w.out.cli"
+msgstr "登入不花錢，也不改你用的 AI。下一步是綁卡。"
+
+msgid "pv.w.noTrial"
+msgstr "下一步：回來啟動方案。"
+
+msgid "pv.w.waiting"
+msgstr "瀏覽器已開啟，請在那邊按「允許」。"
+
+msgid "pv.st.trial"
+msgstr "試用中 · 剩 {n} 天"
+
+msgid "pv.st.none"
+msgstr "未啟動"
+
+msgid "pv.st.ok"
+msgstr "可用"
+
+msgid "pv.st.starting"
+msgstr "啟動中"
+
+msgid "pv.more"
+msgstr "方案內容與計費"
+
+msgid "plan.inc"
+msgstr "內含"
+
+msgid "plan.rule"
+msgstr "主機存在就會扣，不管有沒有在用；停機照扣，刪除主機才停。"
+
+msgid "plan.rule.running"
+msgstr "主機存在就會扣，不管有沒有在用。停用＝刪除主機，主機上的策略與資料會一併清除。"
+
+msgid "pv.more.once"
+msgstr "首次綁卡的試用每人一次、每張卡一次。"
+
+msgid "pv.inc.1"
+msgstr "一台 24 小時開著的雲端主機：策略照排程執行、自動下單"
+
+msgid "pv.inc.2"
+msgstr "Blave 的資料，電腦版與雲端主機都拿得到"
+
+msgid "pv.inc.3"
+msgstr "從瀏覽器的工作頁操作這台主機"
+
+msgid "pv.inc.note"
+msgstr "電腦上做的策略留在電腦上。主機上的策略在工作頁建立，交易所金鑰也在那邊綁。"
+
+msgid "pv.signin"
+msgstr "登入 Blave"
+
+msgid "pv.e.out"
+msgstr "這台還拿不到 Blave 的資料。登入 Blave 後首次綁卡，送 {t} 天；AI 照用你的 {name}。"
+
+msgid "pv.e.outNoNum"
+msgstr "這台還拿不到 Blave 的資料。登入 Blave 後首次綁卡，送一段試用期；AI 照用你的 {name}。"
+
+msgid "pv.e.card"
+msgstr "這台還拿不到 Blave 的資料。首次綁卡，送 {t} 天。"
+
+msgid "pv.e.card.cli"
+msgstr "這台還拿不到 Blave 的資料。首次綁卡，送 {t} 天；AI 照用你的 {name}。"
+
+msgid "pv.e.noTrial"
+msgstr "這台還拿不到 Blave 的資料：它在 Blave Agent 雲端方案裡。"
+
+msgid "pv.e.sub"
+msgstr "之後資料在每月 {p} TWD 的 Blave Agent 雲端方案裡。"
+
+msgid "pv.e.subN"
+msgstr "每月 {p} TWD：一台讓策略全天候自動執行的雲端主機，含 Blave 的資料；主機存在就按小時扣。"
+
+msgid "pv.e.unknown"
+msgstr "這台還拿不到 Blave 的資料。現在查不到帳號狀態，到「資料與雲端方案」重新查看。"
+
+msgid "pv.e.btn"
+msgstr "資料與雲端方案"
+
+msgid "cn.blave.signinSwitch"
+msgstr "登入並切換"
+
+msgid "cn.foot.data"
+msgstr "首次綁卡送 {t} 天 Blave 的資料，用哪一種 AI 都拿得到：連結後到設定 › 資料與雲端方案。"
+
+msgid "acct.lbl"
+msgstr "Blave 帳號"
+
+msgid "acct.signedIn"
+msgstr "已登入"
+
+msgid "acct.out"
+msgstr "登出"
+
+msgid "acct.outDone"
+msgstr "已登出。這台不再拿得到 Blave 的資料。"

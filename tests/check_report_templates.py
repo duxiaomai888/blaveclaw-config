@@ -3,7 +3,7 @@ Builds every template from synthetic frames and asserts the structural rules the
 api enforces (references/reports.md §6): meta first, lead right after meta, one
 footnote last, known block types, finite numbers, narrative caps, price charts as
 candlesticks (schema 1.2) and everything else as line charts.
-Run: cd blaveclaw-config && .venv/bin/python tests/check_report_templates.py
+Run: cd blave-agent && .venv/bin/python tests/check_report_templates.py
 """
 import json, math, os, re, sys, tempfile
 os.environ["BLAVE_AGENT_WORKSPACE"] = tempfile.mkdtemp(prefix="rpt-")
@@ -48,7 +48,11 @@ HOL.attrs = {"source_zh": HOL_SRC, "source": "Taiwan Stock Exchange, 2026 (test)
 d.fetch_twstock_holidays = lambda h, year=None: HOL
 
 H = {"api-key": "x", "secret-key": "y"}
-NAR = {"lead": "一句可證偽的主張。", "read": "判讀。", "watch": "觀察條件。", "risk": "推翻條件。"}
+NAR = {"lead": "一句可證偽的主張。",
+       "read": "- 外資買超 267 億,20 日均為 −40 億。\n- 投信買超 131 億,連三日。\n- 自營買超 163 億。",
+       "watch": [("外資期貨淨多單", "回落到 1 萬口以下", "+12,300 口"),
+                 ("外資現貨買超", "轉為連兩日淨賣超", "+267.0 億")],
+       "risk": "外資連兩日淨賣超逾 150 億,這份解讀作廢。"}
 # name → (title of the one price chart, or None; line_chart titles that must stay line charts)
 PRICE = {"tw": ("加權指數", {"融資餘額", "外資期貨淨多單"}), "close": ("加權指數", {"融資餘額", "外資期貨淨多單"}),
          "crypto": (None, {"BTC 資金費率", "Blave 市場指標(z-score)"}),
@@ -86,11 +90,25 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("close", T.tw_cl
         check(b[0].get("origin") == ("chat" if nar else "scheduled"), f"{tag}: origin={'chat' if nar else 'scheduled'}")
         check(all(x.get("type") == "kpi_row" and 1 <= len(x["items"]) <= 6 for x in b if x["type"] == "kpi_row"), f"{tag}: kpi_row 1–6 格")
         check(all(sum(s["role"] == "primary" for s in x["series"]) <= 1 for x in b if x["type"] == "line_chart"), f"{tag}: line_chart 最多一條 primary")
+        # 每個圖表/表格都要有 caption,而且是比較基準不是把圖上的數字再念一遍(§7b A3);
+        # kpi_row 的 title 是當日結論句——排程的純數據包沒有 lead,那行是唯一的結論。
+        vis = [x for x in b if x["type"] in ("candlestick", "line_chart", "bar_chart", "table")]
+        check(vis and all(0 < len(x.get("caption", "")) <= 300 for x in vis), f"{tag}: 每個圖表/表格都有 caption(≤300)")
+        kr = [x for x in b if x["type"] == "kpi_row"][0]
+        check(any(w in kr.get("title", "") for w in ("高於", "低於")), f"{tag}: kpi_row title 帶當日漲跌對基準的位置:{kr.get('title')}")
+        pos = pack.context.get("收盤位置", "")
+        check(bool(pos) and pos.split(",")[0] in kr.get("title", ""), f"{tag}: describe() 的收盤位置與 kpi_row title 同一句(agent 引用得到,不會自己再算一次)")
         price, lines = PRICE[name]
         ks = [x for x in b if x["type"] == "candlestick"]
         if price:
             n_k = len(ks[0]["candles"]) if ks else 0
-            check(len(ks) == 1 and ks[0]["title"] == price and n_k == 60, f"{tag}: 價格圖「{price}」是 K 線,{n_k} 根(範本統一 60 根,日 K 建議 40–65)")
+            # title 帶當日結論(「{圖名}:收盤高於 60 日均 X%」),所以認前綴不認全等。
+            check(len(ks) == 1 and ks[0]["title"].startswith(price) and n_k == 60, f"{tag}: 價格圖「{price}」是 K 線,{n_k} 根(範本統一 60 根,日 K 建議 40–65)")
+            check(any(w in ks[0]["title"] for w in ("高於", "低於")) and "60 日均" in ks[0]["caption"],
+                  f"{tag}: 價格圖 title 帶收盤對 60 日均的位置,caption 留口徑與基準值:{ks[0]['title']}")
+            ma = re.search(r"60 日均 ([\d,.]+)", ks[0]["caption"])
+            check(pos.split(",")[-1] in ks[0]["title"] and ma is not None and ma.group(1) in pack.describe(),
+                  f"{tag}: 價格圖 title / caption 的 60 日均與 describe() 同一句同一個值")
             check(all(sound(k) and {"y_unit", "reflines"} <= set(k) for k in ks), f"{tag}: K 線高低包住開收、t 嚴格遞增,帶單位與 20 日參考線")
             check(all(not r["emphasis"] for k in ks for r in k.get("reflines", [])), f"{tag}: 參考線都不強調(強調低點讀起來像標支撐)")
             check(doc["schema_version"] == "1.2", f"{tag}: 含 K 線 → schema_version 1.2")
@@ -110,9 +128,17 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("close", T.tw_cl
         check(not re.search(r"(?<!前 )20 日[高低]", json.dumps(doc, ensure_ascii=False) + pack.describe()),
               f"{tag}: 沒有不帶「前」的 20 日高/低標籤(同名不同口徑)")
         body = json.dumps(doc, ensure_ascii=False) + pack.describe()
-        check(not re.search("操作建議|支撐|壓力|關鍵價位", body.replace("非支撐壓力", "")),
-              f"{tag}: 範本不自帶操作建議/支撐壓力/關鍵價位字眼")
-        check(("## 觀察重點" in body) == bool(nar), f"{tag}: watch 槽標題為「觀察重點」")
+        # 站上/跌破/守住/失守 沒有「支撐」兩個字,但把統計值講成地板或天花板,一樣是 §1b 禁的。
+        check(not re.search("操作建議|支撐|壓力|關鍵價位|站上|跌破|守住|失守", body.replace("非支撐壓力", "")),
+              f"{tag}: 範本不自帶操作建議/支撐壓力/站上跌破字眼")
+        # watch 是表格不是散文槽:整寬的「條件 / 門檻 / 現在值」三欄,key 為 ASCII、不帶 format(現在值的 + 號不該被上色)。
+        wt = [x for x in b if x["type"] == "table" and x.get("title") == "觀察重點"]
+        check(len(wt) == bool(nar) and "## 觀察重點" not in body and (not nar or (
+              [c["label"] for c in wt[0]["columns"]] == ["條件", "門檻", "現在值"]
+              and all(c["key"].isascii() and "format" not in c for c in wt[0]["columns"])
+              and 2 <= len(wt[0]["rows"]) <= 3
+              and all(set(r) == {"cond", "threshold", "now"} for r in wt[0]["rows"]))),
+              f"{tag}: watch 是「觀察重點」表格(條件/門檻/現在值 2–3 列),不是散文段")
         titles = {x.get("title") for x in b if x["type"] == "line_chart"}
         check(lines <= titles and not any("收盤" in (t or "") for t in titles), f"{tag}: 非價格圖仍是 line_chart,沒有收盤折線")
     check(pack.context and "narrative slots" in pack.describe(), f"{name}: describe() 列出數字與槽位")
@@ -120,6 +146,8 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("close", T.tw_cl
 d.fetch_twstock_ohlcv = lambda sid, sch, h, start=None, end=None, adjust=False: tw.tail(15)
 p = T.symbol_brief("2330", "2026-09-02", H)
 kb = [x for x in p.blocks if x["type"] == "candlestick"]
+check(all(not x.get("title") for x in p.blocks if x["type"] == "kpi_row"),
+      "日 K 不足 21 根:kpi_row 不下標題(只有漲跌、沒有基準的一句是裝飾)")
 check(len(kb) == 1 and "reflines" not in kb[0] and any("不足 21 根" in x for x in p.notes)
       and "前 20 日" not in "".join(p.context.values())
       and all(not r["level"].startswith("前 20 日") for x in p.blocks if x["type"] == "table" for r in x["rows"]),
@@ -230,10 +258,38 @@ check(T._today_tpe() == "2026-09-12" and p.report_id == "tw-close-20260912",
       "預設日期取台北(UTC 9/11 17:30 → tw-close-20260912),不是機器的 UTC 日期")
 T.datetime = _RealDT
 T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
-for bad, why in (({"lead": "x" * 601}, "超過字數上限"), ({"summary": "x"}, "未知槽位"), ({"action": "x"}, "舊的 action 槽位"),
-                 ({"read": "見 [^nope]"}, "不存在的註腳引用")):
+# ── 敘事上限與形式 ──
+desc = pack.describe()
+check((T.SLOTS["lead"][1], T.SLOTS["read"][1], T.SLOTS["risk"][1], T.SLOTS["watch"][1]) == (600, 300, 100, None),
+      "敘事上限 lead 600 / read 300 / risk 100,watch 無字數上限(改為表格)")
+check("lead≤600" in desc and "read≤300" in desc and "risk≤100" in desc
+      and "watch=表格 2–3 列(條件/門檻/現在值)" in desc and "2400" not in desc and "1500" not in desc,
+      "describe() 的 narrative slots 那行印出新上限與 watch 的表格形式")
+ok3 = dict(NAR, read="### 外資買超集中電子權值 x\n內文一句。\n### 投信連三買 y\n內文一句。\n### 自營轉多 z\n內文一句。")
+check(os.path.exists(T.publish(pack, ok3, report_id="read-heads")), "read 寫成三個 ### 子標:接受")
+# 條數是範圍 3–5 不是定值:兩端都要驗,否則「放寬」只是把定值從 3 搬到別的數字。
+ok5 = dict(NAR, read="- 甲 1\n- 乙 2\n- 丙 3\n- 丁 4\n- 戊 5")
+check(os.path.exists(T.publish(pack, ok5, report_id="read-five")), "read 寫成五條:接受(上界)")
+# 訊息本身也是契約:agent 看到的是這一行,不是這份文件——超了多少、該改成什麼形式都要講。
+for bad, why, must in (({"lead": "x" * 601}, "lead 超過 600", "cap 600 (over by 1)"),
+                       ({"read": "- 甲 1\n- 乙 2\n- 丙 3" + "x" * 300}, "read 超過 300", "cap 300 (over by"),
+                       ({"read": "一段沒有小標也沒有條列的散文,講了很多但沒有把手。"}, "read 寫成散文", "3–5 items"),
+                       ({"read": "- 甲 1\n- 乙 2"}, "read 只有兩條", "2 條"),
+                       ({"read": "- 甲 1\n- 乙 2\n- 丙 3\n- 丁 4\n- 戊 5\n- 己 6"}, "read 六條", "6 條"),
+                       ({"read": "### 甲 1\n- 乙 2\n- 丙 3\n- 丁 4"}, "read 混用子標與條列", "1 個 ### 子標"),
+                       ({"risk": "x" * 101}, "risk 超過 100", "cap 100 (over by 1)"),
+                       ({"watch": "觀察條件。"}, "watch 仍寫成散文", "is a table now, not prose"),
+                       ({"watch": [("甲", "門檻", "現在值")]}, "watch 只有一列", "1 row(s), needs 2–3"),
+                       ({"watch": [("甲", "門檻", "值")] * 4}, "watch 超過三列", "4 row(s), needs 2–3"),
+                       ({"watch": [("甲", "門檻", "值"), ("乙", "門檻")]}, "watch 某列不是三格", "must be 3 strings"),
+                       ({"watch": [("甲", "門檻", ""), ("乙", "門檻", "值")]}, "watch 某格是空的", "「現在值」是空的"),
+                       ({"watch": [("甲", "門檻", "x" * 41), ("乙", "門檻", "值")]}, f"watch 某格超過 {T.WATCH_CELL} 字", "上限 40(超出 1)"),
+                       ({"summary": "x"}, "未知槽位", "unknown narrative slot"),
+                       ({"action": "x"}, "舊的 action 槽位", "renamed to 'watch'"),
+                       ({"read": "- 見 [^nope]\n- 乙 2\n- 丙 3"}, "不存在的註腳引用", "footnote id(s) ['nope']"),
+                       ({"watch": [("見 [^nope]", "門檻", "值"), ("乙", "門檻", "值")]}, "watch 格內不存在的註腳引用", "footnote id(s) ['nope']")):
     try:
-        T.publish(pack, bad); check(False, f"publish 拒絕{why}")
-    except ValueError:
-        check(True, f"publish 拒絕{why}")
+        T.publish(pack, dict(NAR, **bad) if set(bad) <= set(T.SLOTS) else bad); check(False, f"publish 拒絕{why}")
+    except ValueError as e:
+        check(must in str(e), f"publish 拒絕{why},訊息帶「{must}」")
 print("all checks passed" if not fails else f"FAILED: {fails}"); sys.exit(1 if fails else 0)

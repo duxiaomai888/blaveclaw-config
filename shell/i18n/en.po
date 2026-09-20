@@ -1,0 +1,782 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en\n"
+
+msgid "cn.h"
+msgstr "Blave has no AI of its own."
+
+msgid "cn.blave.title"
+msgstr "Use Blave's AI"
+
+msgid "cn.blave.desc"
+msgstr "First card adds 100 TWD of AI credit, then pay per use"
+
+msgid "cn.blave.btn"
+msgstr "Sign in to Blave"
+
+msgid "cn.blave.switch"
+msgstr "Switch"
+
+msgid "cn.local.label"
+msgstr "Local agent"
+
+msgid "cn.local.desc"
+msgstr "Your Claude Code or Codex — no Blave AI fee"
+
+msgid "cn.redetect"
+msgstr "Detect again"
+
+msgid "cn.detecting"
+msgstr "Detecting…"
+
+msgid "cn.connect"
+msgstr "Connect"
+
+msgid "cn.foot"
+msgstr "You can switch at any time."
+
+msgid "st.signedIn"
+msgstr "Signed in"
+
+msgid "st.notSignedIn"
+msgstr "Not signed in"
+
+msgid "st.notFound"
+msgstr "Not found"
+
+msgid "oauth.waiting"
+msgstr "Waiting for the browser…"
+
+msgid "oauth.cancel"
+msgstr "Cancel"
+
+msgid "oauth.opened"
+msgstr "The authorization page is open in your browser. You'll come back here automatically."
+
+msgid "oauth.failed"
+msgstr "Authorization failed."
+
+msgid "OAUTH_CANCELLED"
+msgstr "Cancelled. Press the button again to use Blave's AI."
+
+msgid "OAUTH_TIMEOUT"
+msgstr "Authorization timed out (5 minutes)."
+
+msgid "OAUTH_STATE_MISMATCH"
+msgstr "The reply didn't match this request and was rejected."
+
+msgid "OAUTH_NO_CODE"
+msgstr "The browser came back without an authorization code."
+
+msgid "OAUTH_DENIED"
+msgstr "You cancelled the authorization in the browser."
+
+msgid "KEYCHAIN_UNAVAILABLE"
+msgstr "This computer can't store credentials securely (Keychain unavailable), so nothing was saved."
+
+msgid "TOKEN_EXCHANGE_FAILED"
+msgstr "Could not exchange the authorization code for a token."
+
+msgid "ws.chatExample"
+msgstr "Backtest a BTC 20/50 moving-average strategy"
+
+msgid "ws.strategies"
+msgstr "Strategies"
+
+msgid "ws.noStrategies"
+msgstr "No strategies yet."
+
+msgid "ws.placeholder"
+msgstr "Message the agent"
+
+msgid "ws.send"
+msgstr "Send"
+
+msgid "ws.settings"
+msgstr "Settings"
+
+msgid "turn.process"
+msgstr "Thought process"
+
+msgid "turn.thinking"
+msgstr "Thinking"
+
+msgid "turn.running"
+msgstr "Running · step {n}"
+
+msgid "turn.busy"
+msgstr "The previous turn is still running."
+
+msgid "turn.engineFailed"
+msgstr "Engine setup failed: {msg}"
+
+msgid "turn.exit"
+msgstr "Engine exited with code {code}"
+
+msgid "turn.error"
+msgstr "Something went wrong: {msg}"
+
+msgid "fault.authInvalid"
+msgstr "This computer’s Blave sign-in is no longer valid, so this turn didn’t run."
+
+msgid "fault.authBtn"
+msgstr "Sign In Again"
+
+msgid "fault.noCredit"
+msgstr "Your Blave balance is empty, so this turn didn’t run."
+
+msgid "fault.noCreditBtn"
+msgstr "Top Up"
+
+msgid "conn.expired"
+msgstr "Your Blave sign-in is no longer valid. Sign in again to continue."
+
+msgid "engine.workspace"
+msgstr "Creating the workspace at ~/Blave/workspace …"
+
+msgid "engine.deps"
+msgstr "Installing the Python packages strategies need (pandas, numpy…), first run only…"
+
+msgid "engine.preparing"
+msgstr "Preparing the engine (first run installs it, about a minute)…"
+
+msgid "mp.model"
+msgstr "Model"
+
+msgid "mp.effort"
+msgstr "Effort"
+
+msgid "mp.default"
+msgstr "Default"
+
+msgid "mp.aria"
+msgstr "Model and effort: {model}, {effort}"
+
+msgid "mp.ariaNoEffort"
+msgstr "Model: {model}"
+
+msgid "mp.cap"
+msgstr "Default for {model}: {level}. Higher thinks longer and uses more."
+
+msgid "mp.none"
+msgstr "This model has no effort setting."
+
+msgid "lv.low"
+msgstr "Low"
+
+msgid "lv.medium"
+msgstr "Medium"
+
+msgid "lv.high"
+msgstr "High"
+
+msgid "lv.xhigh"
+msgstr "Extra High"
+
+msgid "lv.max"
+msgstr "Max"
+
+msgid "lv.ultra"
+msgstr "Ultra"
+
+msgid "fault.noModel"
+msgstr "Your account can't use {model}. This turn did not run."
+
+msgid "fault.noModelSwitched"
+msgstr "Your account can't use {model}. This turn did not run — switched back to {to}."
+
+msgid "fault.noModelBtn"
+msgstr "Choose a Model"
+
+msgid "mp.na"
+msgstr "Not on your plan"
+
+msgid "rp.tab.backtest"
+msgstr "Backtest"
+
+msgid "rp.tab.trades"
+msgstr "Trades"
+
+msgid "rp.tab.code"
+msgstr "Code"
+
+msgid "bt.fee"
+msgstr "fee"
+
+msgid "bt.totalReturn"
+msgstr "Total Return"
+
+msgid "bt.benchmark"
+msgstr "Benchmark"
+
+msgid "bt.benchmarkRank"
+msgstr "Beat {n}% of random portfolios"
+
+msgid "bt.sharpe"
+msgstr "Sharpe"
+
+msgid "bt.maxDrawdown"
+msgstr "Max Drawdown"
+
+msgid "bt.trades"
+msgstr "Trades"
+
+msgid "bt.mcpt"
+msgstr "MCPT p-value"
+
+msgid "bt.mcptTipSig"
+msgstr "Shuffled {n} times; only {pct} of the shuffles beat it. Below 0.05 is the usual bar."
+
+msgid "bt.mcptTipNs"
+msgstr "Shuffled {n} times; {pct} of the shuffles beat it — above the usual 0.05 bar, so this result can't be told apart from luck."
+
+msgid "bt.equity"
+msgstr "Equity"
+
+msgid "bt.drawdown"
+msgstr "Drawdown"
+
+msgid "bt.chartAria"
+msgstr "Equity curve and drawdown over the backtest period"
+
+msgid "bt.monthly"
+msgstr "Monthly returns"
+
+msgid "bt.year"
+msgstr "Year"
+
+msgid "bt.empty"
+msgstr "No backtest data for this strategy."
+
+msgid "tr.empty"
+msgstr "This strategy has no entries or exits."
+
+msgid "tr.chartError"
+msgstr "Couldn't draw the chart. The entries and exits below are still available."
+
+msgid "tr.list"
+msgstr "Entries & exits"
+
+msgid "tr.count"
+msgstr "{n} trades"
+
+msgid "tr.buy"
+msgstr "Buy"
+
+msgid "tr.sell"
+msgstr "Sell"
+
+msgid "tr.kind.open"
+msgstr "Open"
+
+msgid "tr.kind.close"
+msgstr "Close"
+
+msgid "tr.kind.flip"
+msgstr "Flip"
+
+msgid "tr.position"
+msgstr "Position {n}"
+
+msgid "bt.grpReturns"
+msgstr "Returns"
+
+msgid "bt.grpRisk"
+msgstr "Risk"
+
+msgid "bt.grpTrading"
+msgstr "Trading"
+
+msgid "bt.annReturn"
+msgstr "Annualized Return"
+
+msgid "bt.annVol"
+msgstr "Annualized Vol"
+
+msgid "bt.sortino"
+msgstr "Sortino"
+
+msgid "bt.omega"
+msgstr "Omega"
+
+msgid "bt.winRate"
+msgstr "Daily Win Rate"
+
+msgid "bt.totalFees"
+msgstr "Total Fees"
+
+msgid "bt.mcptDistTitle"
+msgstr "MCPT · Sharpe across {n} shuffles, p = {p}"
+
+msgid "bt.mcptDistActual"
+msgstr "Actual Sharpe {v}"
+
+msgid "bt.mcptDistUnit"
+msgstr "shuffles"
+
+msgid "ws.resizeSide"
+msgstr "Resize strategy list"
+
+msgid "ws.resizeChat"
+msgstr "Resize chat"
+
+msgid "ws.sideCollapse"
+msgstr "Collapse strategy list"
+
+msgid "ws.sideExpand"
+msgstr "Expand strategy list"
+
+msgid "ws.chatCollapse"
+msgstr "Collapse chat"
+
+msgid "ws.chatExpand"
+msgstr "Expand chat"
+
+# 設定 modal
+msgid "set.close"
+msgstr "Close"
+
+msgid "set.cats"
+msgstr "Settings categories"
+
+msgid "set.cat.display"
+msgstr "Display"
+
+msgid "set.cat.model"
+msgstr "Model access"
+
+msgid "set.lang"
+msgstr "Language"
+
+msgid "cn.current"
+msgstr "In use"
+
+# 對話列 / 對話清單
+msgid "cs.all"
+msgstr "All chats"
+
+msgid "cs.back"
+msgstr "Back to chat"
+
+msgid "cs.new"
+msgstr "New chat"
+
+msgid "cs.del"
+msgstr "Delete chat"
+
+msgid "cs.delConfirm"
+msgstr "Delete?"
+
+msgid "strat.del"
+msgstr "Move to Trash"
+
+# 回測指標的 tooltip(定義照 lib/analysis.py、lib/runner.py 的算法)
+msgid "bt.tip.totalReturn"
+msgstr "Cumulative return over the whole backtest, net of fees."
+
+msgid "bt.tip.annReturn"
+msgstr "Total return converted to a compounded yearly rate, so backtests of different lengths can be compared."
+
+msgid "bt.tip.benchmark"
+msgstr "What buying and holding this symbol over the same period would have returned. The strategy has to beat it to be better than doing nothing."
+
+msgid "bt.tip.benchmarkRank"
+msgstr "Share of randomly picked buy-and-hold portfolios that this strategy’s total return beats."
+
+msgid "bt.tip.annVol"
+msgstr "Standard deviation of daily returns, scaled to a year. Higher means a bumpier equity curve."
+
+msgid "bt.tip.maxDrawdown"
+msgstr "Largest fall from a peak to the lowest point after it — how much you would have been down at the worst moment."
+
+msgid "bt.tip.sharpe"
+msgstr "Return earned per unit of volatility (annualized, risk-free rate taken as 0). Higher is better."
+
+msgid "bt.tip.sortino"
+msgstr "Same as Sharpe, but only downside volatility counts as risk; upside swings are not penalized."
+
+msgid "bt.tip.omega"
+msgstr "Sum of all gains divided by sum of all losses. Above 1 means it made more than it lost."
+
+msgid "bt.tip.trades"
+msgstr "Number of position changes: each entry, exit, or resize counts once."
+
+msgid "bt.tip.winRate"
+msgstr "Share of days with a gain, among days that had any P&L. This is not a per-trade win rate."
+
+msgid "bt.tip.totalFees"
+msgstr "All fees paid over the period, as a percentage of capital."
+
+# 刪對話確認框
+msgid "del.title"
+msgstr "Delete “{title}”?"
+
+msgid "del.titleCur"
+msgstr "Delete this conversation?"
+
+msgid "del.body"
+msgstr "This conversation’s chat history will be deleted and can’t be restored. Your strategies are not affected."
+
+msgid "del.bodyCur"
+msgstr "Its chat history will be deleted and can’t be restored. A new chat will open. Your strategies are not affected."
+
+msgid "del.cancel"
+msgstr "Cancel"
+
+msgid "del.ok"
+msgstr "Delete"
+
+msgid "chat.imageAlt"
+msgstr "Chart from the agent"
+
+# 本機 agent 重新登入
+msgid "cn.signIn"
+msgstr "Sign in"
+
+msgid "login.opened"
+msgstr "{name} sign-in is open in your browser. Come back here when you’re done."
+
+msgid "login.ok"
+msgstr "{name} is signed in."
+
+msgid "login.failed"
+msgstr "{name} sign-in didn’t finish."
+
+msgid "fault.localAuth"
+msgstr "{name} isn’t signed in, so this turn didn’t run."
+
+msgid "fault.localAuthBtn"
+msgstr "Sign In to {name}"
+
+msgid "chat.imageZoom"
+msgstr "View larger"
+
+# 回合失敗卡的狀態機
+msgid "login.cancel"
+msgstr "Cancel"
+
+msgid "login.failedCmd"
+msgstr "Or run {cmd} in a terminal."
+
+msgid "login.retry"
+msgstr "Try Again"
+
+msgid "fault.resend"
+msgstr "Send Again"
+
+msgid "fault.resendDone"
+msgstr "Sent Again"
+
+msgid "fault.authOk"
+msgstr "Blave is signed in again."
+
+msgid "cn.blave.signOut"
+msgstr "Sign out"
+
+msgid "cn.blave.signOutLocalOnly"
+msgstr "Signed out on this computer, but the server couldn’t be reached to revoke this device. Revoke it under Settings › Devices on blave.org."
+
+# Blave 的 AI:綁卡 / 儲值預檢
+msgid "acct.noCard"
+msgstr "Blave’s AI isn’t ready yet: this account has no card on file."
+
+msgid "acct.noCredit"
+msgstr "Blave’s AI isn’t ready yet: the balance is 0."
+
+msgid "acct.addCard"
+msgstr "Add a Card"
+
+msgid "acct.sub"
+msgstr "A first card comes with {q} TWD of AI credit, plus Blave data in the desktop app for {t} days."
+
+msgid "acct.ready"
+msgstr "Ready to go."
+
+msgid "acct.creditIn"
+msgstr "Credit is in. You can send again."
+
+msgid "fault.needCard"
+msgstr "Blave’s AI needs a card on file, so this turn didn’t run."
+
+msgid "fault.checking"
+msgstr "This turn didn’t run — checking your account."
+
+msgid "set.cat.plan"
+msgstr "Data & cloud plan"
+
+msgid "plan.st.running"
+msgstr "Active · machine running"
+
+msgid "plan.st.stopped"
+msgstr "Stopped · balance under {m} TWD"
+
+msgid "plan.st.stoppedNoAmt"
+msgstr "Stopped · balance too low"
+
+msgid "plan.bill"
+msgstr "Billing"
+
+msgid "plan.month"
+msgstr "{p} TWD / month"
+
+msgid "plan.hour"
+msgstr "30 days = {h} TWD from your balance every hour"
+
+msgid "plan.trialFree"
+msgstr "No machine fee until {d}. After that, the price above applies."
+
+msgid "plan.topup"
+msgstr "Under a balance of {a} TWD, your card is charged {b} TWD automatically. You can turn this off on the web."
+
+msgid "plan.start"
+msgstr "Start Plan"
+
+msgid "plan.starting"
+msgstr "Starting…"
+
+msgid "plan.addCredit"
+msgstr "Add Credit"
+
+msgid "plan.addCard"
+msgstr "Add a Card"
+
+msgid "plan.openWs"
+msgstr "Open Workspace"
+
+msgid "plan.manage"
+msgstr "Turn off on the web"
+
+msgid "plan.manageStopped"
+msgstr "Manage on the web"
+
+msgid "cf.title"
+msgstr "Start the Blave Agent Cloud Plan?"
+
+msgid "cf.body1"
+msgstr "This opens a cloud machine for this account, usually in about a minute. Blave data is available as soon as you start."
+
+msgid "cf.body2"
+msgstr "Once it’s up, {h} TWD comes out of your balance every hour ({p} TWD a month, 30 days), for as long as the machine exists, in use or not."
+
+msgid "cf.body2Trial"
+msgstr "No machine fee until {d}. After that, {h} TWD comes out of your balance every hour, for as long as the machine exists, in use or not."
+
+msgid "cf.body3"
+msgstr "To stop the charges, delete the machine on the web."
+
+msgid "cf.ok"
+msgstr "Start"
+
+msgid "plan.err.credit"
+msgstr "Not started: the balance is too low."
+
+msgid "plan.err.nocard"
+msgstr "Not started: this account has no card on file."
+
+msgid "plan.err.relogin"
+msgstr "Sign in again before starting the plan. Your chats and strategies aren’t affected."
+
+msgid "plan.relogin"
+msgstr "Sign In Again"
+
+msgid "plan.err.server"
+msgstr "The plan didn’t start. Pressing again won’t create a second machine."
+
+msgid "plan.err.rate"
+msgstr "Too many attempts. Try again in a while. A second machine won’t be created."
+
+msgid "plan.err.slow"
+msgstr "Taking longer than usual. The machine is still starting, so there’s no need to press again."
+
+msgid "plan.recheck"
+msgstr "Check Again"
+
+msgid "data.starting"
+msgstr "Your cloud machine is starting. Blave data will be available in a moment."
+
+msgid "plan.done"
+msgstr "Your cloud machine is up."
+
+msgid "side.trial"
+msgstr "{n} days left"
+
+msgid "side.starting"
+msgstr "Starting"
+
+msgid "side.stopped"
+msgstr "Stopped"
+
+msgid "data.ready"
+msgstr "Blave data is now available."
+
+msgid "pv.h.offer"
+msgstr "Your first card comes with {t} days of Blave data"
+
+msgid "pv.h.offerNoNum"
+msgstr "Your first card comes with a trial period of Blave data"
+
+msgid "pv.h.plan"
+msgstr "A cloud machine where strategies go live, Blave data included"
+
+msgid "pv.h.ready"
+msgstr "Blave data is now available"
+
+msgid "pv.h.starting"
+msgstr "Your cloud machine is starting. It usually takes about a minute"
+
+msgid "pv.h.running"
+msgstr "Your strategies can now go live on the cloud machine"
+
+msgid "pv.h.stopped"
+msgstr "The machine is stopped but still billing"
+
+msgid "pv.h.unknown"
+msgstr "Couldn’t check this account"
+
+msgid "pv.d.offer.cli"
+msgstr "AI stays on your {name}. When a strategy has to run around the clock, the cloud machine has no machine fee for those {t} days."
+
+msgid "pv.d.offer.blave"
+msgstr "Plus {q} TWD of AI credit. When a strategy has to run around the clock, the cloud machine has no machine fee for those {t} days."
+
+msgid "pv.d.noTrial"
+msgstr "The Blave Agent Cloud Plan, {p} TWD a month. This account has no first-card trial: add a card, then start the plan here to get data."
+
+msgid "pv.d.trial"
+msgstr "Until {d}, there’s no need to start the plan. After that, data comes with the Blave Agent Cloud Plan: {p} TWD a month."
+
+msgid "pv.d.plan"
+msgstr "The Blave Agent Cloud Plan, {p} TWD a month. Strategies run on schedule and place orders on this machine. The desktop app works without it, just without Blave data."
+
+msgid "pv.d.included"
+msgstr "You only need the Blave Agent Cloud Plan when a strategy has to run around the clock: {p} TWD a month."
+
+msgid "pv.d.starting"
+msgstr "Blave data is available right now, before the machine is up. You can close this window."
+
+msgid "pv.d.running"
+msgstr "Add strategies, set up scheduled reports and connect an exchange on this machine from the workspace. Strategies built on this computer stay on this computer."
+
+msgid "pv.d.stopped"
+msgstr "A stopped machine still bills {h} TWD an hour. At a balance of 0 the machine is deleted, along with the strategies and data on it."
+
+msgid "pv.d.noPrice"
+msgstr "Your AI setup stays as it is. After the trial, data comes with the Blave Agent Cloud Plan, if you start it."
+
+msgid "pv.d.unknown"
+msgstr "This may be a network problem. Checking again costs nothing."
+
+msgid "pv.f.out"
+msgstr "After {t} days, data comes with the cloud plan ({p} TWD a month), if you start it."
+
+msgid "pv.f.offer"
+msgstr "A {v} TWD card check goes to your balance, and auto top-up turns on. After {t} days, data comes with the cloud plan ({p} TWD a month), if you start it."
+
+msgid "pv.f.noTrial"
+msgstr "Adding the card tops up at least {b} TWD, all of it added to your balance, and turns on auto top-up."
+
+msgid "pv.f.trial"
+msgstr "When a strategy has to run around the clock, you can start now: no machine fee until {d}, then billed while the machine exists. Only deleting it ends the charges."
+
+msgid "pv.f.plan"
+msgstr "{h} TWD from your balance every hour, for as long as the machine exists. A stopped machine still bills. Only deleting it ends the charges."
+
+msgid "pv.f.running"
+msgstr "{h} TWD an hour from your balance ({p} TWD a month). Turning it off means deleting the machine on the web, with the strategies and data on it."
+
+msgid "pv.w.out.cli"
+msgstr "Signing in costs nothing and keeps your AI. Next: add a card."
+
+msgid "pv.w.noTrial"
+msgstr "Next: come back and start the plan."
+
+msgid "pv.w.waiting"
+msgstr "Your browser is open. Press Allow there."
+
+msgid "pv.st.trial"
+msgstr "Trial · {n} days left"
+
+msgid "pv.st.none"
+msgstr "Not started"
+
+msgid "pv.st.ok"
+msgstr "Available"
+
+msgid "pv.st.starting"
+msgstr "Starting"
+
+msgid "pv.more"
+msgstr "What’s included and billing"
+
+msgid "plan.inc"
+msgstr "Included"
+
+msgid "plan.rule"
+msgstr "Billed for as long as the machine exists, in use or not. A stopped machine still bills. Only deleting it ends the charges."
+
+msgid "plan.rule.running"
+msgstr "Billed for as long as the machine exists, in use or not. Turning the plan off means deleting the machine, along with the strategies and data on it."
+
+msgid "pv.more.once"
+msgstr "The first-card trial is once per person and once per card."
+
+msgid "pv.inc.1"
+msgstr "A cloud machine that stays on 24 hours: strategies run on schedule and place orders"
+
+msgid "pv.inc.2"
+msgstr "Blave data, in the desktop app and on the cloud machine"
+
+msgid "pv.inc.3"
+msgstr "Operate the machine from the browser workspace"
+
+msgid "pv.inc.note"
+msgstr "Strategies built on this computer stay on this computer. Strategies on the machine are built in the workspace, where exchange keys are connected too."
+
+msgid "pv.signin"
+msgstr "Sign in to Blave"
+
+msgid "pv.e.out"
+msgstr "This computer can’t reach Blave data yet. Sign in to Blave, and your first card comes with {t} days of it. AI stays on your {name}."
+
+msgid "pv.e.outNoNum"
+msgstr "This computer can’t reach Blave data yet. Sign in to Blave, and your first card comes with a trial period of it. AI stays on your {name}."
+
+msgid "pv.e.card"
+msgstr "This computer can’t reach Blave data yet. Your first card comes with {t} days of it."
+
+msgid "pv.e.card.cli"
+msgstr "This computer can’t reach Blave data yet. Your first card comes with {t} days of it. AI stays on your {name}."
+
+msgid "pv.e.noTrial"
+msgstr "This computer can’t reach Blave data yet. It comes with the Blave Agent Cloud Plan."
+
+msgid "pv.e.sub"
+msgstr "After that, data comes with the Blave Agent Cloud Plan at {p} TWD a month."
+
+msgid "pv.e.subN"
+msgstr "{p} TWD a month: a cloud machine where strategies run around the clock, Blave data included. Billed hourly for as long as the machine exists."
+
+msgid "pv.e.unknown"
+msgstr "This computer can’t reach Blave data yet. The account status couldn’t be checked. Open Data & Cloud Plan to check again."
+
+msgid "pv.e.btn"
+msgstr "Data & Cloud Plan"
+
+msgid "cn.blave.signinSwitch"
+msgstr "Sign In and Switch"
+
+msgid "cn.foot.data"
+msgstr "Your first card comes with {t} days of Blave data, whichever AI you use: after connecting, see Settings › Data & cloud plan."
+
+msgid "acct.lbl"
+msgstr "Blave account"
+
+msgid "acct.signedIn"
+msgstr "Signed in"
+
+msgid "acct.out"
+msgstr "Sign out"
+
+msgid "acct.outDone"
+msgstr "Signed out. This computer no longer gets Blave data."

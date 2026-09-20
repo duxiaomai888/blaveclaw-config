@@ -130,12 +130,13 @@ a chart.
   `drawdown`, `heatmap`, `bar_chart`, `histogram`, `box`, `scatter`, `metric_table`, `table`,
   `text`, `quote`, `code`, `callout`, `image`. Not `meta` / `footnote` / `divider` (report
   structure, not tile content). The block you later `write_data` must be that type.
-- **Refresh** (machine): `refresh_cron` is 5-field cron in this machine's local time, **at most
-  once a minute** (`*/1 * * * *`), no seconds field, no `@hourly`; `refresh_human` is the
-  schedule in words and is the only form the user sees, so make it match exactly. Restate
-  the parsed schedule to the user, as for a scheduled report. `lib/watch.py` checks only the
-  cron grammar — on a Windows machine keep to the subset in `references/reports.md` §8
-  (hourly is `0 */1 * * *`; the bare `0 * * * *` is not in it and is not installed).
+- **Refresh** (machine): `refresh_cron` is 5-field cron in the user's own wall-clock time —
+  the zone comes from the machine's setting (`state/timezone`), so write the time the user
+  said and convert nothing (`references/reports.md` §8) — **at most once a minute**
+  (`*/1 * * * *`), no seconds field, no `@hourly`; `refresh_human` is the schedule in words
+  and is the only form the user sees, so make it match exactly. Restate the parsed schedule
+  to the user, as for a scheduled report. `lib/watch.py` checks only the cron grammar, and
+  Linux and Windows run the same expression.
 
 Which to pick: a number that should move as the market moves → stream widget, always. A
 number that comes from **your** computation (exposure, a signal, a scan) → machine widget on
@@ -488,9 +489,10 @@ from lib.report_templates import headers_from_env
 from lib.watch import write_data
 
 hdrs = headers_from_env()
-pool = fetch_twstock_market_value_all(hdrs, top=60)                 # cached 1 h locally
-ids = [s for s in pool["stock_id"] if not s.startswith("00")][:50]  # drop ETFs; batch max 50
-names = dict(zip(pool["stock_id"], pool["name"]))
+pool = fetch_twstock_market_value_all(hdrs)                         # one call, cached 1 h
+pool = pool[~pool["is_etf"]].head(50)                               # ETFs out; batch max 50
+ids = pool["stock_id"].tolist()
+names = dict(zip(pool["stock_id"], pool["name"]))                   # from the filtered pool
 quotes = fetch_twstock_quote_batch(ids, hdrs)                       # one call, ~10 s snapshot
 rows = [{"id": s, "name": names.get(s, ""), "last": f"{q['close']:,.1f}",
          "chg": f"{q['change_rate']:+.2f}%", "vol": f"{q['total_volume']:,}"}

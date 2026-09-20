@@ -1,0 +1,927 @@
+/* =========================================================================
+   Blave 桌面版 — 元件與版面
+   版面/元件抄自 web/app/main/templates/agent/workspace.html +
+   web/app/static/css/agent/workspace.css 的 v1 子集。token 在 tokens.css。
+   ========================================================================= */
+/* 字:系統字堆疊,不是官網的 Plus Jakarta Sans + Noto Sans TC。
+   canon › Native app › 字 的「原生 app 用系統字」例外延伸到桌面 Electron:
+   打包 Noto Sans TC 每個字重要數 MB(得 subset、得有 build pipeline),而 SF Pro
+   在 Mac 上反而讓這個 app 讀起來像原生軟體。中文會自己落到 PingFang TC。
+   這條是**誠實宣告已經在出貨的東西**——改之前 CSS 宣告一套、畫面上是另一套。 */
+.app {
+  height: 100%; width: 100%;
+  background: var(--bg-body);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;                   /* Terminal 基準字(canon › Density) */
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  display: flex; flex-direction: column;
+}
+.app .mono { font-family: "Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+/* 零特異度 reset(:where):放全域而非 .app 下——並排展示的卡片不在 .app 裡,
+   收在 .app 下會讓那幾顆鈕露出瀏覽器預設填色。 */
+:where(button) { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+:where(a) { text-decoration: none; }
+.wm { display: block; height: 18px; width: auto; }   /* Blave 文字標,fill=currentColor */
+
+/* =========================================================================
+   畫面 1 — 連結畫面(獨立 full-screen,不是蓋在工作頁上的 modal)
+   ========================================================================= */
+.cn { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+/* 44px 拖曳條:只放燈號,不畫任何 chrome(底色 = 頁面地色) */
+.cn-bar { flex: none; height: 44px; display: flex; align-items: center; padding: 0 var(--space-16); }
+/* 語言 segment(設計師 spec):跟 .mp-rail 同配方,但軌不裁切——每格靠 ::before 把熱區補到 44,
+   裁切會把它切掉;圓角改由首末格自己畫。上溢的 7px 落在跟卡之間的 16 裡,不蓋卡 */
+.cn-lang {
+  display: flex;
+  border: 1px solid var(--border-frame); border-radius: var(--radius-xs);
+}
+.cn-lang button {
+  position: relative; height: 30px; padding: 0 var(--space-8);
+  font-size: 12px; color: var(--ink-3); white-space: nowrap;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+.cn-lang button::before { content: ""; position: absolute; inset: -7px 0; }
+.cn-lang button + button { border-left: 1px solid var(--border-frame); }
+.cn-lang button:hover { color: var(--ink); }
+.cn-lang button[aria-checked="true"] { background: var(--surface-control-on); color: var(--ink); font-weight: 600; }
+.cn-lang button:first-child { border-radius: calc(var(--radius-xs) - 1px) 0 0 calc(var(--radius-xs) - 1px); }
+.cn-lang button:last-child { border-radius: 0 calc(var(--radius-xs) - 1px) calc(var(--radius-xs) - 1px) 0; }
+.cn-lang button:focus-visible { outline-offset: -2px; }
+.cn-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding-bottom: 44px; }
+.cn-mid h4 {
+  margin: 0 0 var(--space-24);
+  font-size: 20px; font-weight: 600; line-height: 1.4;  /* Terminal h4(canon › Type scale) */
+  color: var(--ink);
+}
+/* 尾註列跟卡同寬;左右 16 = .cn-sec 內距,文字跟卡內標題同一左線、segment 跟「登入 Blave」同一右線 */
+.cn-foot {
+  width: 560px; max-width: 100%; min-height: 30px;
+  margin: var(--space-16) 0 0; padding: 0 var(--space-16);
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-16);
+}
+.cn-foot p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+
+/* 連結卡:靜止表面 → shadow-md、無邊框(canon › Elevation:ring 就是那條線) */
+.cn-card {
+  width: 560px;                      /* = workspace.css .ns-modal.wide 的 560 */
+  background: var(--surface-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  text-align: left;
+}
+.cn-sec { padding: var(--space-16); }
+.cn-sec + .cn-sec { border-top: 1px solid var(--border-hairline); }
+
+/* 區塊 1:Blave 的 AI(上) */
+.cn-blave { display: flex; align-items: center; gap: var(--space-16); }
+.cn-blave .cn-head { flex: 1; min-width: 0; }
+.cn-ttl { font-size: 13px; font-weight: 600; color: var(--ink); }
+/* in-app 功能動作鈕:高對比中性填色,永遠不是橘(canon › Interaction states)。
+   高 32 不是 44 —— canon › Verification:「44 是熱區下限,不是視覺高度」,而
+   Terminal › Density 的控件帶是 32–36、Outlined control 是 30–34。同一張卡上兩顆
+   要人二選一的鈕本來就該在同一個尺寸帶。半徑與字重也對齊 .btn-out:焦點由填色
+   承擔,不必再用一階字重重講一次(canon › Type:按鈕 500)。 */
+.btn-fill {
+  /* 盒模型跟 .btn-out 完全一樣(1px 邊框 + padding 12),只是邊框透明:兩種鈕同寬,
+     上下兩列的「● 已登入」才會對在同一條垂直線上,而且不必寫 off-scale 的 13。 */
+  flex: none; height: 32px; padding: 0 var(--space-12);
+  border: 1px solid transparent; border-radius: var(--radius-xs);
+  background: var(--control-fill); color: var(--control-fill-text);
+  font-size: 13px; font-weight: 500;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+.btn-fill:hover { opacity: .85; }
+
+/* 區塊 2:本機偵測到的 agent(下) */
+/* 標題列:標題一行(右邊可帶一顆文字鈕),說明在標題底下自己一行(Wei)。
+   同一行時說明跟「重新偵測」擠在一起,分不出哪個是字、哪個能點。 */
+.cn-head { margin: 0; display: grid; grid-template-columns: 1fr auto; align-items: baseline; column-gap: var(--space-8); }
+.cn-meta { grid-column: 1 / -1; grid-row: 2; margin-top: var(--space-2); font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+/* 文字鈕:常駐底線——灰字沒有底線的話跟旁邊的說明句長得一樣,看不出能點 */
+.btn-quiet {
+  flex: none;
+  font-size: 12px; color: var(--ink-3);
+  text-decoration: underline; text-underline-offset: 3px;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+.btn-quiet:hover { color: var(--ink); }
+.cn-rows { margin-top: var(--space-12); }
+.cn-row {
+  display: flex; align-items: center; gap: var(--space-12);
+  min-height: 44px;                  /* Fitts 熱區 */
+}
+.cn-row + .cn-row { border-top: 1px solid var(--border-hairline); }
+.cn-row .n { flex: 1; min-width: 0; font-size: 13px; color: var(--ink); }
+.cn-row.off .n { color: var(--ink-3); }
+.cn-st { flex: none; display: flex; align-items: center; gap: var(--space-6); font-size: 12px; color: var(--ink-3); }
+.cn-st.on { color: var(--ink-2); }
+.cn-st .dot { width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--color-green); }
+/* Outlined control(canon › Terminal toolbar):hover 只灰填,邊框與字不變色 */
+.btn-out {
+  flex: none; height: 32px; padding: 0 var(--space-12);
+  border: 1px solid var(--border-frame); border-radius: var(--radius-xs);
+  background: transparent; color: var(--ink);
+  font-size: 13px; font-weight: 500;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.btn-out:hover { background: var(--surface-muted); }
+.cn-hint { margin: var(--space-12) 0 0; font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+/* 暗底「必須被讀到」的次要字升一階(canon › Neutrals 註) */
+.cn-hint.up, .cn-st.up { color: var(--ink-2); }
+
+/* =========================================================================
+   畫面 2 / 3 — 三欄工作頁(版面照 workspace.html / workspace.css)
+   ========================================================================= */
+.ws { flex: 1; display: flex; min-height: 0; }
+
+/* LEFT — .pane-strategies:236 寬、右 hairline、padding 16/12 */
+.pane-strategies {
+  width: var(--side-w, 236px); flex: 0 0 auto;
+  border-right: 1px solid var(--border-hairline);
+  display: flex; flex-direction: column;
+  padding: 0 var(--space-12) var(--space-16);
+}
+/* 字標在拖曳條**下面**:紅綠燈佔 x 12–71.5 / y 10–23.5,字標原本在 y 16–33.5,
+   重疊 55×7.5 —— b、l 的上伸部正好住在那一帶,產品名被讀成「olave」。 */
+.ws-brand {
+  flex: none; height: 32px; display: flex; align-items: center;
+  padding: 0 var(--space-4);
+}
+.ws-brand .wm { color: var(--ink); }
+/* 字標是連到官網的連結;熱區上下各補 8(視覺 16 高,點得到的是 32) */
+.ws-home { display: flex; align-items: center; height: 100%; border-radius: var(--radius-xs); transition: opacity var(--motion-fast) var(--ease-standard); }
+.ws-home:hover { opacity: .8; }
+.strat-head { display: flex; align-items: center; padding: var(--space-16) var(--space-4) var(--space-8); }
+.strat-head .label { font-size: 12px; color: var(--ink-3); }
+.strat-list { flex: 1; overflow-y: auto; }
+/* 三態(載入/空/錯誤)同一行灰字,無插圖(canon › States › Empty) */
+.pf-state { padding: var(--space-24) var(--space-4); font-size: 13px; color: var(--ink-3); }
+
+/* MIDDLE — .pane-main:沒選策略時 main-head / main-tabs 都不渲染 */
+.pane-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* 中欄的空狀態 = 雲端工作頁的 welcome(web `agent/workspace.css` 的 .main-welcome /
+   .wc-inner / .wc-mark / .wc-chips / .wc-chip,數值逐項照抄)。 */
+.main-empty {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; justify-content: center; padding: var(--space-24);
+}
+.wc-inner {
+  margin: auto 0; display: flex; flex-direction: column; align-items: center;
+  padding-bottom: var(--space-48);   /* 光學置中:內容略高於幾何中心(VS Code welcome 同手法) */
+}
+/* 浮水印:只比背景亮一階(border 那一階),不是要被讀的東西 */
+/* 雲端版另有 `max-width: 40%`(防手機窄欄)。這裡不能照抄:那個 % 是對 .wc-inner 算的,
+   而它是 shrink-to-fit——雲端有三顆短籤撐寬它,我們只有一顆,40% 算出來只剩 72px(實測)。
+   桌面版最小視窗 1024,中欄最窄也有三百多 px,不需要那道防線。 */
+.wc-mark { width: 120px; height: auto; color: var(--border-hairline); flex: none; }
+.wc-chips {
+  margin-top: var(--space-32);       /* 組間 32 : 組內 8 */
+  display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-8);
+}
+.wc-chip {
+  height: 32px; padding: 0 var(--space-12);
+  border: 1px solid var(--border-frame); border-radius: var(--radius-xs);
+  color: var(--ink-2); font-size: 12px; white-space: nowrap;
+  transition: border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+.wc-chip:hover { border-color: var(--ink-3); color: var(--ink); }
+
+/* RIGHT — .pane-chat:452 寬、卡面底 */
+.pane-chat {
+  width: var(--chat-w, 452px); flex: 0 0 auto;
+  background: var(--surface-card);
+  /* light 下 white↔surface 只差一階、幾乎看不出欄界,補一條 hairline(與側欄右緣同語言) */
+  border-left: 1px solid var(--border-hairline);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.chat-scroll { flex: 1; overflow-y: auto; padding: var(--space-24) var(--space-24) var(--space-16); }
+.msg { margin-bottom: var(--space-24); }
+/* 用戶靠右淡底泡泡、agent 靠左純文字——靠對齊區分,不加角色 label */
+.msg.you { display: flex; justify-content: flex-end; }
+.msg.you .bubble {
+  background: var(--surface-muted); border-radius: var(--radius-lg);
+  padding: var(--space-8) var(--space-16); max-width: 84%;
+  font-size: 13px; line-height: 1.6; white-space: pre-wrap;
+}
+/* pre-wrap:agent 的回覆靠換行排版(清單、逐行結果),不保留的話
+   「references\nstrategies\nmanager」會黏成一行。 */
+.msg.ai { font-size: 13px; line-height: 1.7; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }   /* 沒有空白的長路徑 / 行內 code 不撐破聊天欄 */
+.msg.ai p { margin: 0; }
+/* 行內 markdown(paintAi):粗體只加重不變色;行內程式碼走 mono、亮度退一階,不加底色框
+   (Terminal 平面、聊天欄窄,一行裡好幾個小框會很吵) */
+.msg.ai strong { font-weight: 600; }
+.msg.ai code { font-family: "Roboto Mono", ui-monospace, monospace; font-size: 12px; color: var(--ink-2); }
+.chat-input-wrap { flex: none; padding: var(--space-16) var(--space-24) var(--space-24); }
+.chat-input {
+  /* 直向:上 textarea、下工具列。外框、半徑、內距都不變,總高約 +36px。 */
+  display: flex; flex-direction: column; align-items: stretch; gap: var(--space-4);
+  border: 1px solid var(--border-frame); border-radius: var(--radius-md);
+  background: var(--surface-field);
+  padding: var(--space-8) var(--space-8) var(--space-8) var(--space-12);
+}
+.btn-send {
+  width: 32px; height: 32px; flex: 0 0 32px; border-radius: var(--radius-sm);
+  background: var(--control-fill); color: var(--control-fill-text);
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+.btn-send:hover { opacity: .85; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+html, body { margin: 0; height: 100%; background: var(--bg-body); }
+.app { height: 100vh; width: 100vw; border: none; border-radius: 0; }
+[hidden] { display: none !important; }
+/* 44 = 對話列的高度:整個視窗頂是同一條標題帶,側欄與中欄的內容起點 = 對話列底線(設計師 M1) */
+.cn-bar, .ws-bar { -webkit-app-region: drag; height: 44px; flex: none; }
+/* 工作頁的拖曳條浮在三欄上面、不佔版面:聊天欄的卡面與對話列才能頂到視窗最上緣(Wei)。
+   紅綠燈只在左邊,側欄與中欄自己留 44px;右邊那欄沒有東西要避。pointer-events: none
+   讓底下的按鈕照常收到滑鼠(拖曳區是系統層的,不靠 DOM 事件)。 */
+#view-ws { position: relative; }
+.ws-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 20; pointer-events: none; }
+.pane-strategies, .pane-main { padding-top: 44px; }
+/* 互動元素要能點:整條 drag 之外的東西一律退出拖曳區 */
+button, textarea, input, a { -webkit-app-region: no-drag; }
+/* 自動長高:高度由 JS 量 scrollHeight 寫進 style,這裡只定上限與節奏
+   (照 web/app/static/css/agent/workspace.css `.chat-input textarea` 的
+   max-height 120px / padding 4px 0 / 13px·1.5 —— 約 6 行滿版後自己捲) */
+.chat-input textarea {
+  /* 直向 flex 裡 flex:1 的 basis 是 0,會蓋掉 autosize 設的 height —— 框就不長高 */
+  flex: none; background: none; border: none; outline: none; resize: none;
+  color: inherit; font: inherit; line-height: 1.5;
+  max-height: 120px; padding: var(--space-4) 0;
+}
+.chat-input textarea::placeholder { color: var(--ink-3); }
+.msg.sys { color: var(--ink-3); font-size: 12px; }
+
+/* =========================================================================
+   等待指示器 — 網頁工作頁「思考列」的 v1 子集
+   來源:web/app/static/css/agent/workspace.css 約 1830–1945(.think-indicator /
+   .think-head / .think-ticks / .think-verb / .think-elapsed / .is-fading)。
+   搬過來的是 tick 條 + 動詞 + 秒數,以及展開面板(chevron / .think-steps 工具收據 /
+   .think-reason 思考文字)。回合結束後整塊留下來當可再點開的「思考過程」標記。
+   差別兩處:① 色改引 tokens.css 的角色變數(--ink / --ink-3),不寫死 dark token,
+   因為這個外殼的 CSS 亮暗兩態都成立;② 它是 .chat-scroll 的最後一個兄弟節點
+   (不是巢在某一回合裡),所以下緣間距對齊 .msg 的 24 而不是 web 的 4。
+   ========================================================================= */
+.think-indicator {
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: var(--space-4);
+  margin-bottom: var(--space-24);
+  color: var(--ink-3); font-size: 13px; line-height: 1.5;
+}
+/* 淡出:回合結束後移除前先褪,時長走 --motion-base(JS 讀同一顆 token 對時) */
+.think-indicator.is-fading {
+  opacity: 0;
+  transition: opacity var(--motion-base) var(--ease-standard);
+}
+/* 整輪一顆 <button>。有東西可以展開才可點(.no-toggle = 純等待,沒有內容) */
+.think-head {
+  display: inline-flex; align-items: center; align-self: flex-start;
+  gap: var(--space-8); min-height: 26px;
+  padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.think-head.no-toggle { cursor: default; }
+/* 回合結束:tick 條收掉——凍結的秒數已經說了花多久,停住的條子是同一件事講兩次。
+   字不變暗:這一列是用戶會回頭展開來讀的內容,不是過期的狀態。 */
+.think-indicator.is-done { margin-bottom: var(--space-8); }
+.think-indicator.is-done .think-ticks { display: none; }
+
+.think-chev {
+  flex: none; width: 5px; height: 5px; margin-left: 2px; position: relative; top: -1px;
+  border-right: 1.6px solid var(--ink-3); border-bottom: 1.6px solid var(--ink-3);
+  transform: rotate(45deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+  visibility: hidden;
+}
+.think-head.has-reason .think-chev { visibility: visible; }
+.think-indicator.is-open .think-chev { transform: rotate(-135deg); }
+
+/* 展開面板:grid-rows 0fr↔1fr 收合(動到面板的真實高度,不用猜 max-height)。
+   wrap 只能有一個 grid row(.think-fold)——多一個子元素會掉進 implicit auto row,
+   0fr 收不掉它。minmax(0,1fr) 是為了讓 nowrap 的長路徑不把聊天欄撐爆。 */
+.think-reason-wrap {
+  align-self: stretch; display: grid;
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--motion-base) var(--ease-standard);
+}
+.think-indicator.is-open .think-reason-wrap { grid-template-rows: 1fr; }
+.think-fold { min-height: 0; opacity: 0; transition: opacity var(--motion-base) var(--ease-standard); }
+.think-indicator.is-open .think-fold { opacity: 1; }
+
+/* 工具收據:一次呼叫一列——記號 + 動詞 + 受詞 + 耗時。記號沿用 tick 條的 2px 短劃
+   語言(不引入勾勾 / 圓點 / chip),列界靠行距。8 列半的高度上限:第 9 列露出
+   上半截就是「下面還有」的提示;沒有上限的話 50 次呼叫的回合展開是 1200px。 */
+.think-steps {
+  list-style: none; margin: 0 0 var(--space-4) 15px; padding: 0;
+  max-width: calc(100% - 15px); max-height: 204px; overflow-y: auto;
+}
+.think-steps:empty { display: none; }
+.think-step {
+  display: flex; align-items: center; gap: var(--space-8);
+  padding: 3px 0; font-size: 12px; line-height: 1.5;
+}
+.think-step-mark { flex: none; width: 8px; height: 2px; background: var(--ink-3); }
+.think-step.is-run .think-step-mark { width: 4px; background: var(--ink); }
+/* 錯誤是狀態不是內容:紅只上在記號與耗時,動詞受詞不變色 */
+.think-step.is-err .think-step-mark { background: var(--color-red); }
+.think-step-verb { flex: none; color: var(--ink-2); }
+.think-step-obj {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink-3);
+}
+.think-step-time {
+  flex: none; margin-left: auto; padding-left: var(--space-8);
+  font-size: 11px; color: var(--ink-3); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 思考文字:展開來就是要讀的,所以走無襯線、會換行、有高度上限可捲 */
+.think-reason {
+  max-width: 100%; max-height: 9em; overflow-y: auto;
+  margin: var(--space-4) 0 var(--space-4) 15px;
+  color: var(--ink-3); font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.think-reason:empty { display: none; }
+/* tick 條:一秒一格。最新那格在最右、滿墨,舊的按年齡退色並整條往左滑出
+   44px 窗口——每一格都是真的過去了一秒,不是裝飾性 loader(同 web 註解) */
+.think-ticks { position: relative; flex: none; width: 44px; height: 12px; overflow: hidden; }
+.think-ticks-in {
+  position: absolute; left: 0; bottom: 0; white-space: nowrap;
+  font-size: 0;                            /* 殺掉 inline-block 之間的空白 */
+  transition: transform var(--motion-base) var(--ease-standard);
+}
+/* 2px 格、6px 間距、直角切邊(radius scale 從 4px 起,2px 條會被畫成藥丸) */
+.think-ticks-in i {
+  display: inline-block; width: 2px; height: 10px; margin-right: 4px;
+  background: var(--ink); opacity: 0;
+  transition: opacity var(--motion-base) var(--ease-standard);
+}
+.think-verb { flex: none; font-size: 11px; line-height: 1; color: var(--ink-3); }
+/* tabular-nums:9s → 10s 不會把動詞推一下(web 那邊由 .mono 帶,外殼沒有 mono) */
+.think-elapsed {
+  flex: none; font-size: 11px; line-height: 1; color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 空狀態的換行來自 .po 的 \n(翻譯檔裡不放 <br>) */
+.pf-state { white-space: pre-line; }
+
+/* ── 鍵盤焦點(canon › States › Focus)────────────────
+   原本全 app 一條 :focus-visible 都沒有,而唯一的文字輸入框還 outline:none
+   且沒有替代。canon:borderless 欄位自給 focus、絕不 outline:none 而無替代;
+   dark 的 ring 是 2px darkText + 2px offset。--focus-ring 早就在 token 裡。 */
+:where(button, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+/* 輸入框走 border-color,不畫 ring(canon:欄位的 focus 是邊框) */
+.chat-input:focus-within { border-color: var(--ink); }
+
+/* ── 熱區(canon › Verification:熱區與視覺分開量)──────
+   桌面指標裝置的下限是 WCAG 2.5.8 的 24×24。這兩顆是 12px 字 + UA padding
+   ≈19px 高,用透明 ::before 外擴,**不動視覺高度**。 */
+.btn-quiet { position: relative; }
+.btn-quiet::before {
+  content: ""; position: absolute; inset: -6px -4px;
+}
+/* 32 高的鈕補到 44:兩種鈕都有 1px 邊框(填色那顆是透明的),pseudo 錨的是
+   padding box、邊框不算在內,所以是 -7;-6 只得到 42。 */
+.btn-fill, .btn-out { position: relative; }
+.btn-fill::before, .btn-out::before { content: ""; position: absolute; inset: -7px; }
+
+/* 聊天欄的空狀態:只有一句話。起手範例鈕在中欄(.main-empty)。 */
+
+/* 目前使用的那一列:純加粗,不發明第三種徽章(canon › Active)。只對 .n 有效
+   —— 它沒設字重、繼承 400,加粗看得出來;`.cn-ttl` 本來就是 600,對它加粗是
+   no-op,所以不寫。Blave 那段的「目前使用」靠按鈕消失表示,跟列的做法一致。 */
+.cn-row.is-cur .n { font-weight: 600; }
+/* 目前使用的那個:按鈕格裡一行字,寬度對齊按鈕讓狀態欄不跳 */
+.cn-cur { flex: none; font-size: 12px; font-weight: 600; color: var(--ink); }
+
+/* ── model / effort 選擇器(設計師 spec,版 A)──────────────
+   工具列左=觸發鈕、右=送出。觸發鈕往左退 8px,讓它的字對齊 textarea 的字。 */
+.ci-bar { display: flex; align-items: center; gap: var(--space-8); margin-left: calc(-1 * var(--space-8)); }
+.ci-bar .btn-send { margin-left: auto; }
+/* 面板的定位基準是整個輸入框(.chat-input),不是這顆觸發鈕:聊天欄最窄 320,
+   寫死 360 寬、從觸發鈕左緣長出去的面板會超出視窗右緣被切掉(Wei 截圖) */
+.mp { min-width: 0; }
+.chat-input { position: relative; }
+/* 無邊框:輸入框已經是框,框裡不再放框 */
+.mp-trigger {
+  display: inline-flex; align-items: center; gap: var(--space-6);
+  height: 32px; padding: 0 var(--space-8); max-width: 100%;
+  border-radius: var(--radius-xs); font-size: 13px; line-height: 1;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.mp-t-model { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-t-effort { flex: none; color: var(--ink-3); white-space: nowrap; }
+.mp-trigger:hover:not(:disabled), .mp.is-open .mp-trigger { background: var(--surface-muted); }
+.mp-trigger:hover:not(:disabled) .mp-t-model, .mp.is-open .mp-t-model { color: var(--ink); }
+.mp-trigger:disabled { cursor: not-allowed; }
+.mp-trigger:disabled .mp-t-model, .mp-trigger:disabled .mp-t-effort { color: var(--color-greyDark); }
+.mp-chev {
+  flex: none; width: 5px; height: 5px; margin: 0 2px 2px;
+  border-right: 1.6px solid var(--ink-3); border-bottom: 1.6px solid var(--ink-3);
+  transform: rotate(45deg); transition: transform var(--motion-fast) var(--ease-standard);
+}
+.mp.is-open .mp-chev { transform: rotate(-135deg); margin-bottom: -2px; }
+
+/* 面板往上開(canon › Dropdown menu › Panel):底 surface-card、shadow-md、不加 border */
+.mp-panel {
+  position: absolute; left: 0; bottom: calc(100% + var(--space-8)); z-index: 10;
+  width: min(360px, 100%); padding: var(--space-6);
+  background: var(--surface-card); box-shadow: var(--shadow-md); border-radius: var(--radius-lg);
+  animation: mp-in var(--motion-fast) var(--ease-standard);
+}
+@keyframes mp-in { from { opacity: 0; transform: translateY(4px); } }
+.mp-cap { margin: 0; padding: 6px 10px 4px; font-size: 12px; color: var(--ink-3); }
+/* 型錄變長時只捲清單,effort 軌不動 */
+.mp-models { display: flex; flex-direction: column; max-height: 264px; overflow-y: auto; }
+.mp-row {
+  display: flex; align-items: center; gap: var(--space-8);
+  min-height: 32px; padding: 6px 10px; border-radius: var(--radius-xs);
+  font-size: 13px; text-align: left; color: var(--ink-2);
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.mp-row:hover { background: var(--surface-muted); color: var(--ink); }
+/* ring 往內畫:清單是 overflow 容器,往外的 2px offset 會被左右邊切掉 */
+.mp-row:focus-visible { outline-offset: -2px; }
+/* 選中 = 純加粗(canon › Active),不加勾勾、不填色 */
+.mp-row[aria-checked="true"] { color: var(--ink); font-weight: 600; }
+.mp-def { font-size: 12px; font-weight: 400; color: var(--ink-3); }
+.mp-div { height: 1px; margin: var(--space-6) 0; background: var(--border-hairline); }
+/* effort 軌:軌道本身不填色——canon 登記過「dark 下 segment 選中格與軌道同色」是
+   未解的債,不填軌道就踩不到。 */
+.mp-rail {
+  display: flex; margin: 0 10px;
+  border: 1px solid var(--border-frame); border-radius: var(--radius-xs); overflow: hidden;
+}
+/* 內距 4 不是 8:聊天欄最窄時軌只有約 236px,五格(含 Extra High)用 8 會超出去,
+   最右邊的 Max 被軌的 overflow 切掉。寬的時候多的空間由 flex-grow 平分回去 */
+.mp-seg {
+  flex: 1 1 auto; min-width: 0; height: 30px; padding: 0 var(--space-4);
+  font-size: 12px; color: var(--ink-3); white-space: nowrap;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.mp-seg + .mp-seg { border-left: 1px solid var(--border-frame); }
+.mp-seg:hover { color: var(--ink); }
+.mp-seg[aria-checked="true"] { background: var(--surface-control-on); color: var(--ink); font-weight: 600; }
+/* 軌在裁切容器裡,focus ring 往內畫才不會被切掉 */
+.mp-seg:focus-visible { outline-offset: -2px; border-radius: 0; }
+.mp-note { margin: 0; padding: var(--space-8) 10px 6px; font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+
+/* ── Tooltip(canon › Components › Tooltip)──────────────
+   滑過**或鍵盤聚焦**才現的短解釋,不放關鍵資訊。dark:靠比卡片亮一階的底色分層
+   (darkBorder),不是更深的陰影;無邊框、不畫箭頭、離觸發點 6px。Esc 由面板的
+   document 監聽一併處理(面板關了 tooltip 自然消失)。 */
+/* 「思考深度」→ 軌:軌有看得見的框線、點線底線又往下吃約 3px,沿用 .mp-cap 的 4px 會貼在
+   一起。12 = 字底到框線約 15px,跟上面「模型」字底到第一列文字的 16.5px 同一個節奏。 */
+.mp-cap-tip { position: relative; padding-bottom: var(--space-12); }
+.mp-tip {
+  padding: 0; font-size: 12px; color: var(--ink-3); cursor: help;
+  text-decoration: underline dotted; text-underline-offset: 3px;
+}
+.mp-tip:hover, .mp-tip:focus-visible { color: var(--ink-2); }
+.tip {
+  position: absolute; left: 10px; bottom: calc(100% + 6px); z-index: 20;
+  display: none; max-width: 260px; padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted); color: var(--ink-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);   /* canon sanctioned:transient overlay 的浮層陰影 */
+  font-size: 12px; line-height: 1.45; text-align: left;
+  animation: mp-in var(--motion-fast) var(--ease-standard);
+}
+.tip:empty { display: none !important; }
+.mp-tip:hover + .tip, .mp-tip:focus-visible + .tip { display: block; }
+/* 說明行沒有內容時不佔高度(只有 model 沒有 effort 時才有字) */
+.mp-note[hidden] { display: none; }
+.mp-rail { margin-bottom: var(--space-8); }
+
+/* 這個帳號用不了的 model:名字退一階灰、旁邊標一句,但**不鎖**——訂閱升級之後就能用,
+   鎖死的話用戶得去刪檔。成功跑過一輪標記就會自己消失。 */
+.mp-row.is-na { color: var(--ink-3); }
+
+/* ── sidebar 策略列 ───────────────────────────────
+   一列 = 名字 + Sharpe。選中 = 純加粗 + 淡底(canon › Active 一律灰階)。 */
+.strat-row {
+  display: flex; align-items: center; gap: var(--space-8); width: 100%;
+  padding: var(--space-8) var(--space-12); border-radius: var(--radius-md);
+  font-size: 13px; line-height: 1.4; text-align: left; color: var(--ink-2);
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.strat-row:hover { background: var(--surface-muted); color: var(--ink); }
+.strat-row[aria-current="true"] { background: var(--surface-muted); color: var(--ink); font-weight: 600; }
+/* 名字是識別字(snake_case),過長截尾;數字靠右、等寬,上下列才對得齊 */
+.strat-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── 策略報告的骨架(分頁內容由 report-*.css 各自負責)──── */
+.rp { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.rp-head { flex: none; min-width: 0; padding: var(--space-16) var(--space-24) var(--space-12); }
+.rp-name { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.3; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 底線分頁(canon › 底線分頁):目前項 = ink + 2px 底線,其餘 ink-3;不用橘 */
+.rp-tabs { flex: none; display: flex; gap: var(--space-24); padding: 0 var(--space-24); border-bottom: 1px solid var(--border-hairline); }
+.rp-tab {
+  height: 44px; padding: 0; flex: 0 0 auto; white-space: nowrap; font-size: 13px; font-weight: 500; color: var(--ink-3);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+.rp-tab:hover:not(:disabled) { color: var(--ink); }
+.rp-tab[aria-selected="true"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--ink); }
+.rp-tab:disabled { color: var(--color-greyDark); cursor: not-allowed; }
+.rp-panel { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-24); }
+.rp-panel[hidden] { display: none; }
+.rp-code { margin: 0; font-size: 12px; line-height: 1.7; color: var(--ink-2); white-space: pre; overflow-x: auto; tab-size: 4; }
+.rp-desc { margin: var(--space-4) 0 0; font-size: 12px; line-height: 1.5; color: var(--ink-3);
+  /* 沒描述也留一行高:有/無描述的策略互切時分頁列才不會上下跳 */
+  min-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#rp-code { padding: var(--space-16) var(--space-24); }
+/* 灰填上 ink-3 只有 3.6:1,升一階 */
+#strat-empty { padding: var(--space-8) var(--space-12); }
+
+/* ===== 可拖拉 / 可收合的兩側欄(雲端工作頁 .pane-div 那套移植)=====
+   狀態載體在 <html>:ws-sc / ws-cc(側欄 / 聊天收合)+ --side-w / --chat-w(拖出的寬)。 */
+.pane-strategies, .pane-chat {
+  overflow: hidden;
+  transition: width var(--motion-base) var(--ease-standard), padding var(--motion-base) var(--ease-standard);
+}
+/* 拖曳中要即時跟手,不吃緩動 */
+body.resizing .pane-strategies, body.resizing .pane-chat { transition: none; }
+/* 收合動畫把寬度掃向 0:子層撐住 min-width,內容是滑出去而不是逐字回流 */
+.chat-scroll, .chat-input-wrap { min-width: 320px; }
+
+.ws-icon {
+  display: block; width: 16px; height: 16px; fill: none; stroke: currentColor;
+  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* 欄縫分隔線:8px 熱區騎在 hairline 上、不佔版面;resting 零 chrome,
+   hover / focus / 拖曳中才浮一條 2px 線。雙擊回預設寬。 */
+.pane-div {
+  flex: 0 0 8px; margin: 0 -4px; z-index: 5; position: relative;
+  cursor: col-resize; -webkit-app-region: no-drag;
+}
+.pane-div::after {
+  content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px;
+  transform: translateX(-50%); background: transparent;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.pane-div:hover::after, .pane-div:focus-visible::after { background: var(--color-greyDark); }
+.pane-div.active::after { background: var(--color-greyMedium); }
+.pane-div:focus-visible { outline: none; }
+
+/* 收合把手:hover 分隔線才現身的 20×44 膠囊;點=收合,按著拖=調寬。
+   z-index:::after 那條線畫在子元素之上,不墊高的話把手正中 2px 點不到 */
+.pane-div .handle {
+  position: absolute; left: 50%; top: 50%; z-index: 1; transform: translate(-50%, -50%);
+  width: 20px; height: 44px; min-height: 0; padding: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-card); border: 1px solid var(--border-hairline); color: var(--ink-3);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none; cursor: pointer;
+  transition: opacity var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+.pane-div:hover .handle, .pane-div:focus-visible .handle { opacity: 1; pointer-events: auto; }
+.pane-div .handle:hover { background: var(--surface-muted); color: var(--ink); }
+.pane-div.pane-off .handle { display: none; }
+.pane-div .handle .ws-icon, .chat-strip .ws-icon { width: 12px; height: 12px; }
+
+/* 側欄收合 = 44px 細軌,只留「展開」 */
+.side-rail { display: none; }
+html.ws-sc .pane-strategies { width: 44px; padding: 44px var(--space-8) var(--space-16); }
+html.ws-sc .ws-brand, html.ws-sc .strat-head, html.ws-sc .strat-list, html.ws-sc .ws-foot { display: none; }
+/* padding-top 2:按鈕中心對到字標原本的中心(y=54),收合/展開時左上角不跳 */
+html.ws-sc .side-rail { display: flex; flex-direction: column; align-items: center; padding-top: var(--space-2); }
+.rail-btn {
+  width: 28px; height: 28px; min-height: 0; padding: 0; position: relative;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--radius-sm); background: none; color: var(--ink-3);
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.rail-btn::before { content: ""; position: absolute; inset: -8px; }   /* 視覺 28、熱區 44 */
+.rail-btn:hover { background: var(--surface-muted); color: var(--ink); }
+
+/* 聊天收合 = 24px 全高邊條,整條可點(窄,靠高度補 Fitts) */
+.chat-strip { display: none; }
+html.ws-cc .pane-chat { width: 0; border-left: 0; }
+html.ws-cc .chat-strip {
+  display: flex; flex: 0 0 24px; padding: 0; min-height: 0; align-items: center; justify-content: center;
+  border: 0; border-left: 1px solid var(--border-hairline); border-radius: 0;
+  background: var(--surface-card); color: var(--ink-3);
+  transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+html.ws-cc .chat-strip:hover { background: var(--surface-muted); color: var(--ink); }
+
+/* 拖曳中:游標不因滑過別的元素而閃、文字不被選起來 */
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing * { cursor: col-resize !important; }
+@media (prefers-reduced-motion: reduce) {
+  .pane-strategies, .pane-chat, .pane-div::after, .pane-div .handle, .chat-strip, .rail-btn { transition: none; }
+}
+
+
+/* =========================================================================
+   左下角設定鈕 + 設定 modal。逐值照雲端 workspace.css 的
+   .ws-foot / .ws-more、.scrim / .ns-modal / .modal-head、.set-* 家族。
+   ========================================================================= */
+.ws-foot {
+  flex: none;
+  margin-top: var(--space-8);      /* 貼底靠 .strat-list 的 flex:1;這 8 是清單最後一列到線的距離 */
+  padding-top: var(--space-8);
+  border-top: 1px solid var(--border-hairline);   /* 捲動區與常駐 footer 的分隔 */
+}
+.ws-more {
+  display: flex; justify-content: flex-start; align-items: center; gap: var(--space-8);
+  width: 100%; min-width: 0;
+  padding: var(--space-8) var(--space-12);         /* 左緣 12 = 策略列同一條對齊邊 */
+  border-radius: var(--radius-md);
+  text-align: left; white-space: nowrap;
+  font-size: 13px; line-height: 1.4;
+  color: var(--ink-3);                             /* 比策略名低一階:chrome 不是內容 */
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.ws-more:hover:not(:disabled), .ws-more[aria-expanded="true"] { background: var(--surface-muted); color: var(--ink); }
+.ws-more:disabled { cursor: not-allowed; color: var(--color-greyDark); }
+.ws-more:focus-visible { outline-offset: -2px; }
+.ws-more-ic {
+  flex: none; width: 16px; height: 16px;
+  fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+
+.scrim {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--space-24);
+  background: var(--scrim);
+  opacity: 0;
+  transition: opacity var(--motion-base) var(--ease-standard);
+  -webkit-app-region: no-drag;     /* 蓋在 44px 拖曳條上的那一段也要能點 */
+}
+.scrim.open { opacity: 1; }
+.set-modal {
+  width: min(640px, 92vw);
+  max-height: calc(100vh - var(--space-48));
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  background: var(--surface-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-overlay);
+  transform: translateY(8px);
+  transition: transform var(--motion-base) var(--ease-standard);
+}
+.scrim.open .set-modal { transform: translateY(0); }
+.modal-head {
+  flex: none;
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-12);
+  padding: var(--space-12) var(--space-12) var(--space-12) var(--space-16);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.modal-head h6 { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3; color: var(--ink); }
+.modal-close {
+  flex: 0 0 32px; width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--ink-3); font-size: 15px; line-height: 1;
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.modal-close:hover { background: var(--surface-muted); color: var(--ink); }
+
+.set-body { flex: 1 1 auto; min-height: 0; display: flex; align-items: stretch; }
+.set-cats {
+  flex: 0 0 168px; width: 168px;
+  display: flex; flex-direction: column; gap: var(--space-2);
+  padding: var(--space-12) var(--space-8);
+  border-right: 1px solid var(--border-hairline);
+}
+.set-cat {
+  display: block; width: 100%;
+  padding: var(--space-8) var(--space-12);
+  border-radius: var(--radius-md);
+  text-align: left; font-size: 13px; color: var(--ink-2);
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.set-cat:hover, .set-cat[aria-current="true"] { background: var(--surface-muted); color: var(--ink); }
+.set-cat[aria-current="true"] { font-weight: 600; }
+/* 固定內容高:切分類不改變 modal 尺寸,內容自己捲 */
+.set-content {
+  flex: 1 1 auto; min-width: 0;
+  height: min(64vh, 480px);   /* 三類共用一個高度;420 會把英文版「雲端方案」的自動儲值那行切掉 */
+  padding: var(--space-16);
+  overflow-y: auto;
+}
+.set-row { display: flex; align-items: center; gap: var(--space-8); }
+/* ── 設定 › 雲端方案(設計師 mockup-desktop-plan-in-app)──────────────
+   上半 .plan-scroll 自己捲;.plan-foot 不捲:「主機存在就會扣」那句永遠貼在鈕的正上方。
+   這一類把 .set-content 的內距與捲動接手過來(其他兩類不受影響)。 */
+.set-content:has(> .plan-pane:not([hidden])) { padding: 0; overflow: hidden; }
+.plan-pane:not([hidden]) { display: flex; flex-direction: column; height: 100%; font-size: 13px; }
+.plan-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:var(--space-16)}
+.plan-top{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-12);flex-wrap:wrap}
+.plan-top h6{margin:0;font-size:15px;font-weight:600;line-height:1.3;color:var(--ink)}
+.plan-st{display:flex;align-items:center;gap:var(--space-6);font-size:12px;color:var(--ink-2)}
+.plan-st .dot{width:7px;height:7px;border-radius:var(--radius-pill);background:var(--ink-3)}
+.plan-st.on .dot{background:var(--color-green)}
+.plan-st.bad .dot{width:8px;height:2px;border-radius:0;background:var(--color-red)}
+.plan-st.busy .dot{animation:plan-pulse 1.2s ease-in-out infinite}
+@keyframes plan-pulse{50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.plan-st.busy .dot{animation:none}}
+.plan-lead{margin:var(--space-8) 0 0;line-height:1.7;color:var(--ink-2)}
+.plan-sec{margin-top:var(--space-16)}
+.plan-lbl{margin:0 0 var(--space-6);font-size:12px;color:var(--ink-3)}
+.plan-list{margin:0;padding:0;list-style:none}
+.plan-list li{position:relative;padding-left:var(--space-16);line-height:1.7;color:var(--ink)}
+.plan-list li::before{content:"";position:absolute;left:2px;top:11px;width:6px;height:1px;background:var(--ink-3)}
+.plan-price{display:flex;align-items:baseline;gap:var(--space-12);flex-wrap:wrap}
+.plan-price .m{font-family:"Roboto Mono",ui-monospace,monospace;font-size:15px;font-weight:600;color:var(--ink)}
+.plan-price .h{font-size:12px;color:var(--ink-3)}
+.plan-fine{margin:var(--space-6) 0 0;font-size:12px;line-height:1.6;color:var(--ink-3)}
+.plan-foot{flex:none;padding:var(--space-12) var(--space-16);border-top:1px solid var(--border-hairline)}
+.plan-rule{margin:0 0 var(--space-12);font-size:12px;line-height:1.6;color:var(--ink-2)}   /* 暗底必讀的次要字升一階 */
+.plan-foot .plan-fine{margin:0 0 var(--space-12)}
+.plan-err{display:flex;gap:var(--space-8);margin:0 0 var(--space-12);font-size:12px;line-height:1.6;color:var(--ink-2)}
+.plan-err .fault-mark{margin-top:9px}
+.plan-err.is-calm .fault-mark{background:var(--ink-3)}
+.plan-act{display:flex;align-items:center;justify-content:flex-end;gap:var(--space-12)}
+.plan-act .btn-quiet{margin-right:auto;padding:0}
+/* 精簡版(設計師 v3):一個標題句(h5,20/600)+ 至多兩行說明 + 收起的細節;底列=一行跟錢有關的話 + 鈕 */
+.plan-pane .plan-scroll{padding:var(--space-24) var(--space-16) var(--space-16)}
+.plan-pane .plan-st{margin-bottom:var(--space-8)}
+.plan-pane h5{margin:0;font-size:20px;font-weight:600;line-height:1.4;color:var(--ink);text-wrap:balance}
+.plan-pane .plan-lead{margin-top:var(--space-8);text-wrap:pretty}
+.plan-pane .plan-rule{text-wrap:pretty}
+.plan-more{margin-top:var(--space-16);display:inline-block;padding:0}
+.plan-detail{margin-top:var(--space-12);padding-top:var(--space-4);border-top:1px solid var(--border-hairline)}
+.plan-detail[hidden]{display:none}
+.plan-act .wait{margin-right:auto;font-size:12px;line-height:1.5;color:var(--ink-2)}
+/* 設定左欄底部的帳號區 */
+.set-cats{display:flex;flex-direction:column}
+.set-cats .set-acct{margin-top:auto;padding:var(--space-8) var(--space-12) var(--space-4);border-top:1px solid var(--border-hairline)}
+.set-acct .lbl{margin:0;font-size:12px;line-height:1.5;color:var(--ink-3)}
+.set-acct .mail{margin:0;font-size:12px;line-height:1.5;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.set-acct .btn-quiet{margin-top:var(--space-4);padding:0}
+/* 連結畫面尾註下那一句 */
+.cn-foot-data{width:560px;max-width:100%;margin:var(--space-8) 0 0;padding:0 var(--space-16);font-size:12px;line-height:1.5;color:var(--ink-2)}
+/* 確認框:三句各自一段 */
+.del-body.lines p{margin:0}
+.del-body.lines p+p{margin-top:var(--space-8)}
+/* 設定鈕右邊那行安靜的字 */
+.ws-more-note{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:12px;color:var(--ink-3);white-space:nowrap}
+.ws-more-note.up{color:var(--ink-2)}
+
+.set-gl { flex: none; margin: 0; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--ink); }
+.set-selw { position: relative; display: inline-flex; flex: 0 1 160px; margin-left: auto; min-width: 0; }
+.set-selw::after {                 /* canon 的 CSS chevron */
+  content: ""; position: absolute; right: 9px; top: 50%;
+  width: 6px; height: 6px; margin-top: -4px;
+  border-right: 1.6px solid var(--ink-3); border-bottom: 1.6px solid var(--ink-3);
+  transform: rotate(45deg); pointer-events: none;
+}
+.set-sel {
+  width: 100%; min-width: 0; height: 34px;
+  padding: 0 var(--space-24) 0 var(--space-8);
+  border: 1px solid var(--border-frame); border-radius: var(--radius-xs);
+  background: transparent; color: var(--ink);
+  font: inherit; font-size: 13px;
+  appearance: none; cursor: pointer; color-scheme: dark;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.set-sel:hover { background: var(--surface-muted); }
+
+/* 「模型接入」借用連結畫面那張卡:在 modal 裡它不是卡,是內容——拿掉卡面,
+   內距交給 .set-content 的 16 */
+.set-pane .cn-card { width: auto; background: none; border-radius: 0; box-shadow: none; }
+.set-pane .cn-sec { padding: 0; }
+/* 組間只用間距不畫線:段內的 agent 列已經用 hairline 分隔,再用同一條線就分不出層級 */
+.set-pane .cn-sec + .cn-sec { border-top: 0; margin-top: var(--space-24); padding-top: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-more, .scrim, .set-modal, .modal-close, .set-cat, .set-sel { transition: none; }
+}
+
+
+/* =========================================================================
+   對話列 + 對話清單層。逐值照雲端 workspace.css 的 .chat-head / .cs-* / .chat-list。
+   ========================================================================= */
+.ic { display: block; flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.chat-head {
+  flex: none; height: 44px; min-width: 320px;
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: 0 var(--space-12);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.cs-btn {
+  flex: none; width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm); color: var(--ink-3);
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.cs-btn:hover:not(:disabled) { background: var(--surface-muted); color: var(--ink); }
+.cs-btn:disabled { cursor: not-allowed; color: var(--color-greyDark); }
+.cs-new { margin-left: auto; }
+.cs-ico-back, .chat-head.is-list .cs-ico-list { display: none; }
+.chat-head.is-list .cs-ico-back { display: block; }
+.cs-title {
+  min-width: 0; padding-left: var(--space-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; font-weight: 600; color: var(--ink);
+}
+/* 聊天本體 + 蓋在上面的清單層 */
+.chat-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat-list {
+  position: absolute; inset: 0; z-index: 5; overflow-y: auto; min-width: 320px;
+  padding: var(--space-12) var(--space-12) var(--space-24);
+  background: var(--surface-card);
+}
+.cs-newrow {
+  display: flex; justify-content: flex-start; align-items: center; gap: var(--space-8);
+  width: 100%; min-height: 40px; margin-bottom: var(--space-4);
+  padding: var(--space-8) var(--space-12); border-radius: var(--radius-xs);
+  font-size: 13px; color: var(--ink-2); text-align: left;
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.cs-newrow:hover { background: var(--surface-muted); color: var(--ink); }
+.cs-newrow:focus-visible, .cs-item:focus-visible { outline-offset: -2px; }   /* 捲動容器會裁掉外擴的 ring */
+.cs-row { position: relative; }
+.cs-item {
+  display: flex; flex-direction: column; align-items: stretch; gap: var(--space-2);
+  width: 100%; padding: var(--space-8) var(--space-12); border-radius: var(--radius-xs);
+  text-align: left; color: var(--ink-2);
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.cs-row:is(:hover, :has(:focus-visible)) .cs-item { background: var(--surface-muted); color: var(--ink); padding-right: 72px; }
+.cs-item[aria-current="true"] { background: var(--surface-muted); color: var(--ink); }
+.cs-item[aria-current="true"] .cs-name { font-weight: 600; }
+.cs-name { font-size: 13px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-meta { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.cs-row:is(:hover, :has(:focus-visible)) .cs-meta, .cs-item[aria-current="true"] .cs-meta { color: var(--ink-2); }
+/* 列尾的刪除:hover / 鍵盤焦點才出現;武裝後變成一顆字(紅),同一格不位移 */
+.cs-del {
+  position: absolute; right: var(--space-6); top: 50%; transform: translateY(-50%);
+  min-width: 24px; height: 24px; padding: 0 var(--space-4);
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-micro); font-size: 12px; color: var(--ink-2);   /* 坐在 hover 灰填上,ink-3 只有 3.6:1 */
+  opacity: 0; pointer-events: none;
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.cs-row:is(:hover, :has(:focus-visible)) .cs-del { opacity: 1; pointer-events: auto; }
+.cs-del:hover { background: var(--bg-body); color: var(--ink); }
+/* 紅字在灰填上 3.0:1 不過 AA,墊 bg-body 才有 4.5:1;有了底色也才讀得出是一顆鈕 */
+.cs-del.is-armed, .cs-del.is-armed:hover { color: var(--color-red); background: var(--bg-body); padding: 0 var(--space-6); }
+@media (prefers-reduced-motion: reduce) {
+  .cs-btn, .cs-newrow, .cs-item, .cs-del { transition: none; }
+}
+
+/* 策略列尾的刪除鈕:外包一層給絕對定位的鈕當基準;hover 時名字讓出位置 */
+.strat-wrap:is(:hover, :has(:focus-visible)) .strat-row { padding-right: 72px; background: var(--surface-muted); color: var(--ink); }
+.cs-del:disabled { display: none; }
+
+/* 刪對話確認框。不用紅鈕:canon 沒有 Danger 按鈕 recipe(紅只當文字色),破壞性由標題動詞
+   與內文的「無法復原」承擔;確認鈕是中性反白(同雲端 .modal-send)。 */
+.del-modal { width: min(440px, 92vw); }
+.del-modal .modal-head h6 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.del-body { margin: 0; padding: var(--space-16); font-size: 13px; line-height: 1.7; color: var(--ink-2); }
+.modal-foot {
+  flex: none; display: flex; justify-content: flex-end; gap: var(--space-8);
+  padding: var(--space-12) var(--space-16);
+  border-top: 1px solid var(--border-hairline);
+}
+
+/* 聊天裡的圖:跟回覆同寬,不加框(圖自己有底色);說明字同聊天的次要文字 */
+.msg.img { margin: 0 0 var(--space-24); }   /* figure 的 UA 預設是 1em 40px */
+.msg.img img { display: block; max-width: 100%; height: auto; border-radius: var(--radius-md); }
+.msg.img figcaption { margin-top: var(--space-6); font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+
+/* 圖片放大:整個遮罩都是「點了就關」,游標照實說 */
+.img-zoom { display: block; width: 100%; padding: 0; border-radius: var(--radius-md); cursor: zoom-in; }
+.lb-scrim { cursor: zoom-out; }
+.lb-img {
+  max-width: 100%; max-height: 100%; object-fit: contain;
+  border-radius: var(--radius-md); box-shadow: var(--shadow-overlay);
+  transform: scale(.98); transition: transform var(--motion-base) var(--ease-standard);
+}
+.scrim.open .lb-img { transform: scale(1); }
+.lb-close { position: absolute; top: var(--space-12); right: var(--space-12); background: var(--surface-card); }
+@media (prefers-reduced-motion: reduce) { .lb-img { transition: none; } }
+
+/* ── 回合失敗卡(照雲端 .chat-notice.is-fault;設計師 M1)──
+   不加容器、圖示、紅字:紅只上在 8×2 的記號(錯誤是狀態不是內容);字升到 13px / ink-2,
+   因為它取代的是這一輪的回覆,不是 caption。 */
+.msg.fault { display: flex; align-items: flex-start; gap: var(--space-8); font-size: 13px; line-height: 1.6; color: var(--ink-2); }
+.fault-mark { flex: none; width: 8px; height: 2px; margin-top: 9px; background: var(--color-red); }   /* 對到首行視覺中線(13×1.6) */
+.msg.fault.is-calm .fault-mark { background: var(--ink-3); }      /* 等待中 / 已完成:不是錯誤了,記號退灰 */
+.fault-body { min-width: 0; overflow-wrap: anywhere; }
+.fault-act { margin-top: var(--space-8); display: flex; flex-wrap: wrap; gap: var(--space-8); }
+.fault-sub { margin-top: var(--space-8); font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+.fault-sub code, .cn-hint code { font-family: "Roboto Mono", ui-monospace, monospace; color: var(--ink-2); }
+/* disabled 原本完全沒有樣式:鈕鎖住之後外觀不變,看不出按下去有沒有生效(設計師 M7) */
+.btn-fill:disabled { background: var(--surface-muted); color: var(--ink-3); cursor: default; opacity: 1; }
+.btn-out:disabled { color: var(--ink-3); background: transparent; cursor: default; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }

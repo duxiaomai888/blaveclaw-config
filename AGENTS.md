@@ -39,7 +39,7 @@ IMPORTANT: For ANY market data question — crypto (holder concentration, whale 
 
 Screening many Taiwan stocks: use the `*_batch` fetchers and narrow the pool before pulling time series — never fan out per-stock fetchers in parallel (rate limits). Full flow: `references/twstock.md` › 全市場選股.
 
-Dividend events, TAIEX dividend points and whole-market market-cap ranking are one lib call each (`references/twstock.md`, `references/twfutures.md`): TXF basis (正逆價差) must subtract the dividend-points sum, never raw futures−spot; top-N market-cap pools come from `fetch_twstock_market_value_all`, never rebuilt from shares × price.
+Dividend events, TAIEX dividend points and whole-market market-cap ranking are one lib call each (`references/twstock.md`, `references/twfutures.md`): TXF basis (正逆價差) must subtract the dividend-points sum, never raw futures−spot; top-N market-cap pools come from `fetch_twstock_market_value_all`, never rebuilt from shares × price, 權值比重 comes from that call's `attrs['twse_ex_etf_market_value']` denominator — whose universe is not the one `rank` is on — and ETFs are dropped with that call's `is_etf` column, never by code prefix.
 
 **The symbol you backtest must be the symbol the orders go to, and it must be the contract the user named.** `fetch_kline` carries Binance USDT-M perps only — for a contract listed elsewhere use the exchange-native fetcher (`fetch_bingx_kline()`, see `references/lib.md`), and if the data genuinely is not reachable, say so and stop instead of substituting a similar-looking symbol from another exchange (`XAUUSDT` is not BingX's `GOLD(XAU)-USDT` — that swap silently backtested a different instrument than the one being traded).
 
@@ -135,7 +135,7 @@ Always call `lib.chart_style.apply()` before plotting — never matplotlib defau
 A report is a document the web workspace renders in its Reports list (More › Reports) — KPI rows, charts, tables and prose from structured data. It is the right surface for anything the user will read again later (a performance review, a morning briefing, a research write-up); chat is for the answer, a report is for the record. Produce one by dropping JSON in `workspace/reports/<id>.json` — `lib/report.py` (`write_report`, `status`) writes it correctly. Contract, block types and limits: `references/reports.md`. A report you write by hand follows §7b there: presentation rules for every type but `performance`, plus the research-only rules for `research`.
 
 - **A request that names a template — 台股大盤晨報 / 台股收盤報告 / 加密市場晨報 / 單標的晨報 — is built with `lib/report_templates.py`, never by hand:** `pack = tw_market_brief()` (or `tw_close_brief()`, `crypto_market_brief()`, `symbol_brief("2330")`) fetches every series and builds the KPI row, charts, tables and footnote; you read `pack.describe()`, write the four narrative slots (lead / read / watch / risk, `references/reports.md` §1b and §7 rules — levels are statistics, never support / resistance or a price to trade at) and call `publish(pack, narrative)`. Do not recompute a number the pack prints and do not add chart blocks of your own. A **scheduled** run calls `publish(pack)` with no narrative — the runtime cannot wake you on a timer, and a data-only report is the honest output; never script a fixed "judgement" into a cron job.
-- **When a report request arrives (web "+" panel or chat), restate the schedule you parsed from it — cadence, time, weekday/date, timezone — before you start.** A mis-parse is invisible once it is a cron line; now is the only moment the user can catch it. The user's time is in their zone (Asia/Taipei for a Taiwan user); the cron is this machine's clock (often UTC) — convert and write both (`references/reports.md` §8).
+- **When a report request arrives (web "+" panel or chat), restate the schedule you parsed from it — cadence, time, weekday/date, timezone — before you start.** A mis-parse is invisible once it is registered; now is the only moment the user can catch it. Write the cron in the user's own wall-clock time, unconverted — the zone comes from the machine's setting via `register_schedule` (`references/reports.md` §8).
 - **Ask one question first when the symbol does not exist or you are unsure of it, the date is in the future, or the user names a report kind that has no template** (a 美股晨報 — never publish it under a template's id): `references/reports.md` §1b.
 - **A recurring report is a job directory, never a cron line you write yourself.** Put the script in `report_jobs/<id>/run.py` and register it with `lib.report.register_schedule(id, title, prompt, cron, human, script)` — `prompt` is the user's request verbatim. The runtime installs, pauses, runs and removes the schedule from that registration, and the web's 管理定期報告 handles pause / run-now / delete without you; **do not touch crontab / schtasks for a report.** `run.py` runs like a scheduled strategy (cwd = workspace, no `BLAVE_*`, no token), publishes only by writing into `reports/`, and writes nothing when there is nothing to report. `list_schedules()` answers 「我有哪些定期報告」; `remove_schedule(id)` when the user asks you to delete one in chat. Details: `references/reports.md` §8.
 - **A message of the form 「請修改定期報告「…」（id：…）」 is the web's edit flow:** rewrite `run.py` and/or the schedule, call `register_schedule` again with the same id (that clears the pending mark the web is waiting on), then restate the schedule you parsed. Finish it in this turn — until the re-registration lands the user is looking at a waiting state.
@@ -149,7 +149,7 @@ A report is a document the web workspace renders in its Reports list (More › R
 - **NEVER write `except Exception: pass`** — always `except Exception as e: print(f"Error: {e}")`
 - NEVER chain commands with `&&`, `||`, or `;` — run ONE command at a time, on Windows too
 - Use `python3 file.py [args]` or `node file.js` directly — a `tmp/` script that imports `lib` → `python3 -m tmp.x` or pin `sys.path` (`references/reports.md` §1b)
-- To run a strategy: `python3 strategies/my_strategy/strategy.py` from the workspace directory (`$BLAVECLAW_HOME/workspace`). How `$BLAVECLAW_HOME` resolves per runtime/OS — and why getting it wrong silently kills Telegram alerts — is in `references/lib.md` › *`lib/notify.py`*; when in doubt check the actual environment, don't assume
+- To run a strategy: `python3 strategies/my_strategy/strategy.py` from the workspace directory (`$BLAVE_AGENT_HOME/workspace`). How `$BLAVE_AGENT_HOME` resolves per runtime/OS — and why getting it wrong silently kills Telegram alerts — is in `references/lib.md` › *`lib/notify.py`*; when in doubt check the actual environment, don't assume
 
 ## Cross-Day Task Memory
 
@@ -164,6 +164,7 @@ When writing any process that runs continuously (live monitors, scanners, paper-
 
 - **Every in-memory list/dict that grows per tick, per signal, or per trade MUST be bounded** (`deque(maxlen=N)` or trim) — records that must be kept forever go to disk, never into a Python list.
 - **Every daemon must heartbeat** (`state/heartbeat/<name>` each loop) and be registered in `state/deployments.json` so `manager/healthcheck.py` can see it die.
+- **Stopping one deployment = `manager/stop_strategy.py`** (schedules, processes, registry in one go; never hand-edit crontab); closing one coin = `manager/close_symbol.py`. Usage: `references/manager.md` › *Stopping one strategy / closing one coin*.
 - After starting it, check its RSS once and tell the user; growth run over run is a bug to fix before leaving it running.
 
 Full memory-discipline checklist: `references/deployment.md` › *Long-running processes — memory discipline*.
@@ -200,6 +201,8 @@ If `state/HALT` exists, `lib/order_*` refuses all NEW-EXPOSURE orders at the cod
 ```
 python3 -c "from lib.guard import trip_halt; trip_halt('user request', 'user')"
 ```
+
+Per-strategy halt: `lib.guard` `trip_halt_for(strategy, reason, source)` / `halted_for(strategy)` / `clear_halt_for(strategy, source)` (`state/HALT_<strategy>`) — only code that calls `halted_for` honours it; order libs do NOT block on it. Details: `references/lib.md` › *lib/guard.py*.
 
 Clearing (`clear_halt`) is ONLY done when the user explicitly asks to resume — never clear a halt on your own initiative, and never treat a user question as permission to clear it. Every order attempt/outcome/denial is logged to `state/audit.jsonl` — read it when the user asks what was actually sent to the exchange.
 

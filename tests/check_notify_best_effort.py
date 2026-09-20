@@ -18,7 +18,7 @@ read is recorded without the exception message; run_twap keeps slicing when
 the start notify is rejected and a rejected per-slice notify is not a slice
 error; a live Type A tick saves state.json when the signal notify is rejected.
 
-Run: cd blaveclaw-config && python3 tests/check_notify_best_effort.py
+Run: cd blave-agent && python3 tests/check_notify_best_effort.py
 """
 import json, os, sys, tempfile
 from pathlib import Path
@@ -31,6 +31,7 @@ HOME = WS / "home"
 (HOME / "openclaw.json").write_text(json.dumps({"channels": {"telegram": {"botToken": "t"}}}))
 (HOME / "credentials" / "telegram-default-allowFrom.json").write_text(
     json.dumps({"allowFrom": [111]}))
+# 刻意用舊名:驗 lib/notify.py 對既有機器(只帶 BLAVECLAW_HOME)的相容讀取
 os.environ["BLAVECLAW_HOME"] = str(HOME)
 os.chdir(WS)
 os.makedirs("manager", exist_ok=True)
