@@ -8,6 +8,12 @@
 <link rel="stylesheet" href="app.css">
 <link rel="stylesheet" href="report-backtest.css">
 <link rel="stylesheet" href="report-trades.css">
+<link rel="stylesheet" href="report-robust.css">
+<link rel="stylesheet" href="trade.css">
+<link rel="stylesheet" href="datasrc.css">
+<link rel="stylesheet" href="library.css">
+<link rel="stylesheet" href="report-blocks.css">
+<link rel="stylesheet" href="reports.css">
 </head><body>
 
 <!-- ============ 連結畫面(獨立畫面,不是 modal) ============ -->
@@ -45,8 +51,6 @@
         <p data-i18n="cn.foot"></p>
         <div class="cn-lang" id="cn-lang" role="radiogroup" data-i18n-aria="set.lang"></div>
       </div>
-      <!-- 對兩條路都成立的一句,所以放尾註、不掛在任何一列底下(數字來自 api,拿不到就不出) -->
-      <p class="cn-foot-data" id="cn-foot-data" hidden></p>
     </div>
   </div>
 </div>
@@ -59,9 +63,19 @@
   <div class="ws-bar"></div>
   <div class="ws">
     <aside class="pane-strategies">
-      <div class="ws-brand"><a class="ws-home" id="ws-home" target="_blank" rel="noopener"><svg class="wm" viewBox="0 0 588 180" aria-label="Blave" role="img"><g fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M0 0H20V68.7962C31.8393 57.2517 47.8079 50 65 50C99.9506 50 130 80 130 115C130 150 100 180 65 180C30 180 -5.27718e-05 150 0 115V0ZM64.9999 70C39.9999 70 19.9999 90 19.9999 115C19.9999 140 40.0001 160 65 160C89.9999 160 110 140.5 110 115C110 89.5 89.9999 70 64.9999 70Z"/><path d="M174 0H154V170C154 170 154 174 157 177C160 180 164 180 164 180H188V160H174V0Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M328 180H308V161.194C296.161 172.738 280.192 179.991 263 179.991C228.049 179.991 198 149.989 198 114.99C198 79.9912 228 50 263 50C298 50 328 79.9912 328 114.99V180ZM263 159.99C288 159.99 308 139.99 308 114.99C308 89.9909 288 69.9903 263 69.9903C238 69.9903 218 89.491 218 114.99C218 140.49 238 159.99 263 159.99Z"/><path d="M393 150L354.494 50H333L378 165.5L382 175.5C383.5 178 385 180 393 180C401 180 402.5 178 404 175.5L408 165.5L453 50H431.5L393 150Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M523 180C488.049 180 458 150 458 115C458 79.9998 488 49.9998 523 49.9998C558 49.9998 588 79.9998 588 115C587.2 122.761 581 125.069 578 125.253H566.845H479.12C483.659 145.546 501.476 160 523 160C539.672 160 554.12 151.106 561.896 137.766L578.848 147.5C567.329 166.713 546.264 180 523 180ZM523 69.9998C501.282 69.9998 483.337 84.7164 479 105.299H566.968C562.576 85.0203 544.665 69.9998 523 69.9998Z"/></g></svg></a></div>
-      <div class="strat-head"><span class="label" data-i18n="ws.strategies"></span></div>
+      <!-- 自動下單入口:位置照雲端 #pf_nav(策略清單上方)。不放圖示——這個側欄的列本來就沒有圖示 -->
+      <!-- 雲端視角、沒有主機可看(沒主機 / 未登入 / 啟動中):入口與清單不畫,原位置放這一句(中欄的開通頁負責說明) -->
+      <p class="pf-state side-gate" id="side-gate" hidden></p>
+      <nav class="side-nav" id="side-nav"><button class="strat-row" id="tr-nav" type="button"><svg class="side-nav-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12c.552 0 1.005-.449.95-.998a10 10 0 0 0-8.953-8.951c-.55-.055-.998.398-.998.95v8a1 1 0 0 0 1 1z"/><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/></svg><span class="strat-name" data-i18n="tr.nav"></span></button>
+        <!-- 策略庫入口(spec-desktop-library §2):同一顆 .strat-row 解剖,icon 是 lucide library-big;內容由 library.js 畫 -->
+        <button class="strat-row" id="lib-nav" type="button"><svg class="side-nav-ic" viewBox="0 0 24 24" aria-hidden="true"><rect width="8" height="18" x="3" y="3" rx="1"/><path d="M7 3v18"/><path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z"/></svg><span class="strat-name" data-i18n="lib.nav"></span></button>
+        <!-- 報告入口(spec-desktop-0.1.6 §1.2):同一顆 .strat-row 解剖,icon 是 lucide file-text;內容由 reports.js 畫 -->
+        <button class="strat-row" id="rpt-nav" type="button"><svg class="side-nav-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg><span class="strat-name" data-i18n="rpt.nav"></span><span class="nav-new" id="rpt-nav-new" role="img" data-i18n-aria="rpt.newMark" hidden></span></button></nav>
+      <!-- 「策略」標題旁的 ＋:新增策略 modal(spec-desktop-0.1.6 §4;照雲端 #strat_add)。兩個視角都出;雲端沒主機時跟 #strat-head 一起被 envPaint 藏掉 -->
+      <div class="strat-head" id="strat-head"><span class="label" data-i18n="ws.strategies"></span><button class="strat-add" id="strat-add" type="button" aria-haspopup="dialog" data-i18n-aria="ns.title"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg></button></div>
       <div class="strat-list" id="strat-list"><p class="pf-state" id="strat-empty" data-i18n="ws.noStrategies"></p></div>
+      <!-- 雲端那幾份:點一支 → 中欄畫雲端那一份的報告(app.js rpCloudSelect);名字是雲端來的字串,一律 textContent -->
+      <div class="strat-list" id="strat-list-cloud" hidden></div>
       <div class="side-rail"><button class="rail-btn" id="rail-open" type="button" data-i18n-aria="ws.sideExpand"><svg class="ws-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><line x1="6" y1="2.75" x2="6" y2="13.25"/><polyline points="9.6,6.2 11.4,8 9.6,9.8"/></svg></button></div>
       <!-- 左下角:設定(照雲端 .ws-foot / .ws-more 的樣式;雲端是「更多」選單,
            桌面版只有設定一項,所以直接開 modal 不展開) -->
@@ -76,23 +90,126 @@
     </aside>
     <div class="pane-div" id="div-side" role="separator" aria-orientation="vertical" tabindex="0" data-i18n-aria="ws.resizeSide"><button class="handle" type="button" tabindex="-1" data-i18n-aria="ws.sideCollapse"><svg class="ws-icon" viewBox="0 0 16 16" aria-hidden="true"><polyline points="9.8,3.6 5.4,8 9.8,12.4"/></svg></button></div>
     <section class="pane-main">
-      <!-- 策略報告(選了策略才出現;沒選時是下面的 welcome)。三個分頁:回測 / 進出場 /
-           程式碼。回測與進出場各自一支檔(report-backtest.js / report-trades.js),
-           介面是 window.BlaveReport.renderBacktest(el, stats) / renderTrades(el, stats)。 -->
+      <!-- 中欄上方本來就在的 44px 拖曳區:最左是「這台電腦｜雲端」切換器(整個 workspace 跟著換),右邊一句這一邊的狀態。
+           兩格永遠可按;格內的錢記號與狀態由 trade.js 畫。整條仍可拖視窗,只有切換器 no-drag -->
+      <div class="tb" id="tr-tb">
+        <div class="envsw" id="envsw" role="group" data-i18n-aria="env.aria"><button type="button" id="env-local" data-env="local" aria-pressed="true"></button><button type="button" id="env-cloud" data-env="cloud" aria-pressed="false"></button></div>
+        <span class="mode" id="tr-tb-mode" hidden></span><span class="tb-txt" id="tr-tb-txt"></span>
+      </div>
+      <!-- 自動下單頁:骨架照雲端工作頁(標題列 + 五分頁),內容由 trade.js 畫,一律 DOM 節點 + textContent -->
+      <div class="trv" id="tr" hidden>
+        <div class="main-head">
+          <div class="txt">
+            <h5 class="main-head-name" id="tr-h" tabindex="-1" data-i18n="tr.nav"></h5>
+            <div class="main-head-desc" id="tr-desc"></div>
+            <!-- 雲端第一刀唯讀:全頁唯一的說明(不能按的鈕用 aria-describedby 指到這裡) -->
+            <p class="tr-ro-note" id="tr-ro-note" hidden></p>
+            <!-- 主機停機:講的是整頁的事,放在標題描述下、分頁列上(停機時上面那行說明本來就不出) -->
+            <div id="tr-verdict" hidden></div>
+            <p class="pf-alert" id="tr-alert" hidden></p>
+          </div>
+          <div class="act" id="tr-act"></div>
+        </div>
+        <div class="main-tabs" role="tablist" id="tr-tabs" data-i18n-aria="tr.nav" hidden>
+          <button class="main-tab" type="button" role="tab" id="tr-tab-over" data-tab="over" aria-controls="tr-over" data-i18n="tr.tab.over"></button>
+          <button class="main-tab" type="button" role="tab" id="tr-tab-pos" data-tab="pos" aria-controls="tr-pos" data-i18n="tr.tab.pos"></button>
+          <button class="main-tab" type="button" role="tab" id="tr-tab-assets" data-tab="assets" aria-controls="tr-assets" data-i18n="tr.tab.assets"></button>
+          <button class="main-tab" type="button" role="tab" id="tr-tab-hist" data-tab="hist" aria-controls="tr-hist" data-i18n="tr.tab.hist"></button>
+          <button class="main-tab" type="button" role="tab" id="tr-tab-set" data-tab="set" aria-controls="tr-set" data-i18n="tr.tab.set"></button>
+        </div>
+        <div class="pf" id="tr-onboard" hidden></div>
+        <div class="pf" id="tr-over" role="tabpanel" aria-labelledby="tr-tab-over" tabindex="0" hidden></div>
+        <div class="pf" id="tr-pos" role="tabpanel" aria-labelledby="tr-tab-pos" tabindex="0" hidden></div>
+        <div class="pf" id="tr-assets" role="tabpanel" aria-labelledby="tr-tab-assets" tabindex="0" hidden></div>
+        <div class="pf" id="tr-hist" role="tabpanel" aria-labelledby="tr-tab-hist" tabindex="0" hidden></div>
+        <div class="pf" id="tr-set" role="tabpanel" aria-labelledby="tr-tab-set" tabindex="0" hidden></div>
+      </div>
+      <!-- 雲端視角、沒有主機可看(沒主機 / 未登入 / 啟動中 / 讀不到):內容由 trade.js 畫 -->
+      <div class="trv" id="cv-empty" hidden>
+        <div class="main-head"><div class="txt"><h5 class="main-head-name" id="cv-h" tabindex="-1" data-i18n="env.empty.title"></h5><div class="main-head-desc" id="cv-desc"></div></div></div>
+        <div class="pf" id="cv-body"></div>
+      </div>
+      <!-- 策略報告(選了策略才出現;沒選時是下面的 welcome)。四個分頁:回測 / 進出場 / 參數掃描 /
+           程式碼。前三個各自一支檔(report-backtest.js / report-trades.js / report-robust.js),
+           介面是 window.BlaveReport.renderBacktest(el, stats) / renderTrades(el, stats) / renderRobust(el, data, opts)。 -->
       <div class="rp" id="rp" hidden>
         <!-- 精簡標題(同雲端):給人看的名字 + 一句說明 -->
         <div class="rp-head">
-          <h5 class="rp-name" id="rp-name"></h5>
+          <div class="txt">
+          <!-- tabindex="-1":文字鈕把人送回這台電腦、而那支策略已經不在時,焦點落在中欄標題(同 #tr-h / #cv-h 的作法) -->
+          <h5 class="rp-name" id="rp-name" tabindex="-1"></h5>
           <p class="rp-desc" id="rp-desc"></p>
+          <!-- 雲端停機 / 讀不到時按「送上雲端」:不切視角,在原地講一句 + 一顆「去雲端看」(handoff.js 的 hoNote)。
+               role="status":按了鈕畫面只多這一行,讀屏不唸的話等於沒有回應 -->
+          <p class="rp-ho-note" id="rp-ho-note" role="status" hidden></p>
+          </div>
+          <div class="act" id="rp-act" hidden></div>
         </div>
         <div class="rp-tabs" role="tablist" id="rp-tabs">
           <button class="rp-tab" type="button" role="tab" data-tab="bt" data-i18n="rp.tab.backtest"></button>
           <button class="rp-tab" type="button" role="tab" data-tab="tr" data-i18n="rp.tab.trades"></button>
+          <button class="rp-tab" type="button" role="tab" data-tab="rob" data-i18n="rp.tab.rob"></button>
           <button class="rp-tab" type="button" role="tab" data-tab="code" data-i18n="rp.tab.code"></button>
         </div>
+        <!-- 沒有回測時,講為什麼上面三個分頁是灰的(兩個視角都出;app.js 的 rpShowTab 跟 disabled 同一處設) -->
+        <p class="rp-nobt" id="rp-nobt" data-i18n="rp.noBt" hidden></p>
         <div class="rp-panel" id="rp-bt" role="tabpanel"></div>
         <div class="rp-panel" id="rp-tr" role="tabpanel" hidden></div>
+        <div class="rp-panel" id="rp-rob" role="tabpanel" hidden></div>
         <div class="rp-panel" id="rp-code" role="tabpanel" hidden><pre class="rp-code mono" id="rp-code-pre"></pre></div>
+        <!-- 雲端那一份還在路上 / 讀不到:點下去就換頁,這裡先放「載入中…」或讀不到 +〔重新查看〕(app.js rpBodyPaint) -->
+        <div class="rp-panel" id="rp-wait" role="status" hidden></div>
+      </div>
+      <!-- 策略庫(spec-desktop-library):中欄第五個視圖,清單 → 詳情兩層都在 #lib-body 裡、由 library.js 建
+           (名稱 / 說明 / 標的是 api 來的字,一律 textContent)。誰該出現由 trade.js 的 envShowMain 決定 -->
+      <div class="lib" id="lib" role="region" aria-labelledby="lib-h" hidden>
+        <div class="lib-head" id="lib-head">
+          <div class="lib-head-list" id="lib-head-list">
+            <h5 class="main-head-name" id="lib-h" tabindex="-1" data-i18n="lib.nav"></h5>
+            <p class="lib-desc" data-i18n="lib.desc"></p>
+            <div class="lib-tools">
+              <div class="lib-seg" id="lib-seg" role="group" data-i18n-aria="lib.mkt.aria">
+                <button type="button" data-mkt="all" aria-pressed="true" data-i18n="lib.mkt.all"></button>
+                <button type="button" data-mkt="crypto" aria-pressed="false" data-i18n="lib.mkt.crypto"></button>
+                <button type="button" data-mkt="tw" aria-pressed="false" data-i18n="lib.mkt.tw"></button>
+              </div>
+            </div>
+          </div>
+          <!-- 詳情模式:頁首只剩返回鈕 -->
+          <button class="lib-back" id="lib-back" type="button" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span data-i18n="lib.nav"></span></button>
+        </div>
+        <div class="lib-body" id="lib-body" tabindex="0">
+          <!-- 閘門卡(spec-desktop-0.1.6 §3.3):本機視角、付不出資料費時清單頂端那一張;內容由 library.js 的 libGateNode 畫 -->
+          <div class="lib-gate" id="lib-gate" hidden></div>
+          <div class="lib-rows" id="lib-rows"></div>
+          <p class="lib-state" id="lib-state" role="status" hidden></p>
+          <p class="lib-foot" id="lib-foot" hidden></p>
+          <div class="lib-det" id="lib-det" hidden></div>
+        </div>
+      </div>
+      <!-- 報告(spec-desktop-0.1.6 §1):中欄第六個視圖,清單 → 閱讀兩層都在 #rpt-body 裡、由 reports.js 建
+           (標題 / 本體是 agent 寫的字,一律 textContent;閱讀頁由 report-blocks.js 渲染,同樣全部 createElement)。
+           誰該出現由 trade.js 的 envShowMain 決定;與策略庫互斥。.rpt-* 前綴:#rp / .rp-* 已經是策略的回測報告 -->
+      <div class="rpt" id="rpt" role="region" aria-labelledby="rpt-h" hidden>
+        <div class="rpt-head" id="rpt-head">
+          <div class="rpt-head-list" id="rpt-head-list">
+            <h5 class="main-head-name" id="rpt-h" tabindex="-1" data-i18n="rpt.nav"></h5>
+            <p class="rpt-desc" data-i18n="rpt.desc"></p>
+            <div class="rpt-tools">
+              <span class="rpt-count" id="rpt-count"></span>
+              <!-- 鈕上的字隨狀態換(新增報告 / agent 寫作中…),由 reports.js 寫,不掛 data-i18n -->
+              <button class="btn-out has-ic" id="rpt-ask" type="button" aria-haspopup="dialog" data-i18n-aria="rpt.askAria"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg><span id="rpt-ask-t"></span></button>
+            </div>
+            <p class="rpt-msg" id="rpt-msg" hidden></p>
+          </div>
+          <!-- 閱讀模式:頁首只剩返回鈕 -->
+          <button class="rpt-back" id="rpt-back" type="button" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span data-i18n="rpt.nav"></span></button>
+        </div>
+        <div class="rpt-body" id="rpt-body" tabindex="0">
+          <div class="rpt-rows" id="rpt-rows"></div>
+          <div class="rpt-state" id="rpt-state" role="status" hidden></div>
+          <div class="rpt-read" id="rpt-read" hidden></div>
+        </div>
       </div>
       <!-- 起手範例放在中欄(Wei):聊天欄只留一句話;中欄本來就空著,範例鈕在這裡
            同時交代了「這一欄之後會出現什麼」。點了直接送出。 -->
@@ -104,6 +221,10 @@
             <path d="M0 108.973 A90 90 0 0 1 76.668 108.182 A20 20 0 0 0 105 90 A45 45 0 0 1 180 56.459 L180 180 L0 180 Z" fill="currentColor" />
           </svg>
           <div class="wc-chips">
+            <!-- 「看免費策略」開策略庫(不送訊息;同雲端歡迎頁那顆 workspace_chip_free) -->
+            <button class="wc-chip" id="chat-lib" type="button" data-i18n="lib.chip"></button>
+            <!-- 「新增策略」開框、不送訊息(同雲端歡迎頁第二顆) -->
+            <button class="wc-chip" id="chat-ns" type="button" data-i18n="ns.chip"></button>
             <button class="wc-chip" id="chat-eg" type="button" data-i18n="ws.chatExample"></button>
           </div>
         </div>
@@ -136,6 +257,9 @@
       <div class="chat-scroll" id="chat-scroll">
       </div>
       <div class="chat-input-wrap">
+        <!-- 更新那一格:照網頁工作頁 #ws_update(輸入列右上方一行安靜小字)。只有兩種:app 新版已暫存好 → 「重新啟動以完成更新」(可點);
+             雲端主機正在換檔 → 不可點的「更新中…」。其餘時候不出。字由 upPaint 決定:**不掛 data-i18n**,換語言時的通用迴圈會把它洗成另一個狀態的字 -->
+        <button type="button" class="ws-update" id="ws-update" hidden><span></span></button>
         <!-- 輸入框:上 textarea、下工具列(左=model/effort 觸發鈕,右=送出)。
              選 model 放這裡而不是左下角:引擎是設一次的事(誰付錢、要不要重新授權),
              model / effort 是每個任務都可能換的,兩件事不擠同一個入口。 -->
@@ -173,8 +297,8 @@
 </div>
 
 <!-- ============ 設定 modal(樣式照雲端 .scrim / .ns-modal.set-modal) ============
-     兩個分類:顯示(語言)、模型接入(換 agent——內容就是連結畫面那張卡,開的時候
-     把 .cn-card 整個搬進來,同一份 DOM 與邏輯,不養第二份)。 -->
+     分類:一般(語言、關於)、模型接入、資料與雲端方案、帳號、隱私。每一類的內容各自由 app.js 畫;
+     「模型接入」不借用連結畫面那張卡(那裡是第一次做決定的地方,這裡是回來換的地方)。 -->
 <div class="scrim" id="set-scrim" role="dialog" aria-modal="true" aria-labelledby="set-title" hidden>
   <div class="set-modal" id="set-modal">
     <div class="modal-head">
@@ -185,15 +309,14 @@
       <nav class="set-cats" id="set-cats" data-i18n-aria="set.cats">
         <button type="button" class="set-cat" data-set-cat="display" aria-current="true" data-i18n="set.cat.display"></button>
         <button type="button" class="set-cat" data-set-cat="model" data-i18n="set.cat.model"></button>
+        <!-- 資料來源:自帶資料商的金鑰(排在「AI 接入」後面)。內容由 datasrc.js 的 srcPaint 畫 -->
+        <button type="button" class="set-cat" data-set-cat="src" data-i18n="src.title"></button>
         <!-- 會花錢的一類排最後:前兩類是偏好。聊天裡的情境卡會直接開到這裡 -->
         <button type="button" class="set-cat" data-set-cat="plan" data-i18n="set.cat.plan"></button>
-        <!-- 帳號區:登入是帳號的事,不是某一種 AI 的事——登出從「用 Blave 的 AI」那一列搬到這裡,
-             三個分類都看得到。有 token 才出現;沒登入時這裡不放登入鈕(登入只從講得出後果的地方進) -->
-        <div class="set-acct" id="set-acct" hidden>
-          <p class="lbl" data-i18n="acct.lbl"></p>
-          <p class="mail" data-i18n="acct.signedIn"></p>
-          <button type="button" class="btn-quiet" id="set-acct-out" data-i18n="acct.out"></button>
-        </div>
+        <!-- 帳號:身分與登入 / 登出(錢的事在「資料與雲端方案」)。內容由 app.js 的 acctPaintAcct 畫 -->
+        <button type="button" class="set-cat" data-set-cat="acct" data-i18n="set.cat.acct"></button>
+        <!-- 隱私:使用資料的開關與「會收 / 不收」(排最後;與視角無關)。內容由 app.js 的 privPaint 畫 -->
+        <button type="button" class="set-cat" data-set-cat="priv" data-i18n="set.cat.priv"></button>
       </nav>
       <div class="set-content">
         <div class="set-pane" data-set-cat="display">
@@ -204,11 +327,36 @@
               <select class="set-sel" id="set-lang"></select>
             </span>
           </div>
+          <!-- 關於(這一頁最下面;版本唯一出現處):一行「Blave {app} · 雲端主機 {ws} · 已是最新版」+ 右邊一個文字連結(檢查更新 / 重新啟動以完成更新)。
+               字與連結由 app.js 的 upPaint 依 upPlan 畫;沒主機 / 沒登入時雲端那一段不寫 -->
+          <div class="set-about" id="set-up">
+            <h6 class="set-gl" data-i18n="up.about"></h6>
+            <div class="set-up-row">
+              <p class="set-up-line" id="set-up-line" role="status"></p>
+              <button type="button" class="btn-quiet" id="set-up-btn"></button>
+            </div>
+            <!-- 法遵兩份並排、不成句(不是「使用即表示同意」那種同意文字)。服務條款只有這一個入口;隱私權政策在 設定 › 隱私 另有一個就地的。
+                 外開瀏覽器,網址帶目前語言 -->
+            <p class="set-legal"><button type="button" class="btn-quiet" id="set-terms" data-i18n="legal.terms"></button> <span aria-hidden="true">·</span> <button type="button" class="btn-quiet" id="set-privacy" data-i18n="legal.privacy"></button></p>
+          </div>
         </div>
         <div class="set-pane" data-set-cat="model" id="set-model" hidden></div>
+        <div class="set-pane" data-set-cat="src" id="set-src" hidden></div>
         <!-- 雲端方案:內容由 app.js 的 planPaint 畫(依 account_status.plan)。上半自己捲,
              底列(「存在就扣」那句 + 鈕)不捲——那句話永遠貼在鈕的正上方 -->
         <div class="set-pane plan-pane" data-set-cat="plan" id="set-plan" hidden></div>
+        <div class="set-pane" data-set-cat="acct" id="set-acct-pane" hidden>
+          <div class="acct-id">
+            <div class="t"><p class="a1" id="acct-a1"></p><p class="a2" id="acct-a2"></p></div>
+            <!-- 同一個位置的同一顆鈕:已登入 = 登出(不跳確認框,可逆、沒有東西會被刪);未登入 = 登入 Blave -->
+            <button type="button" class="btn-out" id="set-acct-btn"></button>
+          </div>
+          <!-- 這一頁唯一放訊息的地方(登出沒撤成、登入等待中):只由 acctPaintAcct 寫,不讓第二個人碰 -->
+          <p class="cn-hint" id="acct-hint" hidden></p>
+          <ul class="acct-list" id="acct-list"></ul>
+          <div class="acct-link"><p id="acct-to-plan"></p><button type="button" class="pf-act" id="acct-to-plan-btn"></button></div>
+        </div>
+        <div class="set-pane" data-set-cat="priv" id="set-priv" hidden></div>
       </div>
     </div>
   </div>
@@ -223,20 +371,126 @@
   <img class="lb-img" id="lb-img" alt="">
 </div>
 
+<!-- 連接交易所(自動下單頁的「連接交易所」直接開這個框;結構照雲端版)。內容由 trade.js 的 cxModalPaint 畫。
+     兩個視角都開得起來:雲端那一份的金鑰只走主行程的 cloud-connect(S5),雲端主機在跑才開得起來 -->
+<div class="scrim" id="cx-scrim" role="dialog" aria-modal="true" aria-labelledby="cx-title" hidden>
+  <div class="set-modal cx-modal" id="cx-modal">
+    <div class="modal-head">
+      <!-- 雲端視角才出:目的地記號(標題列同時灰底,同雲端確認框) -->
+      <span class="envm" id="cx-env" hidden></span>
+      <h6 id="cx-title" data-i18n="cx.connect"></h6>
+      <button type="button" class="modal-close" id="cx-close" data-i18n-aria="set.close">✕</button>
+    </div>
+    <div class="cx-body" id="cx-body"></div>
+    <div class="modal-foot">
+      <!-- 雲端:鈕正上方講目的地(雲端 · 真錢 · Binance) -->
+      <span class="del-where" id="cx-where" hidden></span>
+      <button type="button" class="btn-out" id="cx-cancel" data-i18n="del.cancel"></button>
+      <button type="button" class="btn-fill" id="cx-go"></button>
+    </div>
+  </div>
+</div>
+
+<!-- 選擇下單策略(自動下單 › 部位的「選擇策略」;spec-desktop-strategy-picker,照雲端工作頁 #ps_scrim)。殼同 cx 框、寬 440;
+     列由 trade.js 的 psOpen 建。放在 cx 之後、del 之前:Esc 由 trade.js 自己接(app.js escTop 不動) -->
+<div class="scrim" id="ps-scrim" role="dialog" aria-modal="true" aria-labelledby="ps-title" hidden>
+  <div class="set-modal ps-modal" id="ps-modal">
+    <div class="modal-head">
+      <span class="envm" id="ps-env" hidden></span>
+      <h6 id="ps-title" data-i18n="tr.pick.title"></h6>
+      <button type="button" class="modal-close" id="ps-close" data-i18n-aria="set.close">✕</button>
+    </div>
+    <div class="ps-body" id="ps-body">
+      <p class="ps-hint" data-i18n="tr.pick.hint"></p>
+      <div class="ps-list" id="ps-list"></div>
+    </div>
+    <div class="modal-foot">
+      <span class="del-where" id="ps-where" hidden></span>
+      <button type="button" class="btn-out" id="ps-cancel" data-i18n="del.cancel"></button>
+      <button type="button" class="btn-fill" id="ps-ok" data-i18n="tr.pick.ok"></button>
+    </div>
+  </div>
+</div>
+
 <!-- 刪對話的確認框(外框沿用 .scrim / .set-modal;寬 440 = 雲端 .ns-modal) -->
 <div class="scrim" id="del-scrim" role="dialog" aria-modal="true" aria-labelledby="del-title" aria-describedby="del-body" hidden>
   <div class="set-modal del-modal" id="del-modal">
     <div class="modal-head">
+      <!-- 寫進雲端的確認框才出:目的地記號 -->
+      <span class="envm" id="del-env" hidden></span>
+      <span class="mode paper" id="del-mark" hidden></span>
       <h6 id="del-title"></h6>
       <button type="button" class="modal-close" id="del-close" data-i18n-aria="set.close">✕</button>
     </div>
     <!-- div 不是 p:啟動方案的確認要放三段 <p>(刪對話只有一句,直接寫字) -->
     <div class="del-body" id="del-body"></div>
     <div class="modal-foot">
+      <!-- 鈕正上方那一行:整行,所以排在 flex 的最前面 -->
+      <span class="del-where" id="del-where" hidden></span>
       <button type="button" class="btn-out" id="del-cancel" data-i18n="del.cancel"></button>
+      <button type="button" class="btn-out" id="del-alt" hidden></button>
       <button type="button" class="btn-fill" id="del-ok" data-i18n="del.ok"></button>
     </div>
   </div>
+</div>
+
+<!-- 新增策略 modal(spec-desktop-0.1.6 §4;照雲端 #ns_modal 逐格搬,殼同 confirmBox 家族:#del-scrim 的 440 框)。
+     五格 + 即時預覽句(.cf-quote)+「至少填一項」+ 策略庫連結;由 newstrategy.js 接線。雲端視角:標題列灰底 + 「雲端」記號 + 腳的目的地句 -->
+<div class="scrim" id="ns-scrim" role="dialog" aria-modal="true" aria-labelledby="ns-title" hidden>
+  <form class="set-modal del-modal" id="ns-modal">
+    <div class="modal-head">
+      <span class="envm" id="ns-env" hidden></span>
+      <h6 id="ns-title" data-i18n="ns.title"></h6>
+      <button type="button" class="modal-close" id="ns-close" data-i18n-aria="set.close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="ns-hint" data-i18n="ns.hint"></p>
+      <label class="fld"><span class="fld-l" data-i18n="ns.name"></span><input class="f-input txt" id="ns-name" name="name" autocomplete="off" data-i18n-ph="ns.namePh"></label>
+      <div class="f-row">
+        <label class="fld"><span class="fld-l" data-i18n="ns.symbol"></span><input class="f-input txt" name="symbol" autocomplete="off" data-i18n-ph="ns.symbolPh"></label>
+        <label class="fld"><span class="fld-l" data-i18n="ns.timeframe"></span><input class="f-input txt" name="timeframe" autocomplete="off" data-i18n-ph="ns.timeframePh"></label>
+      </div>
+      <label class="fld"><span class="fld-l" data-i18n="ns.indicators"></span><input class="f-input txt" name="indicators" autocomplete="off" data-i18n-ph="ns.indicatorsPh"></label>
+      <label class="fld"><span class="fld-l" data-i18n="ns.logic"></span><textarea class="f-area" name="logic" data-i18n-ph="ns.logicPh"></textarea></label>
+      <div class="fld"><span class="fld-l" data-i18n="ns.previewLabel"></span><div class="cf-quote empty" id="ns-preview" aria-live="polite"></div></div>
+    </div>
+    <div class="modal-foot">
+      <span class="foot-msg" id="ns-msg" role="status"></span>
+      <span class="del-where" id="ns-where" hidden></span>
+      <span class="ns-lib-hint"><span data-i18n="ns.libHint"></span><button type="button" class="btn-quiet" id="ns-lib" data-i18n="ns.libLink"></button></span>
+      <span class="modal-btns"><button type="button" class="btn-out" id="ns-cancel" data-i18n="del.cancel"></button><button type="submit" class="btn-fill" id="ns-submit" data-i18n="ns.submit" disabled></button></span>
+    </div>
+  </form>
+</div>
+
+<!-- 新增報告 modal(spec-desktop-0.1.6 §1.5;照雲端 #rp_modal 搬,拿掉「定期」段):描述欄 + 5 顆範例句 chip(.pf-act)+ 誠實句;
+     由 reports.js 接線。chip 的 data-tpl 是字串表的 key(範本句由 t() 取,換語言不用重畫) -->
+<div class="scrim" id="rpn-scrim" role="dialog" aria-modal="true" aria-labelledby="rpn-title" hidden>
+  <form class="set-modal del-modal" id="rpn-modal">
+    <div class="modal-head">
+      <span class="envm" id="rpn-env" hidden></span>
+      <h6 id="rpn-title" data-i18n="rpt.new.title"></h6>
+      <button type="button" class="modal-close" id="rpn-close" data-i18n-aria="set.close">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="fld"><span class="fld-l" data-i18n="rpt.new.descLabel"></span><textarea class="f-area" id="rpn-desc" data-i18n-ph="rpt.new.descPh"></textarea></label>
+      <div class="rpn-chips">
+        <span class="l" data-i18n="rpt.new.examples"></span>
+        <button type="button" class="pf-act" data-tpl="rpt.new.tpl.tw" data-i18n="rpt.new.chip.tw"></button>
+        <button type="button" class="pf-act" data-tpl="rpt.new.tpl.close" data-i18n="rpt.new.chip.close"></button>
+        <button type="button" class="pf-act" data-tpl="rpt.new.tpl.crypto" data-i18n="rpt.new.chip.crypto"></button>
+        <button type="button" class="pf-act" data-tpl="rpt.new.tpl.symbol" data-i18n="rpt.new.chip.symbol"></button>
+        <button type="button" class="pf-act" data-tpl="rpt.new.tpl.research" data-i18n="rpt.new.chip.research"></button>
+      </div>
+      <!-- 帶 {where} 的誠實句由 reports.js 寫(不掛 data-i18n) -->
+      <p class="ns-hint" id="rpn-honest"></p>
+    </div>
+    <div class="modal-foot">
+      <span class="foot-msg" id="rpn-msg" role="status"></span>
+      <span class="del-where" id="rpn-where" hidden></span>
+      <span class="modal-btns"><button type="button" class="btn-out" id="rpn-cancel" data-i18n="del.cancel"></button><button type="submit" class="btn-fill" id="rpn-send" data-i18n="rpt.new.send"></button></span>
+    </div>
+  </form>
 </div>
 
 <script src="../node_modules/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
@@ -244,5 +498,13 @@
 <script src="i18n.js"></script>
 <script src="report-backtest.js"></script>
 <script src="report-trades.js"></script>
+<script src="report-robust.js"></script>
+<script src="report-blocks.js"></script>
+<script src="reports.js"></script>
+<script src="newstrategy.js"></script>
+<script src="trade.js"></script>
+<script src="datasrc.js"></script>
+<script src="handoff.js"></script>
+<script src="library.js"></script>
 <script src="app.js"></script>
 </body></html>

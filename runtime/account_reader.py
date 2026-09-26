@@ -179,7 +179,10 @@ def _venues(env):
         if not m:
             continue
         prefix = m.group(1)
-        if prefix.upper() in _RESERVED_PREFIXES:
+        # DATA_<SOURCE>_* = data-source keys, never a venue
+        # (command_listener._DATA_CRED_PREFIX) — even if an agent someday
+        # writes a lib/account_data_<source>.py
+        if prefix.upper() in _RESERVED_PREFIXES or prefix.upper().startswith("DATA_"):
             continue
         vid = prefix.lower()
         if os.path.isfile(os.path.join(WORKSPACE, "lib", f"account_{vid}.py")):
@@ -231,6 +234,13 @@ def _norm_positions(raw):
             continue
         size = _finite(p.get("size", 0), 0.0)
         mark = _finite(p.get("mark_price"))
+        if p.get("unit") == "contracts":
+            # a paper contract position: size is LOTS (lib/order_paper) —
+            # never × mark; carried as-is with its unit for the display
+            out[p["symbol"]] = {"side": p.get("side"), "size": round(size, 4),
+                                "unit": "contracts",
+                                "contract_value": _finite(p.get("contract_value"), 1.0)}
+            continue
         if mark is not None:
             size = size * mark
         out[p["symbol"]] = {"side": p.get("side"), "size": round(size, 4)}
@@ -279,6 +289,10 @@ def read_venue(vid, env, flow_state=None):
                 str(k): _finite(v, 0.0) for k, v in eq["accounts"].items()
                 if isinstance(v, (int, float))
             }
+        if eq.get("accounts_partial") is True:
+            # the lib's wallet breakdown failed this read and `accounts` is only
+            # the trading wallet — the equity history must not log it as the total
+            entry["accounts_partial"] = True
     except Exception as e:
         entry["error"] = _err("get_equity", e)
         return entry

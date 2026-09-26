@@ -26,6 +26,8 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNTIME = os.path.join(ROOT, "runtime")
 BASE = tempfile.mkdtemp(prefix="local-daemon-")
+# notify config = none: lib.notify here and in every child falls back to a log line, never a real Telegram
+os.environ["BLAVE_AGENT_HOME"] = os.environ["BLAVECLAW_HOME"] = BASE
 WS = os.path.join(BASE, "workspace")
 os.makedirs(os.path.join(WS, "manager"))
 os.makedirs(os.path.join(WS, "strategies", "typea"))
@@ -109,7 +111,8 @@ check(halt["cmd"] == "halt", "unsigned halt accepted, even by a daemon with no s
 
 # ── 3. single instance / where it agrees to run ──────────────────────────────
 DAEMON = [sys.executable, os.path.join(RUNTIME, "local_daemon.py")]
-ENV = dict(os.environ, BLAVE_AGENT_BASE=BASE, BLAVE_AGENT_WORKSPACE=WS, BLAVE_AGENT_LOCAL="1")
+ENV = dict(os.environ, BLAVE_AGENT_BASE=BASE, BLAVE_AGENT_WORKSPACE=WS, BLAVE_AGENT_LOCAL="1",
+           BLAVE_AGENT_HOME=BASE, BLAVECLAW_HOME=BASE)
 procs = []
 
 
@@ -302,6 +305,47 @@ except RuntimeError:
 check(cl._stop_reconciler() is False, "[local] stop without a daemon host = not confirmed")
 cl.subprocess.run, cl.platform.system = real_run, real_system
 pr.subprocess.run = real_run
+
+# — events window slides: nothing acks locally, so without this the status file
+#   shows the oldest MAX_SEND events forever and newer ones never surface —
+import importlib
+ev_mod = importlib.import_module("events")
+ld_mod = importlib.import_module("local_daemon")
+for p_ in (ev_mod.EVENTS_PATH, ev_mod.ACKED_PATH):
+    if os.path.exists(p_):
+        os.remove(p_)
+ids = [ev_mod.append("order_error", {"symbol": "BTCUSDT", "n": i}) for i in range(ev_mod.MAX_SEND + 30)]
+first = ev_mod.unsent()
+check(len(first) == ev_mod.MAX_SEND and first[-1]["id"] < ids[-1], "[events] full window = oldest MAX_SEND, newest not visible")
+ld_mod._slide_events(ev_mod, first[:10])
+check(ev_mod.load_acked() == 0, "[events] window not full → mark untouched")
+ld_mod._slide_events(ev_mod, first)
+second = ev_mod.unsent()
+check(second and second[-1]["id"] == ids[-1], "[events] after sliding, the newest event is in the window")
+check(second[0]["id"] == first[len(first) // 2]["id"], "[events] slides by half, nothing skipped")
+ld_mod._slide_events(ev_mod, [{"no": "id"}] * ev_mod.MAX_SEND)
+check(True, "[events] malformed window does not raise")
+# byte cap truncates the window short of MAX_SEND lines: it must still slide
+for p_ in (ev_mod.EVENTS_PATH, ev_mod.ACKED_PATH):
+    if os.path.exists(p_):
+        os.remove(p_)
+# (lines stay under 4KB: events._last_id only reads the file's last 4KB)
+big = [ev_mod.append("order_error", {"pad": "x" * 3400, "n": i}) for i in range(90)]
+cut = ev_mod.unsent()
+check(20 <= len(cut) < ev_mod.MAX_SEND and cut[-1]["id"] < big[-1], "[events] byte cap cuts the window short of MAX_SEND")
+ld_mod._slide_events(ev_mod, cut)
+check(ev_mod.load_acked() == cut[len(cut) // 2 - 1]["id"], "[events] a byte-truncated window slides too")
+# a complete window (nothing newer in the file) never slides
+tail_ = ev_mod.unsent()
+for _ in range(20):
+    if tail_[-1]["id"] >= big[-1]:
+        break
+    ld_mod._slide_events(ev_mod, tail_)
+    tail_ = ev_mod.unsent()
+check(tail_[-1]["id"] == big[-1], "[events] sliding reaches the newest event")
+mark_ = ev_mod.load_acked()
+ld_mod._slide_events(ev_mod, tail_)
+check(ev_mod.load_acked() == mark_, "[events] complete window (file has nothing newer) → mark untouched")
 
 shutil.rmtree(BASE, ignore_errors=True)
 print("FAILED" if fails else "all ok")

@@ -130,6 +130,10 @@ def official_venues(env):
         vid = m.group(1).lower()
         if m.group(1).upper() in _RESERVED_PREFIXES or vid in _NON_AUTO:
             continue
+        # DATA_<SOURCE>_* = data-source keys, never a venue
+        # (command_listener._DATA_CRED_PREFIX) — even with matching libs on disk
+        if m.group(1).upper().startswith("DATA_"):
+            continue
         if os.path.isfile(f"lib/account_{vid}.py") and os.path.isfile(f"lib/order_{vid}.py"):
             if allowed is not None and vid not in allowed:
                 _manifest_filtered_alert(vid)
@@ -202,20 +206,28 @@ def auto_get_positions():
     # AND a short row for one symbol — clobbering keeps only the last and the
     # reconciler then trades against a wrong actual. The reconciler's own
     # orders never create dual-side positions, but user-opened ones exist.
-    net = {}
+    net, contracts = {}, set()
     positions = acct.get_positions(env)
     rows = (positions.items() if isinstance(positions, dict)
             else ((p["symbol"], p) for p in positions))
     for sym, p in rows:
         p = p or {}
-        usd = p.get("size", 0) if isinstance(positions, dict) \
-            else p["size"] * p["mark_price"]
+        if p.get("unit") == "contracts":
+            # a paper contract position: size is already LOTS, the unit
+            # compute_diff's native-unit path diffs in — never × mark
+            usd = p.get("size", 0)
+            contracts.add(str(sym))
+        else:
+            usd = p.get("size", 0) if isinstance(positions, dict) \
+                else p["size"] * p["mark_price"]
         signed = usd if p.get("side") == "long" else -usd if p.get("side") == "short" else 0
         net[str(sym)] = net.get(str(sym), 0) + signed
     out = {}
     for sym, v in net.items():
         out[sym] = {"side": "long" if v > 0 else ("short" if v < 0 else None),
                     "size": abs(v)}
+        if sym in contracts:
+            out[sym]["unit"] = "contracts"
 
     if hasattr(order, "get_spot_balances"):
         balances = None
@@ -260,9 +272,15 @@ def _reduce_qty(env, vid, order, sym, direction, qty):
     and direction, so ceiling eats one lot step out of the MANUAL position
     (closing the bot's 0.017 ETH ceiled to 0.018, selling $2.25 of the user's
     coins — the exact touch self_ledger exists to prevent). Reduce legs FLOOR
-    in that mode: the bot may keep a sub-lot dust residual in its own ledger
-    (below the reconcile threshold, never re-ordered), but it can never sell
-    what it doesn't own."""
+    in that mode.
+
+    Under self_ledger this function now only sizes LEGACY rows (a book with no
+    quantity — lib.portfolio.ledger_book); everything else goes through
+    _book_reduce_qty. Flooring never made "cannot sell what it doesn't own"
+    true: `qty` here is USD ÷ the CURRENT mark, so a close below the entry
+    price asks for more than was bought and the cap is the whole account
+    (measured 2026-09-21 on paper: bought 0.01, sold 0.012 out of a 0.03
+    account). A legacy row keeps that exposure until it is first flat."""
     try:
         acct = importlib.import_module(f"lib.account_{vid}")
         positions = acct.get_positions(env)
@@ -275,13 +293,276 @@ def _reduce_qty(env, vid, order, sym, direction, qty):
                     held += p["size"]
         lot = _lot_base(order, env, sym)
         if held and lot > 0:
-            from lib.portfolio import load_portfolio_config
-            if load_portfolio_config().get("self_ledger"):
+            if _own_only():
                 return min(math.floor(qty / lot + 1e-9) * lot, held)
             return min(math.ceil(qty / lot - 1e-9) * lot, held)
     except Exception as e:
         logging.warning(f"[venue_wiring] reduce ceil/cap skipped ({e}) — floor path")
     return qty
+
+
+def _held_base(env, vid, sym, direction):
+    """Base units the ACCOUNT holds on that side of `sym`, or None when that
+    cannot be known (failed read, or the dict contract, which carries USD)."""
+    try:
+        acct = importlib.import_module(f"lib.account_{vid}")
+        positions = acct.get_positions(env)
+        if not isinstance(positions, list):
+            return None
+        return float(sum(p["size"] for p in positions
+                         if p["symbol"] == sym and p.get("side") == direction))
+    except Exception as e:
+        logging.warning(f"[venue_wiring] {sym}: account position unreadable ({e})")
+        return None
+
+
+
+_NET_MODES = ("oneway", "net_mode", "single")
+
+
+def _net_position_mode(order, vid, env, sym):
+    """True when the venue keeps ONE net position per symbol (one-way / net
+    mode), False in hedge mode, None when it can't be told. Binance / BingX
+    ('oneway'), OKX ('net_mode') and Gate.io ('single') answer through
+    get_position_mode; Bybit tells from the symbol's position rows; paper
+    always nets."""
+    try:
+        if vid == "paper":
+            return True
+        if hasattr(order, "get_position_mode"):
+            return order.get_position_mode(env) in _NET_MODES
+        if hasattr(order, "_position_mode") and hasattr(order, "_position_rows"):
+            return order._position_mode(order._position_rows(env, sym)) == 0
+    except Exception as e:
+        logging.warning(f"[venue_wiring] {sym}: position mode unreadable ({e})")
+    return None
+
+
+def _netted_room(env, vid, order, sym, direction):
+    """Base qty the account holds on the OTHER side of an entry about to go
+    out on a one-way account (0 on hedge / unknown / nothing there)."""
+    other = "short" if direction == "long" else "long"
+    opp = _held_base(env, vid, sym, other)
+    if not opp or _net_position_mode(order, vid, env, sym) is not True:
+        return 0.0
+    return float(opp)
+
+
+def _netted_exit(env, vid, order, sym, direction, signed_diff, row, sold=0.0, key=None,
+                 source="reconcile"):
+    """Undo what the bot's entries netted into the user's opposite position on
+    a one-way account: a PLAIN order (no reduce-only side exists to reduce) of
+    at most the book's recorded netted quantity (_netted_room at entry), so the
+    user's own position is exactly restored. Only when the account shows none
+    of the bot's side and some of the other, the venue nets (one-way), the book
+    recorded a netted amount, and two reads in a row agree (_account_short) —
+    a user who closed the bot's position by hand and opened their own opposite
+    one looks the same on ONE read but has no recorded netted amount, and gets
+    the reduce-only path (confirmed write-off) instead.
+    None = not this case; False = nothing to send yet (first read, or dust)."""
+    netted = float(row.get("netted") or 0.0)
+    if not row.get("owned") or netted <= 0:
+        return None
+    other = "short" if direction == "long" else "long"
+    same = _held_base(env, vid, sym, direction)
+    if same is None or same > 0:
+        return None
+    opp = _held_base(env, vid, sym, other)
+    if not opp or _net_position_mode(order, vid, env, sym) is not True:
+        return None
+    if not _account_short(key or sym, True):
+        logging.info(f"[venue_wiring] {sym}: the bot's {direction} reads as netted into the "
+                     f"account's {other} — confirmed on the next read before undoing it")
+        return False
+    owned = max(0.0, row["owned"] - sold)
+    want = owned if row["full"] else min(abs(signed_diff) / row["unit_cost"], owned)
+    want = min(want, netted, float(opp))
+    lot = _lot_base(order, env, sym)
+    if lot > 0:
+        want = float(f"{math.floor(want / lot + 1e-9) * lot:.12g}")
+    if want <= 0:
+        return False
+    logging.warning(f"[venue_wiring] {sym}: the bot's {direction} {want:g} was netted into the "
+                    f"account's {other} — exiting with a plain {other} order so the user's "
+                    f"position is restored")
+    from lib import guard
+    with guard.netted_restore(sym, other, want, source):
+        result = order.place_market_order(env, sym, other, want, client_order_id=_cid(),
+                                          reduce_only=False)
+    if result is False:
+        return False
+    _account_short(key or sym, False)
+    placed = dict(result)
+    placed["exchange"] = vid
+    placed["unit_cost"] = row["unit_cost"]
+    placed["netted_exit"] = True
+    return placed
+
+
+def _own_only():
+    """lib.portfolio.own_positions_only, or the bare flag beside a lib.portfolio
+    from before it (lib files can land on a machine one at a time)."""
+    from lib import portfolio
+    cfg = portfolio.load_portfolio_config()
+    own = getattr(portfolio, "own_positions_only", None)
+    return own(cfg) if own else bool(cfg.get("self_ledger"))
+
+def _book_row(symbol, signed_diff):
+    """self_ledger only: what the bot's own book says about the position a
+    REDUCE leg of `signed_diff` is closing — None when self_ledger is off (the
+    caller then sizes exactly as it always has). Read here rather than threaded
+    down from reconcile: a TWAP slice or a chase re-post is sized long after
+    reconcile returned, and manager/reconciler.py is a file users hand-edit —
+    a new argument through it would silently not arrive on those machines.
+
+    {'owned': base units the bot holds on the side being closed (0 = none),
+     'unit_cost': USD of cost per base unit — the rate a reduce leg's USD
+         converts at. NOT the mark: that conversion is what stranded or
+         oversold every close away from the entry price. A proportional
+         reduce leaves it unchanged, so every slice of one execution converts
+         at the same rate even though the book is only written at the end,
+     'full': this leg takes the book to flat,
+     'legacy': the row has no usable quantity — size it the old way}"""
+    try:
+        if not _own_only():
+            return None
+        # files reach a machine one at a time: a lib.portfolio from before the
+        # quantity book has no ledger_book, and its book is sized the old way
+        from lib.portfolio import ledger_book
+    except Exception as e:
+        logging.warning(f"[venue_wiring] {symbol}: book unavailable ({e}) — sized at the mark")
+        return None
+    r = ledger_book().get(symbol)
+    # a reduce leg closes the side OPPOSITE to its own sign
+    if not r or r["cost"] * signed_diff >= 0:
+        return {"owned": 0.0, "unit_cost": None, "full": True, "legacy": False}
+    full = abs(signed_diff) >= abs(r["cost"]) * (1 - 1e-9)
+    if r["legacy"]:
+        return {"owned": None, "unit_cost": None, "full": full, "legacy": True}
+    return {"owned": abs(r["qty"]), "unit_cost": abs(r["cost"]) / abs(r["qty"]),
+            "full": full, "legacy": False, "netted": float(r.get("netted") or 0.0)}
+
+
+_SPOT_LEGACY_SAID = set()
+
+
+def _spot_legacy_refused(symbol, vid):
+    """A spot sell against a book row with no quantity is not sent. The wallet
+    is one pool of the bot's and the user's coins; USD ÷ today's price is not
+    the bot's coins (below its entry it is more), and spot has no reduce-only
+    side to stop at the bot's share. The reconciler writes such a row off when
+    it builds the book (lib.portfolio.reconcile) — this is the backstop for an
+    execution already under way; said once per symbol, order_errors keeps 5."""
+    msg = ("spot sell skipped: the bot's share of this coin has no recorded quantity, so "
+           "it can't be told from yours — sell the bot's part yourself, or reseed the book "
+           "(references/manager.md § self_ledger)")
+    logging.error(f"[venue_wiring] {symbol}: {msg}")
+    if symbol in _SPOT_LEGACY_SAID:
+        return False
+    _SPOT_LEGACY_SAID.add(symbol)
+    try:
+        from lib.portfolio import _record_order_error
+        _record_order_error(symbol, vid, msg)
+    except Exception:
+        pass
+    return False
+
+
+def _account_short(symbol, short):
+    """lib.portfolio.note_account_short: True only once a read showing the
+    account short of the book is CONFIRMED by a second one. Anything less
+    (incl. a lib.portfolio without it) is "not known" — the leg is then sized
+    and sent as if the read had not happened, never written off."""
+    try:
+        from lib.portfolio import note_account_short
+        return note_account_short(symbol, short)
+    except Exception as e:
+        logging.warning(f"[venue_wiring] {symbol}: short-read bookkeeping failed ({e})")
+        return False
+
+
+def _book_reduce_qty(env, vid, order, sym, direction, usd, row, sold=0.0, key=None):
+    """(qty, held, lot, confirmed) for a self_ledger reduce leg on a quantity row.
+
+    The share of the book this leg closes, in the bot's own units: usd ÷
+    unit_cost, the whole `owned` on a full close. ROUNDED to the nearest lot
+    (flooring leaves a 0.5–1 lot remainder that passes the half-lot reduce
+    gate and then floors to nothing, every round) and capped at
+    min(owned, account) floored to a lot: never more than the bot bought, and
+    never more than is there. `sold` = base already closed by earlier slices
+    of the same execution, which the book does not show until it finishes.
+
+    An account read SHORT of the book is only believed once confirmed
+    (`confirmed`, _account_short). Until then an empty read is treated like a
+    failed one — the reduce-only order goes out at the book's quantity and the
+    venue, which knows, fills or refuses it (what _reduce_qty has always done
+    with a position it could not find). A non-empty short read still caps the
+    order: selling less than asked is safe whichever side is wrong."""
+    owned = max(0.0, row["owned"] - sold)
+    qty = owned if row["full"] else min(abs(usd) / row["unit_cost"], owned)
+    lot = 0.0
+    try:
+        lot = _lot_base(order, env, sym)
+    except Exception as e:
+        logging.warning(f"[venue_wiring] {sym}: lot size unavailable ({e}) — unrounded")
+    if lot > 0 and math.floor(qty / lot + 0.5) == 0 and not row["full"]:
+        return 0.0, None, lot, False  # rounds to nothing: no account read to learn that
+    held = _held_base(env, vid, sym, direction)
+    confirmed = False
+    if held is not None and owned > 0:
+        confirmed = _account_short(key or sym, held < owned * (1 - 1e-9))
+        if held <= 0 and not confirmed:
+            held = None
+    cap = owned if held is None else min(owned, held)
+    if lot > 0:
+        qty = min(math.floor(qty / lot + 0.5), math.floor(cap / lot + 1e-9)) * lot
+    else:
+        qty = min(qty, cap)
+    return qty, held, lot, confirmed
+
+
+def _book_writeoff(row, qty, held, lot, executed, sold=0.0, confirmed=False):
+    """Why the book should be zeroed after this close, or None. Only on a full
+    close, and only for a remainder that can never be sold — a partial fill
+    leaves a real position behind and must be retried, not forgotten. The two
+    reasons that rest on an account read need it `confirmed` (_account_short)."""
+    if not row["full"]:
+        return None
+    owned = max(0.0, row["owned"] - sold)
+    rest = owned - executed
+    if rest <= max(1e-12, 1e-9 * owned):
+        return None
+    if confirmed and held is not None and held <= 0:
+        return "account holds none of it"
+    if executed < qty * (1 - 1e-9):
+        return None if qty > 0 else "below one lot"
+    if lot > 0 and rest < lot * (1 - 1e-9):
+        return "remainder below one lot"
+    if confirmed and held is not None and held < owned:
+        return "account held less than the book"
+    return None
+
+
+def auto_position_qty():
+    """{symbol: signed BASE quantity} of the account's swap positions, netted
+    per symbol — the quantity twin of auto_get_positions (which answers in
+    USD at the mark). For seed_ledger --absorb, and for comparing the account
+    with lib.portfolio.ledger_positions()[sym]['qty'] without a price in
+    between. None when the venue's account lib answers in the dict (USD)
+    contract: there is no quantity to read."""
+    env = read_env()
+    vid = detect_venue(env)
+    if vid is None:
+        _no_venue()
+    positions = importlib.import_module(f"lib.account_{vid}").get_positions(env)
+    if not isinstance(positions, list):
+        return None
+    out = {}
+    for p in positions:
+        sign = 1 if p.get("side") == "long" else -1 if p.get("side") == "short" else 0
+        sym = str(p["symbol"]).replace("-", "").upper()
+        out[sym] = out.get(sym, 0.0) + sign * float(p["size"])
+    return out
 
 
 def _entry_qty(order, env, sym, qty):
@@ -366,24 +647,70 @@ def auto_limit_toolkit(symbol, reduce_only=False):
         if not all(hasattr(order, n) for n in need):
             return None
 
-        def _place(usd, price, cid, _buy):
+        def _place(usd, price, cid, _buy, sold=0.0):
             base_qty = abs(usd) / price
             if not _buy:
                 held = order.get_spot_balances(env).get(_spot_base(sym), 0.0)
                 base_qty = min(base_qty, held)
-            return order.place_spot_limit_order(
+                row = _book_row(symbol, -abs(usd))
+                if row is not None and row["legacy"]:
+                    return _spot_legacy_refused(symbol, vid)
+                if row is not None and not row["legacy"]:
+                    # self_ledger: same sizing as auto_place_order's spot sell
+                    owned = max(0.0, row["owned"] - sold)
+                    base_qty = min(owned if row["full"] else abs(usd) / row["unit_cost"],
+                                   owned, held)
+                    if base_qty <= 0:
+                        return False
+            res = order.place_spot_limit_order(
                 env, sym, "buy" if _buy else "sell", base_qty, price,
                 client_order_id=cid or _cid(), post_only=True)
+            if isinstance(res, dict) and res.get("order_id") is not None:
+                sides[str(res["order_id"])] = "buy" if _buy else "sell"
+            return res
+
+        sides = {}  # order id → side, so a status read books a buy net of its fee
+
+        def _spot_status(oid):
+            row = order.get_spot_order(env, sym, oid)
+            st = _norm_order(row)
+            side = sides.get(str(oid))
+            if (side == "buy" and row.get("commission") is None and not row.get("commissions")
+                    and st["status"] in ("filled", "canceled") and st["executed_qty"] > 0
+                    and hasattr(order, "get_spot_fill_fees")):
+                # the order query has no fee (Binance): read the fills once, at the end
+                if str(oid) not in fees:
+                    try:
+                        fees[str(oid)] = order.get_spot_fill_fees(env, sym, oid)
+                    except Exception as e:
+                        logging.warning(f"[venue_wiring] {symbol}: fill fees unreadable ({e})")
+                        fees[str(oid)] = None
+                if fees[str(oid)]:
+                    row = {**row, "commissions": fees[str(oid)]}
+            if side:
+                st["book_qty"], known = spot_book_qty(vid, sym, side, row)
+                if not known and str(oid) not in said:  # said once per order, not per poll
+                    said.add(str(oid))
+                    _book_spot_fill(vid, symbol, sym, side, row)
+            return st
+
+        said = set()
+        fees = {}  # order id → {asset: fee} from the venue's fills
 
         def _spot_bbo():
             b = order.get_spot_bbo(env, sym)
             return float(b["bid"]), float(b["ask"])
 
+        def _spot_unit_cost(_buy):
+            row = None if _buy else _book_row(symbol, -1.0)
+            return (row or {}).get("unit_cost")
+
         return {
             "venue": vid,
             "bbo": _spot_bbo,
-            "place": lambda usd, price, cid, _buy: _place(usd, price, cid, _buy),
-            "status": lambda oid: _norm_order(order.get_spot_order(env, sym, oid)),
+            "unit_cost": _spot_unit_cost,
+            "place": _place,
+            "status": _spot_status,
             "cancel": lambda oid: order.cancel_spot_order(env, sym, oid),
         }
 
@@ -391,10 +718,17 @@ def auto_limit_toolkit(symbol, reduce_only=False):
     if not all(hasattr(order, n) for n in need):
         return None
 
-    def _place(usd, price, cid, _buy):
+    def _place(usd, price, cid, _buy, sold=0.0):
         qty = abs(usd) / price
-        if reduce_only:
-            direction = "long" if not _buy else "short"  # closing that side
+        row = _book_row(symbol, usd if _buy else -usd) if reduce_only else None
+        direction = "long" if not _buy else "short"  # closing that side
+        if row is not None and not row["legacy"]:
+            # self_ledger: `usd` is the book's USD (see auto_place_order)
+            qty = _book_reduce_qty(env, vid, order, sym, direction, usd, row, sold,
+                                   key=symbol)[0]
+            if qty <= 0:
+                return False
+        elif reduce_only:
             qty = _reduce_qty(env, vid, order, sym, direction, qty)
         else:
             direction = "long" if _buy else "short"
@@ -407,13 +741,84 @@ def auto_limit_toolkit(symbol, reduce_only=False):
         b = order.get_bbo(env, sym)
         return float(b["bid"]), float(b["ask"])
 
+    def _unit_cost(_buy):
+        # self_ledger reduce: the rate the chase counts its fills at — _book_row
+        row = _book_row(symbol, 1.0 if _buy else -1.0) if reduce_only else None
+        return (row or {}).get("unit_cost")
+
+    def _room(_buy):
+        # an entry's netted share, read once before its first fill (same rule
+        # as auto_place_order: fills shrink the opposite side as they land)
+        if reduce_only or not _own_only():
+            return 0.0
+        return _netted_room(env, vid, order, sym, "long" if _buy else "short")
+
     return {
         "venue": vid,
         "bbo": _swap_bbo,
-        "place": lambda usd, price, cid, _buy: _place(usd, price, cid, _buy),
+        "unit_cost": _unit_cost,
+        "netted_room": _room,
+        "place": _place,
         "status": lambda oid: _norm_order(order.get_order(env, sym, oid)),
         "cancel": lambda oid: order.cancel_order(env, sym, order_id=oid),
     }
+
+
+# a fee assumed when a spot BUY's fill reports none (BingX's order query has no
+# fee field): above every official venue's taker rate, so the bot's book never
+# holds a coin that did not arrive — at worst it owns a hair less than it bought
+_SPOT_FEE_UNKNOWN_CAP = 0.002
+
+
+def spot_book_qty(vid, sym, side, row):
+    """(coins that actually moved for this spot fill — the bot's book quantity,
+    unsigned; fee_known). `executed_qty` is the pre-fee fill and stays that for
+    every other caller: on a BUY the venue takes its fee out of the coin bought
+    (Binance / OKX / Gate report it as commission + commission_asset, Bybit's
+    buy fee is always the base coin, measured), so the wallet holds executed −
+    fee. Booking the pre-fee quantity would make every full close — close-all
+    included — sell one fee's worth of the user's own coins of that asset. A fee
+    paid in another asset (the quote, BNB) leaves the coin untouched. Sells: the
+    official venues charge them in the quote (or BNB) — the coins that left are
+    the fill. No fee field on a buy: _SPOT_FEE_UNKNOWN_CAP is assumed and the
+    caller says so."""
+    q = abs(float((row or {}).get("executed_qty") or 0))
+    if side != "buy" or q <= 0:
+        return q, True
+    by_asset = row.get("commissions")
+    if isinstance(by_asset, dict) and by_asset:
+        # per-fill fee assets (Binance): only the part paid in the coin comes off it
+        base_fee = sum(abs(float(v or 0)) for k, v in by_asset.items()
+                       if str(k).upper() == _spot_base(sym))
+        return float(f"{max(0.0, q - base_fee):.12g}"), True
+    fee, asset = row.get("commission"), str(row.get("commission_asset") or "").upper()
+    if fee is None or (not asset and vid != "bybit"):
+        return float(f"{q * (1 - _SPOT_FEE_UNKNOWN_CAP):.12g}"), False
+    fee = abs(float(fee))
+    if (asset or _spot_base(sym)) == _spot_base(sym):
+        return float(f"{max(0.0, q - fee):.12g}"), True
+    return q, True
+
+
+def _book_spot_fill(vid, symbol, sym, side, result):
+    """A spot fill dict with `book_qty` (spot_book_qty) — what lib.portfolio
+    and lib.execute book instead of executed_qty. An unknown buy fee is said
+    once per fill (audit + log): the book is then a conservative estimate."""
+    placed = dict(result)
+    qty, known = spot_book_qty(vid, sym, side, placed)
+    placed["book_qty"] = qty
+    if not known:
+        placed["fee_unknown"] = True
+        logging.warning(f"[venue_wiring] {symbol}: {vid} reported no fee for this buy — booked "
+                        f"{qty:g} of {placed.get('executed_qty')} (assumed "
+                        f"{_SPOT_FEE_UNKNOWN_CAP:.1%} taken from the coin)")
+        try:
+            from lib import guard
+            guard.audit('spot_fee_unknown', symbol=symbol, venue=vid,
+                        executed_qty=placed.get("executed_qty"), booked=qty)
+        except Exception:
+            pass
+    return placed
 
 
 def _norm_order(row):
@@ -471,8 +876,82 @@ def sweep_orphan_orders():
     return n
 
 
+def _paper_contract_row(env, sym):
+    """The paper account's position row for `sym` when it is held in
+    contracts (unit "contracts", size in lots, contract_value), else None."""
+    from lib import order_paper
+    for p in order_paper.snapshot(env)["positions"]:
+        if p["symbol"] == sym and p.get("unit") == "contracts":
+            return p
+    return None
+
+
+def _paper_contract_order(env, symbol, signed_diff, asset_spec, reduce_only):
+    """Paper leg of a futures_contracts / shares row: signed_diff is LOTS.
+    Same shape as manager/reconciler._capital_place_order — round-half-up to
+    a whole lot (math.floor(x + 0.5), not round(): banker's rounding sends a
+    0.5 tie down to nothing), under half a lot places nothing, reduce_only
+    caps at the held lots inside the paper lib. contract_value comes from the
+    spec (TXF 200 / MXF 50 / TMF 10 — the platform writes it with the spec;
+    shares carry 1); missing → refused loudly, never valued at a guess."""
+    from lib import order_paper
+    sym = split_key(symbol)[0]
+    cv = (asset_spec or {}).get("contract_value")
+    if (asset_spec or {}).get("type") == "shares" and cv is None:
+        cv = 1
+    try:
+        cv = float(cv)
+    except (TypeError, ValueError):
+        cv = 0.0
+    if not cv > 0:
+        raise RuntimeError(f"{symbol}: asset_spec has no usable contract_value "
+                           f"({(asset_spec or {}).get('contract_value')!r}) — a paper "
+                           f"contract fill cannot be valued; fix portfolio_config asset_specs")
+    lots = math.floor(abs(signed_diff) + 0.5)
+    if lots < 1:
+        return False
+    direction = ("long" if signed_diff < 0 else "short") if reduce_only \
+        else ("long" if signed_diff > 0 else "short")
+    if reduce_only:
+        # a position opened by the notional path before this spec existed
+        # (size = USD ÷ mark, no unit): lots cannot net into it, so the
+        # reduce closes the whole notional position instead — one order,
+        # flat, and the next entry books lots. Never a PaperError every round.
+        held = next((p for p in order_paper.snapshot(env)["positions"]
+                     if p["symbol"] == sym and p.get("unit") != "contracts"), None)
+        if held is not None:
+            logging.warning(f"[venue_wiring] {sym}: paper holds a pre-spec notional "
+                            f"position ({held['size']} base) — closing it whole")
+            result = order_paper.place_market_order(
+                env, sym, direction, float(held["size"]), client_order_id=_cid(),
+                reduce_only=True)
+            if result is False:
+                return False
+            placed = dict(result)
+            placed["exchange"] = "paper"
+            return placed
+    margin = (asset_spec or {}).get("margin")
+    if not reduce_only:
+        try:
+            margin = float(margin)
+        except (TypeError, ValueError):
+            margin = 0.0
+        if not margin > 0:
+            raise RuntimeError(f"{symbol}: asset_spec has no usable margin (initial margin "
+                               f"per lot) — a paper contract entry cannot be leverage-checked; "
+                               f"fix portfolio_config asset_specs")
+    result = order_paper.place_contract_market_order(
+        env, sym, direction, lots, cv, client_order_id=_cid(), reduce_only=reduce_only,
+        margin=margin if not reduce_only else None)
+    if result is False:
+        return False
+    placed = dict(result)
+    placed["exchange"] = "paper"
+    return placed
+
+
 def auto_place_order(symbol, signed_diff, asset_spec=None, reduce_only=False,
-                     exchange=None):
+                     exchange=None, sold=0.0):
     """Reconciler place_order: routes on the key's market. Spot buys are sized
     in QUOTE currency directly; spot sells in base qty capped at the wallet's
     inventory; swap converts USD at the live mark (get_mark_price contract).
@@ -484,11 +963,40 @@ def auto_place_order(symbol, signed_diff, asset_spec=None, reduce_only=False,
     venues and silently trading on the detected one is real money on the
     wrong exchange — loud-skip instead. A stale label (previous venue, keys
     gone — the normal state right after a rebind, fixed by the next amounts
-    save) only warns and routes to the detected venue."""
+    save) only warns and routes to the detected venue.
+
+    self_ledger: a swap REDUCE leg is sized from the bot's own book, not the
+    mark (_book_row / _book_reduce_qty); `sold` is the base an async execution
+    already closed in earlier slices. The returned dict then also carries
+    'unit_cost' (so a slicing caller counts progress in the book's USD, the
+    unit signed_diff is in) and, when what is left of a full close can never
+    be sold, 'writeoff': reason — with 'executed_qty': 0.0 and no order sent
+    when there was nothing to send at all. Off, nothing here changes."""
     env = read_env()
     vid = detect_venue(env)
     if vid is None:
         _no_venue()
+    # Native-unit rows (lib.portfolio.NATIVE_UNIT_TYPES — spelled out here so
+    # this file still imports beside an older lib/portfolio.py) carry lots or
+    # shares in signed_diff; everything below sizes account currency at the
+    # mark, so routing one there would send a wrong-sized real order. Paper
+    # books them as lots (_paper_contract_order); no other auto-wired venue
+    # has an order path for them (shares: none shipped anywhere yet).
+    unit_type = (asset_spec or {}).get("type")
+    if unit_type in ("futures_contracts", "shares"):
+        if vid == "paper":
+            return _paper_contract_order(env, symbol, signed_diff, asset_spec, reduce_only)
+        raise RuntimeError(f"{symbol}: asset_spec.type {unit_type!r} is reconciled in "
+                           f"native units — the {vid} auto-wire has no order path for it")
+    if vid == "paper" and reduce_only and asset_spec is None:
+        # a close-on-removal row has no spec (the strategy left the config);
+        # the held paper position says what it is, and signed_diff is lots
+        held = _paper_contract_row(env, split_key(symbol)[0])
+        if held is not None:
+            return _paper_contract_order(
+                env, symbol, signed_diff,
+                {"type": "futures_contracts", "contract_value": held["contract_value"]},
+                reduce_only)
     if exchange and exchange != vid:
         if exchange in official_venues(env):
             msg = (f"target routed to {exchange} but this wiring is on {vid} — "
@@ -516,21 +1024,87 @@ def auto_place_order(symbol, signed_diff, asset_spec=None, reduce_only=False,
         if signed_diff > 0:
             result = order.place_spot_market_order(
                 env, sym, "buy", quote_qty=abs(signed_diff), client_order_id=cid)
+            if result is not False:
+                placed = _book_spot_fill(vid, symbol, sym, "buy", result)
+                placed["exchange"] = vid
+                return placed
         else:
             price = order.get_spot_price(env, sym)
             held = order.get_spot_balances(env).get(base, 0.0)
             qty = min(abs(signed_diff) / price, held)
+            row = _book_row(symbol, signed_diff)
+            if row is not None and row["legacy"]:
+                return _spot_legacy_refused(symbol, vid)
+            if row is not None and not row["legacy"]:
+                # self_ledger: the bot's own coins at the book's rate, never
+                # the wallet's (the wallet is the user's too) — see _book_row.
+                # No lot rounding: the spot lib floors to its own precision.
+                owned = max(0.0, row["owned"] - sold)
+                want = owned if row["full"] else min(abs(signed_diff) / row["unit_cost"], owned)
+                qty = min(want, held)
+                # a wallet short of the book: believed on the second read only
+                # (_account_short). Spot has no reduce-only order to let the
+                # venue decide, so the first read sells what is there and waits.
+                confirmed = owned > 0 and _account_short(symbol, held < owned * (1 - 1e-9))
+                result = (order.place_spot_market_order(
+                    env, sym, "sell", base_qty=qty, client_order_id=cid)
+                    if qty > 0 else False)
+                if result is False:
+                    if not (row["full"] and owned > 0) or (held <= 0 and not confirmed):
+                        return False
+                    return {"executed_qty": 0.0, "exchange": vid,
+                            "writeoff": "account holds none of it" if held <= 0
+                            else "below the venue minimum"}
+                placed = dict(result)
+                placed["exchange"] = vid
+                placed["unit_cost"] = row["unit_cost"]
+                why = _book_writeoff(row, qty, held, 0.0,
+                                     float(placed.get("executed_qty") or 0), sold, confirmed)
+                if why:
+                    placed["writeoff"] = why
+                return placed
             result = order.place_spot_market_order(
                 env, sym, "sell", base_qty=qty, client_order_id=cid)
     else:
-        mark = order.get_mark_price(env, sym)
-        qty = abs(signed_diff) / mark
-        if reduce_only:
+        row = _book_row(symbol, signed_diff) if reduce_only else None
+        # a close sized from the book needs no price (it sells the book's own
+        # quantity) — without a mark it must still go out, not fail every round
+        qty = 0.0 if row is not None and not row["legacy"] \
+            else abs(signed_diff) / order.get_mark_price(env, sym)
+        if row is not None:
+            direction = "long" if signed_diff < 0 else "short"
+            confirmed = short_read = False
+            if row["legacy"]:
+                held = lot = None
+                if row["full"]:
+                    seen = _held_base(env, vid, sym, direction)
+                    if seen is not None and _account_short(symbol, seen == 0):
+                        return {"executed_qty": 0.0, "exchange": vid,
+                                "writeoff": "account holds none of it"}
+                qty = _reduce_qty(env, vid, order, sym, direction, qty)
+            else:
+                netted = _netted_exit(env, vid, order, sym, direction, signed_diff, row, sold,
+                                      key=symbol)
+                if netted is not None:
+                    return netted
+                qty, held, lot, confirmed = _book_reduce_qty(
+                    env, vid, order, sym, direction, signed_diff, row, sold, key=symbol)
+                # an empty read not yet confirmed comes back as held=None
+                short_read = held is None
+                if qty <= 0:
+                    why = _book_writeoff(row, qty, held, lot, 0.0, sold, confirmed)
+                    return ({"executed_qty": 0.0, "exchange": vid, "writeoff": why}
+                            if why else False)
+        elif reduce_only:
             direction = "long" if signed_diff < 0 else "short"
             qty = _reduce_qty(env, vid, order, sym, direction, qty)
         else:
             direction = "long" if signed_diff > 0 else "short"
             qty = _entry_qty(order, env, sym, qty)
+            # how much of this entry will net into an opposite position already
+            # on a one-way account — recorded in the book (netted_qty), the only
+            # thing a later netted exit may undo (_netted_exit)
+            netted_room = _netted_room(env, vid, order, sym, direction) if _own_only() else 0.0
         try:
             result = order.place_market_order(env, sym, direction, qty,
                                               client_order_id=cid,
@@ -541,10 +1115,33 @@ def auto_place_order(symbol, signed_diff, asset_spec=None, reduce_only=False,
             # type also carries real faults (missing keys, underivable
             # symbol) that must surface, not become a silent "skip".
             if "below" in str(e) or "floors to" in str(e):
-                return False
-            raise
+                result = False
+            else:
+                raise
+        if row is not None and not row["legacy"]:
+            if result is False:
+                # the venue will not take it, and on a full close never will —
+                # said only with the account in view: without a believed read
+                # (failed, or empty and unconfirmed) "nothing to reduce" and
+                # "too small" look the same from here
+                return ({"executed_qty": 0.0, "exchange": vid,
+                         "writeoff": "below the venue minimum"}
+                        if row["full"] and held is not None else False)
+            placed = dict(result)
+            placed["exchange"] = vid
+            placed["unit_cost"] = row["unit_cost"]
+            executed = float(placed.get("executed_qty") or 0)
+            if short_read and executed > 0:
+                # the venue filled what the read said was not there
+                _account_short(symbol, False)
+            why = _book_writeoff(row, qty, held, lot, executed, sold, confirmed)
+            if why:
+                placed["writeoff"] = why
+            return placed
     if result is False:
         return False
     placed = dict(result)
     placed["exchange"] = vid
+    if market != "spot" and not reduce_only and netted_room:
+        placed["netted_qty"] = float(f"{min(netted_room, float(placed.get('executed_qty') or 0)):.12g}")
     return placed

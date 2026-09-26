@@ -46,6 +46,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 import events
 
@@ -136,7 +137,7 @@ def scheduled_strategies():
         # deployment.md's task-name convention: blaveclaw-strategy-<name>
         try:
             out = subprocess.run(
-                ["schtasks", "/query", "/fo", "csv", "/nh"],
+                ["schtasks", "/query", "/fo", "csv", "/nh"], stdin=subprocess.DEVNULL,
                 # errors="replace" like every schtasks/crontab call in
                 # command_listener.py: text=True decodes with the locale
                 # encoding and STRICT errors, and a UnicodeDecodeError is
@@ -159,7 +160,7 @@ def scheduled_strategies():
     try:
         out = subprocess.run(
             ["crontab", "-l"],  # errors="replace": see the schtasks call above
-            capture_output=True, text=True, errors="replace", timeout=10,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace", timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -190,8 +191,40 @@ def _strategy_market(name):
         return "swap"
 
 
+# a portfolio (Type C) state's weights, as forwarded: the report is cached by the
+# api and has hit 413 before — never an unbounded map
+PORTFOLIO_WEIGHTS_MAX = 100
+_WEIGHT_SYM_RE = re.compile(r"^[A-Z0-9]{1,30}$")
+
+
+def _portfolio_weights(raw):
+    """{SYMBOL: finite float} from a Type C state's `weights` (lib/runner.
+    typec_live_state), or None when there are none. Keys canonical (dashless
+    upper), non-finite / non-numeric values and malformed keys dropped; zero
+    weights dropped (they target nothing); at most PORTFOLIO_WEIGHTS_MAX
+    symbols, the largest |weight| first so a truncated map keeps what trades
+    most. The machine's own targets always use the full file — this is display."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for k, v in raw.items():
+        sym = str(k).replace("-", "").upper()
+        if not _WEIGHT_SYM_RE.match(sym) or isinstance(v, bool):
+            continue
+        try:
+            w = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(w) or w == 0:
+            continue
+        out[sym] = round(w, 8)
+    top = sorted(out.items(), key=lambda kv: -abs(kv[1]))[:PORTFOLIO_WEIGHTS_MAX]
+    return dict(top)
+
+
 def strategy_states():
-    """{name: {symbol, position, market, updated_at}} from strategies/*/state.json."""
+    """{name: {symbol, position, market, updated_at}} from strategies/*/state.json;
+    a portfolio (Type C) state also carries `type`, `weights` and `rebalance_at`."""
     root = os.path.join(WORKSPACE, "strategies")
     states = {}
     try:
@@ -209,6 +242,15 @@ def strategy_states():
             "market": _strategy_market(name),
             "updated_at": _mtime(path),
         }
+        weights = _portfolio_weights(data.get("weights"))
+        if weights is not None:
+            states[name]["type"] = "portfolio"
+            states[name]["weights"] = weights
+            try:
+                ra = int(data.get("rebalance_at"))
+                states[name]["rebalance_at"] = ra if ra > 0 else None
+            except (TypeError, ValueError):
+                states[name]["rebalance_at"] = None
     return states
 
 
@@ -282,7 +324,9 @@ def venues():
     suffixes = {}
     for line in lines:
         m = _ENV_CRED_RE.match(line)
-        if m and m.group(1).upper() not in _RESERVED_PREFIXES:
+        # DATA_<SOURCE>_* = data-source keys (command_listener._DATA_CRED_PREFIX)
+        if (m and m.group(1).upper() not in _RESERVED_PREFIXES
+                and not m.group(1).upper().startswith("DATA_")):
             suffixes.setdefault(m.group(1).lower(), set()).add(m.group(2).upper())
     out = {}
     for venue_id, sfx in suffixes.items():
@@ -297,8 +341,270 @@ def venues():
     return out
 
 
+def _capital_order_identity_ok():
+    """Verbatim mirror of manager/flatten.py's check — keep in step. The
+    flatten 全部平倉 launches inherits THIS process's identity (the bridge;
+    LocalSystem on Windows), so this is the question the button asks. Not
+    imported from the workspace: runtime and workspace ship on different
+    channels, and importing flatten.py would chdir the bridge. Same known
+    false positive (schtasks without /rp → BATCH, still 602). The two bodies
+    are pinned equal by tests/check_capital_flatten_identity.py."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        adv = ctypes.windll.advapi32
+        buf = ctypes.create_unicode_buffer(257)
+        n = wintypes.DWORD(257)
+        if not adv.GetUserNameW(buf, ctypes.byref(n)) or buf.value.lower() != "administrator":
+            return False
+        for sddl in ("S-1-5-4", "S-1-5-3", "S-1-5-6"):  # INTERACTIVE, BATCH, SERVICE
+            sid = ctypes.c_void_p()
+            if not adv.ConvertStringSidToSidW(sddl, ctypes.byref(sid)):
+                return False
+            member = wintypes.BOOL()
+            try:
+                ok = adv.CheckTokenMembership(None, sid, ctypes.byref(member))
+            finally:
+                ctypes.windll.kernel32.LocalFree(sid)
+            if ok and member.value:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def can_flatten(vens):
+    """flatten.py present, and not a machine whose only closable venue is 群益
+    under an identity that can't send 群益 orders — there the button would halt
+    and close nothing, so the page offers 暫停 only. Mixed venues stay True:
+    the crypto leg closes and flatten records the 群益 leg as not closed.
+    Closable = flatten.py's own rule (key in .env + account AND order lib)."""
+    if not os.path.isfile(os.path.join(WORKSPACE, "manager", "flatten.py")):
+        return False
+    closable = {vid for vid, v in (vens or {}).items() if v.get("account") and v.get("order")}
+    return not (closable == {"capital"} and not _capital_order_identity_ok())
+
+
 def _fresh(ts, window=HEARTBEAT_STALE_S):
     return bool(ts and (time.time() - ts) < window)
+
+
+def _gated_marker_fresh(hb):
+    """The running reconciler proved it honours the restart record: its
+    state/heartbeat/reconciler.gated (touched with the heartbeat each round, by
+    the gated version only) is as fresh as the heartbeat. Same test as
+    command_listener._reconciler_gated for a running reconciler."""
+    marker = _mtime(os.path.join(WORKSPACE_STATE, "heartbeat", "reconciler.gated"))
+    return bool(hb and marker and marker >= hb - 10)
+
+
+# Type A/C = strategy.py declares a valid INTERVAL and the workspace has
+# wait_for_bar.py: the same test command_listener._strategy_has_interval uses to
+# hand a strategy to the in-process scheduler. Value format and bar alignment
+# are wait_for_bar.py's (_INTERVAL_RE / _expected_closed_bar_open).
+_AC_INTERVAL_RE = re.compile(r'^\s*INTERVAL\s*=\s*["\']([^"\']+)["\']', re.M)
+_AC_INTERVAL_VALUE_RE = re.compile(r"^(\d+)(min|m|h|d|w)$")
+_AC_UNIT = {"min": "minutes", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
+
+
+def _ac_interval(name):
+    try:
+        with open(os.path.join(WORKSPACE, "strategies", name, "strategy.py"),
+                  encoding="utf-8", errors="replace") as f:
+            m = _AC_INTERVAL_RE.search(f.read())
+    except OSError:
+        return None
+    v = _AC_INTERVAL_VALUE_RE.match(m.group(1)) if m else None
+    if not v:
+        return None
+    try:
+        td = timedelta(**{_AC_UNIT[v.group(2)]: int(v.group(1))})
+    except OverflowError:
+        return None
+    return td if td > timedelta(0) else None  # "0m" would divide by zero below
+
+
+def _naive_utc(iso):
+    try:
+        t = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    return t.astimezone(timezone.utc).replace(tzinfo=None) if t.tzinfo else t
+
+
+def _recomputed_since(down_to, cfg, vens):
+    """Every funded Type A/C strategy's signal is current as of the boot: its
+    last processed bar is at least the bar that had just closed when the
+    machine came back (down_to) — i.e. it has run on everything that existed
+    then, before or after the reboot. The literal "processed bar ≥ boot time"
+    would wait up to two whole bars (a 1d strategy: two days), because a bar's
+    label is its OPEN time and the newest closed bar always opened before now.
+    Also current: a post-boot check (bar_wait file written after down_to) that
+    found no newer data than it already processed (market closed, data stalled)
+    — unless that check FAILED after the boot (fetch/run failure or wrapper
+    error: wait_for_bar saves the file without touching last_seen_bar, so a
+    failure would otherwise read as "nothing newer").
+    No bound venue → True: the scheduler does not run then (the flag would stay
+    false for ever) and nothing can trade either; the reconciler idles."""
+    if not any(isinstance(v, dict) and v.get("pair") for v in (vens or {}).values()):
+        return True
+    if not os.path.isfile(os.path.join(WORKSPACE, "manager", "wait_for_bar.py")):
+        return True  # no Type A/C scheduling in this workspace at all
+    amounts = (cfg or {}).get("amounts") or {}
+    exchanges = (cfg or {}).get("exchanges") or {}
+    if not isinstance(amounts, dict) or not isinstance(exchanges, dict):
+        return False
+    boot = datetime(1970, 1, 1) + timedelta(seconds=float(down_to))
+    epoch = datetime(1970, 1, 1)
+    for name, amt in amounts.items():
+        try:
+            funded = bool(exchanges.get(name)) and float(amt) != 0
+        except (TypeError, ValueError):
+            funded = False
+        td = _ac_interval(name) if funded else None
+        if td is None:
+            continue  # unfunded or Type B — the reconciler does not trade its signal
+        need = epoch + ((boot - epoch) // td) * td - td
+        path = os.path.join(WORKSPACE_STATE, "bar_wait", f"{name}.json")
+        st = _read_json(path, {}) or {}
+        processed = _naive_utc(st.get("last_processed_bar"))
+        if processed is not None and processed >= need:
+            continue
+        seen = _naive_utc(st.get("last_seen_bar"))
+        checked_after_boot = (_mtime(path) or 0) > down_to
+        failed_after_boot = any(isinstance(st.get(k), (int, float)) and st[k] > down_to
+                                for k in ("last_attempt_failed_at", "wrapper_error_alerted_at"))
+        if (checked_after_boot and not failed_after_boot and processed is not None
+                and seen is not None and seen <= processed):
+            continue
+        return False
+    return True
+
+
+def _ws_lib_read_only_guard():
+    """The workspace lib/portfolio.py on disk carries the never-configured
+    read-only guard. Only good for a reconciler that is NOT running — the next
+    start loads this file."""
+    try:
+        with open(os.path.join(WORKSPACE, "lib", "portfolio.py"),
+                  encoding="utf-8", errors="replace") as f:
+            return "def portfolio_configured(" in f.read()
+    except OSError:
+        return False
+
+
+def portfolio_configured(cfg_path, hb, last):
+    """True = amounts were saved. False = never saved AND the code that will
+    run next is the read-only one, so releasing a pause closes nothing.
+    None = can't tell → the report leaves the key out, and the pages fall back
+    to their old, harsher warning (web workspace.html: no key = old runtime).
+
+    The field and the guard ship on DIFFERENT channels — this reporter with the
+    runtime (automatic), lib/portfolio.py with the workspace (manual) — so
+    reporting `false` off this runtime's own behaviour would tell the user
+    "nothing will be closed" on every machine whose workspace is still behind
+    (audit 2026-09-23 B2). Evidence per case:
+      - reconciler running: only its own word counts — `read_only` in the
+        snapshot it wrote (lib/portfolio._write_reconcile_snapshot). A machine
+        whose update replaced the files but failed to restart (cloud-handoff U8
+        `restart_failed`) still has the OLD reconcile() in memory, and that one
+        flattens; a disk check would have called it read-only.
+      - reconciler stopped: the file on disk is what its next start loads."""
+    if os.path.exists(cfg_path) or os.path.exists(
+            os.path.join(WORKSPACE, "manager", "amounts.ui.json")):
+        return True
+    if _fresh(hb):
+        return False if isinstance(last, dict) and last.get("read_only") is True else None
+    return False if _ws_lib_read_only_guard() else None
+
+
+def can_trade_portfolio():
+    """The workspace lib trades Type C portfolios live: its runner writes the
+    per-asset weights (lib/runner.typec_live_state) and its aggregation reads
+    them. Both files ship on the manual channel, so the runtime asks the disk —
+    a runtime that allowed funding a portfolio beside an older lib would show
+    it as trading while nothing ever does."""
+    try:
+        with open(os.path.join(WORKSPACE, "lib", "runner.py"), encoding="utf-8",
+                  errors="replace") as f:
+            runner = "def typec_live_state(" in f.read()
+        with open(os.path.join(WORKSPACE, "lib", "portfolio.py"), encoding="utf-8",
+                  errors="replace") as f:
+            agg = "Type C (lib/runner.typec_live_state)" in f.read()
+        return runner and agg
+    except OSError:
+        return False
+
+
+def _ws_lib_own_only():
+    """The workspace lib/portfolio.py on disk has the own-positions-only rule
+    (every config without "self_ledger": false diffs against the book)."""
+    try:
+        with open(os.path.join(WORKSPACE, "lib", "portfolio.py"),
+                  encoding="utf-8", errors="replace") as f:
+            return "def own_positions_only(" in f.read()
+    except OSError:
+        return False
+
+
+def own_positions_only(cfg, hb, last):
+    """Does the code that trades on this machine leave every position it did
+    not open alone? The flag says so when it is written; a missing key is the
+    lib's call, and the lib ships on the manual channel — so, as with
+    portfolio_configured: a running reconciler's own word (`own_only` in its
+    snapshot), else the lib on disk its next start loads. Reporting true off
+    this runtime alone would tell a user on an old lib that their manual
+    positions are safe while it closes them."""
+    flag = (cfg or {}).get("self_ledger")
+    if flag is not None:
+        return bool(flag)
+    if _fresh(hb):
+        return isinstance(last, dict) and last.get("own_only") is True
+    return _ws_lib_own_only()
+
+
+def restart_stop(hb=None, cfg=None, vens=None):
+    """Why trading is off after a machine restart, while
+    state/reconciler_stopped.json exists (command_listener._machine_restart_check
+    writes it, 啟動下單 removes it), else None:
+      {"reason": "machine_restart", "at": last heartbeat before the reboot,
+       "gated": bool, "recomputed": bool}
+    `recomputed` (see _recomputed_since): every funded Type A/C strategy has
+    computed on the bars that existed when the machine came back, so 補齊部位
+    would trade current signals; false = at least one still holds a pre-restart
+    signal (the pages grey 補齊部位 out; 等新訊號 stays available).
+    `alive` stays false the whole time (every consumer reads stopped ⇒ not
+    trading). `gated: false` is the one exception to "nothing goes out": a
+    reconciler has beaten since the stop (the kill did not land, or something
+    restarted it) and has NOT proved it honours the record (no fresh
+    state/heartbeat/reconciler.gated — an old process, even with a new
+    reconciler.py on disk) — it may be trading. Nothing running since the stop
+    is gated: nothing can send."""
+    path = os.path.join(WORKSPACE_STATE, "reconciler_stopped.json")
+    if not os.path.exists(path):
+        return None
+    info = _read_json(path, {})
+    info = info if isinstance(info, dict) else {}
+    since = info.get("stopped_at", info.get("down_to"))
+    beating = bool(hb and isinstance(since, (int, float)) and int(hb) > since and _fresh(hb))
+    at = info.get("at")
+    down_to = info.get("down_to")
+    if not isinstance(down_to, (int, float)):
+        # an old or hand-made record: the file is written at detection time,
+        # right after the boot — its mtime is the next-best "machine came back"
+        down_to = _mtime(path)
+    try:  # this flag must never cost the report itself
+        recomputed = (_recomputed_since(down_to, cfg, vens)
+                      if isinstance(down_to, (int, float)) else False)
+    except Exception as e:
+        print(f"[portfolio_reporter] recomputed check failed: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        recomputed = False
+    return {"reason": "machine_restart", "at": at if isinstance(at, int) else None,
+            "gated": not (beating and not _gated_marker_fresh(hb)),
+            "recomputed": recomputed}
 
 
 def halt_state():
@@ -308,12 +614,23 @@ def halt_state():
     if not os.path.exists(path):
         return {"halted": False}
     info = _read_json(path, {}) or {}
+    guard_state = _read_json(os.path.join(WORKSPACE_STATE, "venue_account.json"), {})
+    guard_state = guard_state if isinstance(guard_state, dict) else {}
+    hold, mark = guard_state.get("book_hold"), guard_state.get("bind_reset")
     return {
         "halted": True,
         "at": info.get("ts"),
         "reason": info.get("reason"),
         "source": info.get("source"),
         "blocked": _halt_denials(info.get("ts")),
+        # true = the reconciler skips every round: no Blave order of any kind,
+        # closes and exits included (an account-guard trip awaiting confirmation,
+        # or a book hold awaiting book_account_confirm). false = a plain HALT:
+        # entries refused, closes / exits still go out. Orders resting on the
+        # exchange (SL/TP) fire either way — they are the exchange's.
+        "holds_all": bool(guard_state.get("pending"))
+        or bool(isinstance(mark, dict) and mark.get("venue") and not mark.get("acked"))
+        or bool(isinstance(hold, dict) and hold.get("venue")),
     }
 
 
@@ -342,7 +659,19 @@ def account_guard():
         "last_read_error": str(error)[:120] if error else None,
         "last_read_at": read.get("at"),
         "pending": bool(stored.get("pending")),
+        # a key change the machine could not match to the account Blave's
+        # positions there are on: nothing trades on that venue until the user
+        # answers `book_account_confirm {venue, same}` (or the id reads). Only
+        # a question worth asking — a network hiccup holds silently.
+        "book_hold": _book_hold(stored.get("book_hold")),
     }
+
+
+def _book_hold(hold):
+    if not isinstance(hold, dict) or not hold.get("ask") or not hold.get("venue"):
+        return None
+    return {"venue": str(hold["venue"]), "reason": str(hold.get("reason") or "")[:300],
+            "since": hold.get("since")}
 
 
 def _halt_denials(since_ts):
@@ -364,8 +693,12 @@ def _halt_denials(since_ts):
         except ValueError:
             continue
         # Event name comes from lib/order_*.py, which is what actually refuses
-        # the order — guard.py only writes halt_tripped / halt_cleared.
-        if row.get("event") != "order_denied_halt":
+        # the order — guard.py only writes halt_tripped / halt_cleared. With a
+        # machine-restart record the lib refuses first (order_denied_restart);
+        # its entries are ones the halt would have refused too, so they count.
+        ev = row.get("event")
+        if not (ev == "order_denied_halt"
+                or (ev == "order_denied_restart" and row.get("intent") == "entry")):
             continue
         # ISO-8601 UTC on both sides, so string comparison is chronological.
         if not since_ts or str(row.get("ts", "")) >= str(since_ts):
@@ -795,7 +1128,7 @@ def _run(cmd, timeout=10):
     呼叫的理由:cp950 的 Windows 上嚴格解碼會丟 UnicodeDecodeError,那不是 OSError
     也不是 SubprocessError,會從 except 逃出去把整份回報帶走。"""
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True,
+        out = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                              errors="replace", timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -919,12 +1252,21 @@ def build_report():
     # an old generation with the cleared chats (refused / harmless), never an old chat
     # with the new generation (which the api would accept and write back)
     pair_gen = tg_pair_gen()
-    cfg = _read_json(os.path.join(WORKSPACE, "manager", "portfolio_config.json"), {})
+    # {} = never configured (new machine); None = file there but unreadable. A client
+    # that saves the whole amounts map from this report must refuse on None, or it
+    # overwrites every key it could not see.
+    cfg_path = os.path.join(WORKSPACE, "manager", "portfolio_config.json")
+    cfg = _read_json(cfg_path) if os.path.exists(cfg_path) else {}
+    if not isinstance(cfg, dict):
+        cfg = None
     hb = _mtime(os.path.join(WORKSPACE_STATE, "heartbeat", "reconciler"))
     last = _read_json(os.path.join(WORKSPACE, "manager", "last_reconcile.json"))
     sched = scheduled_strategies()
+    vens = venues()
+    stopped = restart_stop(hb, cfg if isinstance(cfg, dict) else {}, vens)
+    configured = portfolio_configured(cfg_path, hb, last)
 
-    return {
+    report = {
         "config": cfg,
         "states": strategy_states(),
         # None = couldn't tell (no crontab access), [] = genuinely nothing scheduled
@@ -942,7 +1284,10 @@ def build_report():
         "orders": recent_orders(),
         "reconciler": {
             "heartbeat_at": hb,
-            "alive": _fresh(hb),
+            # alive = trading: a reconciler gated by the restart record keeps a
+            # fresh heartbeat but sends nothing
+            "alive": _fresh(hb) and stopped is None,
+            "stopped": stopped,
         },
         # Whether the stop button will work at all. A listener that died leaves
         # a button that looks fine and does nothing — the page disables it
@@ -961,21 +1306,23 @@ def build_report():
         # id not present in the dict = no key stored for it. Front end reads
         # this as venues[id] (web/.../workspace.html cxSupport()) — id present
         # with order/account both false = key saved, modules not built yet.
-        "venues": venues(),
+        "venues": vens,
         # capability signals: the web hides controls the machine can't honor —
         # without this the 「暫停並全部平倉」 button halts only and LOOKS
         # successful. can_flatten keys on the actual artifact (flatten.py in
         # the workspace), which is also exactly the listener's own check —
-        # true on any OS/generation whose workspace has the close-all layer.
+        # true on any OS/generation whose workspace has the close-all layer —
+        # except when 群益 is the only venue it could close and this identity
+        # can't log in to SKCOM (see can_flatten()).
         "platform": platform.system(),
-        "can_flatten": os.path.isfile(os.path.join(WORKSPACE, "manager", "flatten.py")),
-        # self_ledger: whether this machine diffs against the bot's own book
-        # (portfolio_config.json flag) — the web's stop dialog phrases what
-        # 「關閉 bot 部位」actually closes from this (bot's book only vs the
-        # whole account on a pre-feature machine).
-        "self_ledger": bool((_read_json(
-            os.path.join(WORKSPACE, "manager", "portfolio_config.json"), {}) or {}
-        ).get("self_ledger")),
+        "can_flatten": can_flatten(vens),
+        # self_ledger: whether this machine diffs against the bot's own book —
+        # the web's stop dialog phrases what 「關閉 bot 部位」actually closes
+        # from this (bot's book only vs the whole account), the desktop's
+        # start dialog whether manual positions can be touched.
+        "self_ledger": own_positions_only(cfg, hb, last),
+        # can_trade_portfolio: a Type C strategy may be funded (the pages unlock it)
+        "can_trade_portfolio": can_trade_portfolio(),
         # can_wait_start: whether the workspace's reconcile path understands
         # state/signal_gate.json (the 「啟動,等新訊號才進場」 option) — keyed
         # on the actual artifact like can_flatten, so the web never offers a
@@ -983,9 +1330,10 @@ def build_report():
         # ignoring the gate degrades resume_wait to a full catch-up resume).
         "can_wait_start": _workspace_has_signal_gate(),
         # downtime pause (lib/downtime.py): a stop that crossed a bar close
-        # froze every live strategy until the user decides per strategy. Both
-        # pages draw the same confirmation card from `downtime_pause`; without
-        # the capability the workspace never pauses and the card has no data.
+        # froze every live strategy; the exit is the whole-machine start
+        # (resume / resume_wait), which ends every pause. `downtime_pause` is
+        # the per-strategy detail of what is frozen; no page renders a
+        # per-strategy confirmation card any more.
         "can_downtime_pause": _workspace_has_downtime_pause(),
         "downtime_pause": downtime_pause_view(cfg, last),
         # 策略管理 subtab: member figures, allocators, the last proposal and
@@ -1002,10 +1350,50 @@ def build_report():
         "events": events.unsent(),
         "reported_at": int(time.time()),
     }
+    # False = amounts were never saved AND the reconcile that runs next is the
+    # read-only one (places nothing, closes included, until a save). None = the
+    # key is left out: see portfolio_configured() — an absent key is the pages'
+    # old-machine branch, which warns about closing.
+    if configured is not None:
+        report["portfolio_configured"] = configured
+    upd = workspace_update()
+    if upd is not None:
+        report["workspace_update"] = upd
+    return report
+
+
+WORKSPACE_UPDATE_TTL_S = 24 * 3600
+# `applying` is written before the run and overwritten only when the run ends;
+# a script killed in between (ssh timeout, turn end, reboot) never writes again
+# and the desktop would draw 更新中… for the whole day. A healthy run is at most
+# --wait-busy 600 plus the copy, so past this the run is dead.
+WORKSPACE_UPDATE_APPLYING_TTL_S = 20 * 60
+
+
+def workspace_update():
+    """manager/update_workspace.py's state/workspace_update.json verbatim
+    ({state: applying|done|failed, outcome, from, to, restarted, reason,
+    replaced_changed, backup_dir, ...}) while it is under a day old — the
+    desktop draws 更新中… from `applying` and the one line after from `done`.
+    Older, or unreadable: absent — a stale line must not come back every
+    report for ever. An `applying` older than WORKSPACE_UPDATE_APPLYING_TTL_S
+    is reported as the failure it is, in status_doc's shape."""
+    path = os.path.join(WORKSPACE_STATE, "workspace_update.json")
+    mt = _mtime(path)
+    if not mt or time.time() - mt >= WORKSPACE_UPDATE_TTL_S:
+        return None
+    doc = _read_json(path)
+    if not (isinstance(doc, dict) and doc.get("state")):
+        return None
+    if doc["state"] == "applying" and time.time() - mt >= WORKSPACE_UPDATE_APPLYING_TTL_S:
+        doc = dict(doc, state="failed", outcome="error", restarted=False,
+                   reason="applying timed out", replaced_changed=[], backup_dir=None,
+                   restart_stopped=False, version_written=False)
+    return doc
 
 
 def downtime_pause_view(cfg, last):
-    """state/downtime_pause.json joined with what the card needs per strategy:
+    """state/downtime_pause.json joined per strategy with:
     what the strategy wants now, what the account holds, and where the current
     direction began. None when nothing is paused. Read as JSON only — the
     workspace's own code is never imported here."""

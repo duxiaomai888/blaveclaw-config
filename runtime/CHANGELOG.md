@@ -8,6 +8,542 @@ miss it. (Channel rules: `.claude/docs/blave-agent-update-channels.md`.)
 
 ## Unreleased
 
+## 1.1.97 — 2026-09-26
+
+- **電腦版排程報告帶 `BLAVE_AGENT_LOCAL=1`、`BLAVE_SCHEDULED_RUN=1` 與電腦版策略同一份放行名單(含 `BLAVE_KLINE_SOURCE`,
+  排程的加密報告跟聊天一樣走 Binance K 線)**(`report_runner._subprocess_env`;策略子程序不變):
+  沒有 Blave 資料權限時,排程的台股大盤晨報／收盤報告改走 TWSE／TAIFEX 免費資料,不再 401 整份 failed。權限狀態由
+  `lib/data.py` 讀外殼維護的 `.env` key(空 = 無權限;經 `_retry_get` 的端點回 401／403 ERR007／ERR005 同義——
+  台指期 K 線、`fetch_db_kline`、內外盤三處直接 `requests.get` 的只認空 key),只在有排程旗標時這樣讀——
+  聊天回合(含自帶 key、外殼不設 `BLAVE_DATA_ACCESS` 的那種)照舊收到原始 403／401。
+
+## 1.1.96 — 2026-09-25
+
+- **有提領權限的金鑰一律拒收(Wei 2026-09-25 拍板,推翻 09-22「不擋」)**:`_binance_bind_check` 在四個 boolean 之後、交易那格之前
+  看 `enableWithdrawals`,開著就 `WITHDRAW_ENABLED:` 拒絕(每個模式:電腦版、雲端、web 連接交易所都經這條);
+  OKX / BingX / Bybit 也每個模式都查(`_withdraw_gate`:電腦版在 `_local_real_key_gate` 讀完帳戶之後、雲端主機／web 綁定
+  在 `_cmd_credentials` 寫入前只打這一支)——`lib/account_<id>.withdraw_enabled`(OKX `/account/config` perm、
+  Bybit `/user/query-api` permissions.Wallet、BingX `/account/apiPermissions` 的 `permissions` 整數代碼:三把真機實測 [2]、[2,5]、[1,2,3,5] → 1、3 = 現貨／合約交易、2 = 讀取、5 = 提領,未映射代碼一律拒;`apiRestrictions` 的 enableFutures／enableSpotAndMarginTrading 開了交易也回 False,不能拿它判交易),True → `WITHDRAW_ENABLED`、
+  讀不到 / 不是 bool → `UNKNOWN`,fail-closed;`_WITHDRAW_CHECKED` 列的那家 lib 缺這支函式照「no permission check」拒絕。
+  Gate.io 沒有可查的欄位,不在表上、外殼連結框改提示用戶自己確認。只在綁定當下擋:電腦版 24 小時重查不看提領、不通知。
+  測試 `tests/check_credentials_withdraw_gate.py`、`tests/check_local_real_key_gate.py`。
+- **已知窗口(刻意不放行)**:雲端主機 runtime 發版後 ~5 分鐘全機隊吃到,workspace 只在用戶說「更新」才換——
+  workspace 還是這一批之前的版本(lib 沒 `withdraw_enabled`)時,綁 OKX / BingX / Bybit(web 連接、聊天貼 key 都算)
+  一律 `no permission check … run 更新 blave agent first` 拒絕、不寫入,更新 workspace 後即可;已綁的金鑰不受影響。
+  電腦版沒有這個窗口(runtime 與 lib 同一包出貨)。出貨順序:先 push repo(VERSION 亮提示)再 publish runtime。
+  矩陣 `tests/check_version_matrix.py` V1-11 / V1-05 把這條拒絕釘成預期。
+
+## 1.1.95 — 2026-09-25
+
+- **daemon 開的子程序一律 `stdin=DEVNULL`,Windows 再加 `CREATE_NO_WINDOW`**(`command_listener._child_kw`,
+  50 個 `subprocess.run/Popen` 呼叫點全部經它;`local_daemon` 的對帳器 spawn 保留 `stdin=PIPE`(EOF 是它的 parent watch)
+  只加 flag、帳戶讀取器與 `_pid_cwd` 同樣不繼承;`portfolio_reporter._run` / schtasks / crontab 三處也補上)。
+  0.1.3 Windows 真機(Lightsail Server 2022):`_tick_one` 每分鐘開的 `wait_for_bar.py` 卡在直譯器啟動(3–8MB、單執行緒、
+  只載 15 個 DLL),一小時累積 36 支,30 分鐘 timeout 的 `kill()` 只殺到 venv 啟動器、真 python 變孤兒;同一支腳本用 SSH /
+  排程工作開都 0.2 秒退。差別只有一個:daemon 的 stdin 是 Electron 給的 overlapped pipe(`--secret-stdin`,parent-watch
+  執行緒還 `read(0)` 掛在上面),子程序繼承了它。改 `stdin=DEVNULL` 後真機 0.2 秒退、`state/bar_wait/<name>.json` 正常更新。
+  子程序本來就不該拿到 secret 通道,雲端 Linux 機一樣適用。測試 `tests/check_child_stdin.py`(AST 列舉三個檔的每個 spawn 點、
+  nt 模式的 flag、`_tick_one` 真的帶 DEVNULL)。
+
+- **`local_daemon.py` 能在 Windows 跑(電腦版 Windows x64 MVP,未經真機驗證)**:「app 沒了=停單+撤掛單」的三重保證各有 Windows
+  對應——parent watch 改成阻塞 `read(0)` 執行緒 + `WaitForSingleObject(ppid)` 兩道(`select` 對 pipe 無效、父死不會 re-parent);
+  鎖走 `fcntl`/`msvcrt` 雙軌,對帳器在 Windows 自己拿鎖、daemon 只確認(`pass_fds` 不可用);撤單 sweep 掛在 EOF/parent-gone 路徑
+  (TerminateProcess 沒有 handler),daemon 停對帳器先關它 stdin、逾時才 kill;`<base>/current` 用 junction;L786「needs a POSIX
+  system」改成「缺 fcntl 且缺 msvcrt」才拒。POSIX 路徑一字不變(`_nt()` 分支)。外殼 `shell/daemon.js` win32 收工只送 EOF、
+  9 秒逾時才 kill()(darwin 不變)。測試 `tests/check_local_daemon_windows.py`、`tests/check_shell_daemon_win32.js`。
+  同批:`command_listener._local_child_env` 在 Windows 從 allowlist 改 denylist(只拔 `BLAVE_*` / `ANTHROPIC_*` / `OPENAI_*`,
+  SystemRoot 等系統變數才進得來);外殼對 Windows 子行程帶 `PYTHONUTF8=1`(整棵 Python 樹繼承,不然 stdout 遇 emoji 就
+  UnicodeEncodeError)並對每個 spawn 帶 `windowsHide`(不彈黑色主控台);`command_listener._env_lock` 在 Windows 走 msvcrt
+  鎖 `.env.lock` byte 0,與 `shell/datasrc.js` 那把互斥(之前直接不上鎖)。測試 `tests/check_local_env_windows.py`、
+  `tests/check_shell_win_env.js`。
+
+## 1.1.94 — 2026-09-25
+
+- **電腦版雲端視角:純資料查詢一律本機查**(`agent_turn.py` `_viewing_env_segment`):行情、指標、Blave 資料、
+  公開 K 線、跟主機無關的研究問題在這台電腦用本機 `lib/` 查,不交接到雲端跑(之前一律 SSH 交接,16 步/80 秒);
+  只有那台主機自己的東西(部位、單、log、策略檔、回測結果、狀態)才去雲端讀。按「問的是什麼」分,不做失敗再繞的 fallback。
+
+## 1.1.93 — 2026-09-24
+
+- **電腦版沒資料權限那一輪,規則講真正的原因**(`agent_turn.py` `data_access_rule()` 讀外殼帶的 `BLAVE_DATA_ACCESS_WHY`:
+  `signed_out` / `no_card` / `no_balance` / `unknown`,Facts 多一句事實 + 「不是 signed_out 就不准叫用戶去登入」;
+  外殼 `shell/main.js` `dataAccessWhy()` 從 signedIn + account_status 的 `reason` 對出來、只在 `BLAVE_DATA_ACCESS=0` 時帶)。
+  09-24 真機:用戶登入著、只是餘額不夠,agent 回「需要登入 Blave 帳號才能存取」。舊外殼不帶 → 原文不變。
+  測試 `tests/check_data_access_lang.py` §④、`tests/check_shell_data_env.js` WHY 那組。
+
+## 1.1.92 — 2026-09-24
+
+- **電腦版沒資料權限那一輪,`lib/data.py` 第一次呼叫就停**(`agent_turn.py` `data_access_rule()` 補一句「同一段對話裡權限會變、
+  失敗即最終」;workspace 端 `lib/data.py` 在 `BLAVE_DATA_ACCESS=0` 時所有打 Blave 的路直接 raise,走 blave-agent VERSION)。
+  09-24 真機:餘額不夠被擋那輪 agent 不信規則、翻 .env 與環境變數 10 步才放棄,用戶等 80 秒。測試 `tests/check_data_access_gate.py`。
+- **`workspace_update` 的 `applying` 有 20 分鐘時效**(`portfolio_reporter.py` `WORKSPACE_UPDATE_APPLYING_TTL_S`):更新腳本中途被砍
+  (ssh 逾時、回合結束、機器重開)時狀態檔停在 `applying`,電腦版會顯示「更新中…」24 小時、檢查更新按不了;超過 20 分鐘轉成
+  `failed / error / "applying timed out"`。測試 `tests/check_workspace_update_status.py` §6。
+- **報告多帶 `workspace_update`**(`portfolio_reporter.py` `workspace_update()`):`manager/update_workspace.py apply` 寫的
+  `state/workspace_update.json` 原樣轉發(`state: applying|done|failed`、`outcome`、`from`/`to`、`restarted`、`reason`、
+  `replaced_changed`、`backup_dir`、`version_written`、`ts`),檔案不在或超過 24 小時就不帶——電腦版用 `applying` 畫「更新中…」、
+  用 `done` 出事後那一行(設計 v4 §3)。workspace 端同批:更新不再問人(改過的官方檔一律換、先備份)、只在安全時刻重啟下單程式
+  (`trading_busy()`:無在途執行、對帳器不在一輪之中;`--wait-busy` 輪詢),走 blave-agent VERSION。
+  測試 `tests/check_workspace_update_status.py`。
+
+## 1.1.91 — 2026-09-24
+
+- **關閉部位後頁面立刻看到部位歸零,不再等 5 分鐘心跳**(`command_listener.py` `_kick_when_flatten_exits`、`_kick_reconciler`;
+  workspace 端 `manager/flatten.py` `_kick_reconciler`,走 blave-agent VERSION)。頁面的「實際」欄讀的是對帳器寫的
+  `manager/last_reconcile.json`,而平倉是另一支程序、賣完就退,對帳器要等下一次心跳才重讀(29026,09-24:03:51:41 賣掉、
+  03:56:42 才不顯示 +1,000)。現在 flatten 收工時碰 `state/execution/kick`(對帳器監看的 mtime,一個 poll 內就跑一輪);
+  runtime 這邊等 flatten 程序退出後也碰一次,還沒按「更新」、flatten.py 是舊版的 workspace 一樣生效(Windows 走 powershell
+  起程序、等不到,只靠 workspace 端);兩次快按時輸的那支(退出碼 3)不碰,由持鎖那支收工碰。HALT 下那一輪只重讀、只寫快照,
+  不下任何單(本來就是:快照在下單前寫、進場腿被 HALT 擋)。flatten 留有未確認平倉的列(群益)時 workspace 端不碰、等心跳:
+  群益部位快照最舊 300 秒,馬上跑一輪會對還顯示「有倉」的同一口再送一腿 reduce(sNewClose=2 變反向開倉)。
+  解除綁定不用補:解綁本來就會重寫 `state/HALT`(mtime 變了就觸發一輪),全解綁更是直接停放並清掉快照。
+  測試 `tests/check_flatten_singleflight.py` §4/§5、`tests/check_reconciler_autohalt.py` §3.15。
+
+## 1.1.90 — 2026-09-24
+
+- **模擬帳戶弄丟設定與帳本起點後的第一次儲存不再重買一次**(`command_listener.py` `_traded_on_a_real_venue`;版本矩陣 V1-10 / V0-02)。
+  現在綁的就是 paper 時,paper 成交也算「交易過」:第一次儲存不寫零帳本,機器人已持有的模擬部位不會被當成用戶的再買一份。
+  綁的是真實交易所時照舊不算 paper 成交(Wei 09-23 的規則不變)。測試 `tests/check_first_save_paper_history.py`。
+- **`manager/` 底下的機器狀態檔不進版控、也永遠不算官方檔**(`.gitignore` 的 `manager/*.json|jsonl|tmp`;
+  `manager/update_workspace.py` 的 `NEVER` 補齊 runtime／lib 會寫的那些檔、加上狀態檔樣式與 `manager/executors/`;版本矩陣 V6-03)。
+  以前只擋 `portfolio_config.json` 與 `amounts.ui.json`,誤提交一個 `order_errors.json` 就會被複製到每台機器、或卡住 VERSION。
+  測試 `tests/check_manager_state_never_official.py`(列舉每個寫檔點)。
+- **解綁 → 重綁 → 啟動下單兩個卡點**(`command_listener.py`;模擬情境矩陣 TC-28、TC-13)。① 解綁確認停掉對帳器時寫
+  `state/reconciler_stop_mark`,之後不比它新的心跳一律不算「正在跑」:15 秒內重綁再按啟動,不再回「已在跑」卻什麼都沒起。
+  ② 全解綁把舊帳戶的快照(`manager/last_reconcile.json`)與帳戶守門狀態(`state/venue_account.json`)停放到
+  `state/unbound_account_state.json` 再清掉;重綁時帳戶識別相同就原樣還原(行為照舊),不同就丟掉,新帳戶第一次啟動
+  不再因舊帳戶的部位觸發守門。帳戶識別=交易所金鑰值的 sha256(同 reconciler `_key_fingerprint` 的規則)加
+  `PAPER_BOUND_TS`(模擬帳戶每次新綁都是新帳戶)。測試 `tests/check_unbind_rebind_account_state.py`。
+- **電腦版可以綁 OKX、BingX、Gate.io、Bybit 的真實金鑰,先過交易所自己那一關才寫入**(`command_listener.py`
+  `_local_real_key_gate`、`_LOCAL_KEY_CHECKS`;`local_daemon.py` 的 `LOCAL_OPEN_VENUES`)。寫 `.env` 之前用這次送來的
+  金鑰呼叫 `lib/account_<id>.get_equity` 一次(`.env` 裡同一家的舊金鑰不代打;`*_DEMO` 這類旗標照讀),失敗就什麼都不寫、
+  回 `REJECTED: <交易所的錯誤>`(金鑰值與網址遮掉),缺欄位回 `INCOMPLETE_PAIR`,讀不懂回 `UNKNOWN`。沒有檢查的交易所
+  (或 workspace 沒有那支 `lib/account_*`)照舊一律不寫。對話綁定在電腦版仍只開 paper。測試 `tests/check_local_real_key_gate.py` §4c。
+- **回測正確性五修(lib／manager 層,出貨走 blave-agent VERSION,不是 runtime publish)**:① 每次回測自動跑「截斷不變」檢查(`lib/runner.py` `_enforce_lookahead` 等),截掉尾端再重算 fetch_data＋compute_signals,已存在的 K 棒部位一變就拒絕回測、印「偷看未來」、不寫 stats.json/版本;無法重現(非決定性、fetch_data 走 lib.data 以外)只警告。② runner 無效 K 棒過濾補上 Open(Open=0、Close 有效的棒原本記成 −100%,聯電期 CCF 2020-05-14 實例)。③ Type C 範本/範例:`rank(method='first')`(同分讓權重和變 1.5/0.5)、`_rebalance_mask` 改每期第一根(舊版 `shift(-1)` 讓上線每根都再平衡;既有 Type C 回測數字會變、舊寫法會被 ① 擋下);runner 對權重列總和 >1 或 NaN 警告。④ 加密 K 線形成中那根不再進訊號:`lib.data.closed_bars_only()` 由 runner 與 `wait_for_bar` 包住 fetch_data,fetch_kline／fetch_kline_batch／fetch_bingx_kline 在範圍內丟掉 label+interval>now 的棒(範圍外不變)。⑤ `txf_settlement_mask` 迴圈上界多看一根 K 棒:上線 tick 的最後一根就是結算前那根時原本標不到(回測有平倉、上線抱過結算)。測試 `tests/check_lookahead_guard.py`、`check_runner_open_zero.py`、`check_typec_template.py`、`check_kline_forming_bar.py`、`check_settlement_mask_live.py`。
+- **外部資料依發佈時間對齊(R2,lib／manager 層,同上走 blave-agent VERSION)**:`lib.data.align_feed` 以 `FEED_TIMING`(各 feed 的發佈時間與出處,不確定的標 待確認)把非價格資料接到「發佈時間 ≤ K 棒收盤」的那根;該到未到的列:歷史中段給 NaN、回測尾段截掉、上線(runner 與 `wait_for_bar` 的 `live_feeds()` 範圍)丟 `FeedNotPublished` 拒算。`wait_for_bar` 把它當「未就緒」(不發 fetch_error、不退避),從該列應發佈的時間起算 15 分鐘才告警並點名 feed。回測的偷看未來檢查改以發佈時間截斷已記錄的 feed,日資料直接 ffill 到盤中 K 棒會被擋。配方與發佈時間表在 `references/strategy-code.md` › External data。另:Type C 無效格(Open／Close 為 0 或 NaN)不再記 −100%(`lib/runner.py` `_fill_invalid_cells`);`examples/tw100_foreign_zscore` 權重欄位對齊 price_df;`wait_for_bar` 的新鮮度比對先把帶時區的 K 棒轉 UTC(原本台北時間當 UTC,早 8 小時判就緒)。測試 `tests/check_feed_alignment.py`、`check_typec_invalid_cells.py`、`check_wait_for_bar_tz.py`、`check_typec_template.py`。範本 `examples/tw100_foreign_zscore`、`tw2317_broker_zscore` 改用 `align_feed`(日 K 數字不變、上線多了未公布就拒算的閘門),測試 `check_examples_align_feed.py`;`align_feed` 遇到整個空的 feed 改丟清楚的 ValueError。
+- **外部資料發佈時間全數查證(lib 層,走 blave-agent VERSION)**:`FEED_TIMING` 改為「官方發佈與 Blave 實際供應取較晚者」——TWSE Data E-Shop 產製時間、FinMind 更新時間、證交法 §36 與金管會《財報及營運情形公告申報特殊適用範圍辦法》(金融業 Q2 8/31、保險業月營收 15 日),加上 api 快取(台股日資料 5 分鐘;月營收／財報／外資持股按 UTC 日快取 → 隔日 08:00)與分點 job 實測(09-23 21:31 寫入)。TWSE 成交量、PCR、集保週資料官方無公布時間,保留保守值並註明。30 天財報／月營收本機快取在申報期限過後自動重抓。新增 `lib.data.join_tw_flow`:台股日頻籌碼(期貨法人、個股法人、大盤法人、融資、PCR、本益比、分點)一行抓取並依發佈時間接上 K 棒,配方與指標在 `references/strategy-code.md` › Taiwan daily flows,AGENTS.md 一句指路。測試 `tests/check_tw_flow_helper.py`。
+- **Type C 回測報告不再缺欄(lib 層)**:`stats.json` 補上 `fee [%]`(報告讀的鍵,原本只寫 `fee`,顯示「手續費 —」)、`Sortino Ratio`、`Omega Ratio`(由投組自己的逐根報酬計算,同 Type A 的 `compute_stats`);`fee` 保留。測試 `tests/check_typec_stats_keys.py`。
+- **`lib/exits.py` 加進 agent 不能改的 lib 名單**(`agent_turn.py` `PROTECTED_EDIT_RULES` 多一條 `Edit(/lib/exits.py)`):
+  停損／停利／移動停損／時間停損改成 lib 函式 `apply_exits`,agent 只呼叫、不改;和 runner、param_scan 同一層保護。
+- **整機啟動下單(`resume` / `resume_wait` 不帶 `strategies`)沒有重開紀錄時,也會確保對帳器在跑**
+  (`command_listener.py` `_ensure_reconciler_running`、`_reconciler_supervised`;`dispatch`)。原本只有
+  `state/reconciler_stopped.json` 存在時才會順手起對帳器,而電腦版的雲端啟動只送這一個指令:從沒跑過對帳器的新機、
+  或解綁/死掉後沒有紀錄的機器,按啟動只清了 HALT、什麼都不會下單(29026,09-23)。心跳 15 秒內=在跑、不重啟;
+  沒心跳或超過 300 秒(與報告同一個窗)=起來;中間那段問 systemd/tmux/NSSM,問不出來(含 NSSM 的 `*_PENDING` 過渡態)當作在跑。網頁接著送的
+  `restart_reconciler` 照樣吞掉一次;起不來 ack 失敗並帶原因。電腦版本機(`BLAVE_AGENT_LOCAL`)不變。
+  `resume_wait` 的閘門照舊:新對帳器第一輪零筆單。測試 `tests/check_machine_restart_stop.py` §6b。
+  配套(workspace 端,`manager/reconciler.py`):對帳器開頭先鎖 `state/reconciler.pid`(flock/msvcrt),同一個 workspace
+  第二支直接以 75 離開、不跑任何一輪也不掃單;兩個看門狗包裝遇 75 安靜重試、不發重啟通知。測試 `tests/check_reconciler_singleton.py`。
+  runtime 自動更新比 workspace(按「更新」才到)早,舊版 reconciler 不拿那把鎖:三條起對帳器的路(雲端啟動、重開後的啟動、
+  明確的 `restart_reconciler`)起之前都先讀行程表(`/proc`,Windows 用 Win32_Process),本 workspace 有**不在 systemd／tmux／NSSM
+  底下**的 reconciler.py 行程就不起第二支(`_stray_reconciler_pids`;明確重啟回失敗並帶 pid)。在監督底下的(卡住的也算)
+  照舊由那次重啟換掉。只認真的執行(`python [選項] …/reconciler.py`),`-m py_compile`、`-c` 不算。
+- **回合出錯也會清掉雲端交接的金鑰**(`agent_turn.py` `_remove_cloud_handoff_dir`,在 `run_turn` 的 `finally`):
+  `<workspace>/tmp/cloud-handoff/`(短效 SSH 金鑰與憑證)原本只靠 agent 在回合結束前自己刪,回合撞 max_turns、
+  半途或崩潰時沒機會刪,就留在磁碟上等下一個回合碰巧清。現在不論怎麼收場都清;不存在不出錯,只動那一個路徑
+  (它是連結只拿掉連結、`tmp` 指到 workspace 外面整個不碰)。行程被直接殺掉時仍跑不到,那時靠下一回合的規則。
+  測試 `tests/check_cloud_handoff_cleanup.py`(真的跑一個撞 max_turns 的回合)。
+- **雲端視角提示多一句:`references/cloud-handoff.md` 不要一次 cat 整份**(`_viewing_env_segment`):
+  那份檔 56KB,cat 的輸出會被截斷,每個雲端回合多花一步重讀。說法不綁引擎——有讀檔工具就用,沒有就 `sed -n` 分段讀
+  (Codex 也吃同一段 prompt,它沒有 Read 工具)。
+
+- **電腦版沒有資料時講的條件,補上「按小時付費」這條路**(`agent_turn.py` `data_access_rule()` 的 `access == "0"`):
+  沒有主機也能買資料之後(api `3417d589`),`0` 的來源只剩沒登入、這一小時付不出資料費(`data_access = none`)、
+  或舊 api 且不含資料。原本條件只列試用與雲端主機,會把付得起每小時資料費的路講漏,等於叫人去開主機。
+  現在事實與「回覆必須講的條件」都含「餘額付得起這一小時的資料費」。仍然不給指路、不報價(錢與動作由外殼的卡講)。
+
+- **回覆語言判定改成「有漢字就是中文,除非有英文句子的證據」**(`agent_turn.py` `_is_zh`)。舊判定比字元數
+  (漢字 >= 3 且壓過英文字母的一半),2026-09-23 兩次判錯、整則回英文:Wei 打「做vol target到30%」(2 個漢字、
+  9 個字母——台灣交易員的中文句本來就夾英文行話),以及「幫我把這組 Binance 金鑰綁到真錢帳戶:BINANCE_API_KEY=… …」
+  (15 個漢字對約 70 個字母)。現在:沒有漢字 = 不是中文(不變);有漢字時,只有**兩個以上英文文法字**
+  (what / is / the / of …),或一個文法字而且英文字母至少是漢字四倍,才算英文句——「what is 台積電 price」照舊英文。
+  數字母前先丟掉像識別字的片段(含 `_` `=` `/`、全大寫、夾數字的長片段),以及不是用戶自己寫的英文:
+  ``` 區塊、反引號、貼上的錯誤訊息／traceback(`XxxError:`、`Traceback`、`File "…", line N` 到行尾)、
+  看起來像程式的非中文片段(`= ; { }` 或字緊接左括號,`for i in range(10)` 的 for／in／i 是 Python 不是文法字;
+  英文句裡的「(2330)」「[2330]」不算)。頭尾都是中文、而且有中文虛字的句子(「如果 price is above the MA 就進場」)
+  直接算中文;只有股名在頭尾的英文句(「台積電 looks weak today, should I switch to 聯發科」)不算。仍然只看用戶打的字,不看介面語言
+  (電腦版刻意不帶 `--ui-lang`,`shell/main.js`)。測試 `tests/check_data_access_lang.py` ③。
+- **電腦版 Codex 下的 `blave` MCP 從上線起就一次都沒呼叫成功過,修好了**(`codex_engine.py` `build_args`
+  多一個 `-c mcp_servers.blave.default_tools_approval_mode="approve"`,只給我們掛的這一個 server)。
+  `codex exec` 寫死 `approval_policy=never`,而 Codex 把沒有標註的 MCP 工具當成要核准——兩者相遇就是
+  「MCP tool call requires approval, but approval policy is never」,呼叫在送出前就被拒。受影響的是 Codex 下
+  **每一支** `blave` 工具:雲端更新、送上雲端、拉回電腦、雲端策略清單、機器狀態。Claude / Blave AI 那條
+  (`bypassPermissions`)不受影響。2026-09-23 Wei 切到 Codex 後按更新鈕兩次都被擋。09-22 的 Codex MCP 查證
+  只驗到 Codex 送出 `initialize`(握手),沒有在 `exec` 底下真的呼叫過一次工具,所以沒抓到;而拼錯的 `-c` 鍵
+  Codex 會默默忽略,只看 argv 的測試抓不到。新增 `tests/check_codex_mcp_live.py`:用本機裝的 codex 執行檔、
+  假模型、假 MCP 跑真的回合,驗「照出貨的 argv 呼叫送達」「拿掉這個旗標就被擋」「別的 MCP server 仍被擋」
+  (0.155.0-alpha.9.2 與下限 0.146.0 都過;找不到 codex 就 SKIP)。
+
+- **對帳器只碰 Blave 自己開的部位**(Wei 09-23;設計 `.claude/output/specs/reconciler-own-positions-only-2026-09-23.md`)。
+  lib:`lib/portfolio.own_positions_only(config)`——設定檔沒有明寫 `"self_ledger": false` 的機器一律拿帳本(自己的成交)
+  比對、定量、平倉,不再把整個帳戶當成機器人的;`execute.py` / `venue_wiring.py` / `manager/flatten.py` 的旗標判斷都改走它。
+  沒有帳本基準(`seeded_at` 空)時第一輪自己寫(Wei 09-23 拍板):每個標的,帳戶與目標**同方向**時 Blave 擁有
+  min(|帳戶|, |目標|),其餘是用戶的;沒有策略在交易、目標是平的、或帳戶跟目標反方向(目標多、帳戶空)→ Blave 擁有 0。
+  這條規則本身永遠不會賣東西(收進來的份額不超過目標)。模擬帳戶同一條。數量照同比例切帳戶的數量,讀不到(現貨)就是 legacy 列。
+  只有 TWAP / 追價還在跑時延後(那一輪只讀,快照 `needs_baseline: {"reason": "inflight"}`)。不再 raise。
+  對帳器還沒跑過第一輪時「全部平倉」不平任何合約部位(講清楚原因);之後只平帳本那一份(數量 = min(帳本, 帳戶))。
+  現貨同一條:錢包是 Blave 與用戶的同一池,「全部平倉」與對帳器的現貨賣單都只賣 min(帳本數量, 錢包);帳本列沒有數量(legacy)
+  的現貨**不賣**、記一筆原因(舊的全部平倉會把策略幣種的整個現貨庫存賣掉,含用戶自己的幣)。遷移收現貨時數量取錢包的同比例。
+  下單路徑稽核 09-23 補:① 遷移收進來的數量用該交易所 order lib 的 `format_qty` / `format_spot_qty` 往下取到整數步長
+  (按比例切出來的 0.0012 BTC 平倉時只平得掉 0.001、剩下的被註銷後留在交易所);② **帳本按交易所分開**(基準列 key
+  `交易所|標的`、成交看 `exchange`),對帳器只用它下單那一家的帳本,全部平倉每家只平自己那份——綁兩家時不再平到另一家的手動部位,
+  模擬改路由到 Binance 不再賣用戶在 Binance 的幣;③ 遷移閘門改看基準裡的 `own_only_basis: 1`(只有新 lib 寫),不再只看
+  `seeded_at`——新 runtime 在舊 lib 旁解除綁定寫的基準不算數;runtime 的解除綁定歸零只在磁碟上的 lib 已有此規則時才寫(帶標記);
+  ④ 遷移只在輸入可信時寫(已存金額、有金額的策略 state 讀得到、數量讀取沒失敗、連兩輪看到一樣的部位、沒有進行中的 TWAP/追價),
+  否則那一輪只讀、`needs_baseline.reason` 說原因;⑤ 沒有數量的現貨帳本列在建帳本時註銷一次,不再每輪報錯、不擋進場。
+  Delta 2 補:⑥ 取整改在**基礎幣**上做(`_lot_base`),`format_qty` 只當閘門——OKX / Gate.io 的回傳是合約張數,原本會收成
+  1/ct_val 倍、當輪把整個標的 reduce-only 賣掉;七家(Binance、OKX、Gate.io、Bybit、BingX、模擬、群益口數)各有測試;
+  ⑦ Wei 拍板:帳戶名目 ≤ 1.5 倍目標(`_ADOPT_WHOLE_RATIO`)整份收成 Blave 的,成本記目標;超過才切;
+  ⑧ 沒有 `symbol` 的策略狀態(Type C)不再卡遷移;同一個非暫時理由等 3 輪＋10 分鐘就退回「讀得到的照規則、讀不到的算用戶的」,
+  記 audit＋一筆下單錯誤,出場單恢復;⑨ 沒有交易所的舊帳本列在新 lib 第一次讀到時歸位。
+  Delta 3 補:⑩ 讀不到 state 但知道交易哪個幣的策略,只有那個幣等(基準的 `pending`,對帳兩邊都不算),策略恢復後照規則收進來,
+  不再疊買一份;全台退回只剩「連幣都查不到」的時候;⑪ 舊列歸位:綁兩家以上改看成交紀錄的 `exchange`,沒有證據或互相矛盾 →
+  停在 `?`,哪一家都不讀、報一次錯。
+  快照多 `own_only: true`。電腦版部位分頁:「實際」改成 Blave 的帳本,帳本上沒有的帳戶部位畫成中性的「不歸 Blave 管」,不再上紅色「賣」。
+  runtime:回報的 `self_ledger` 改報「真的在跑的碼是不是只碰自己的部位」(明寫的旗標照用;沒寫 → 對帳器在跑看它快照的
+  `own_only`,沒在跑看磁碟上的 lib),舊 lib 照舊報 false、確認框照舊警告;新機建檔的「交易過」只算**真實交易所**的成交
+  (Wei 那台兩筆模擬成交讓 Binance 的設定沒開帳本,手動多單被當成機器人的);**完整解除綁定時帳本歸零**(key 沒記交易所,
+  舊交易所的成交會被當成下一家的部位賣掉)。出貨順序:runtime 可以先(回報靠證據,不會對舊 lib 說謊),lib 隨 blave-agent 更新。
+  測試 `tests/check_own_positions_only.py`、`tests/check_shell_own_positions.js`;`check_drift_band.py` (a)/(e)、`check_unconfigured_readonly.py` 改成新規則,
+  其餘考帳戶讀取算術的測試改明寫 `"self_ledger": false`。
+
+- **帳戶讀取器把 `accounts_partial` 傳下去**(`account_reader.read_venue`):lib 的錢包分佈讀失敗、`accounts` 只剩下單錢包時
+  (`lib/account_binance.get_equity` 現在會標),回報帶 `accounts_partial: true`。電腦版權益曲線靠它不把那一輪記成全帳戶
+  (那一輪記下去,當日損益會是 −82% 這種假數字)。舊 lib 不標,行為同以前。
+
+- **投資組合(Type C)策略接上自動下單**(Wei 09-23;設計 `.claude/output/specs/typec-live-2026-09-23.md`)。
+  lib:live tick 寫 `state.json` = `{"type": "portfolio", "market", "weights": {SYMBOL: w}, "rebalance_at", "bar_at"}`
+  (`lib/runner.typec_live_state`,權重矩陣最後一列,跟回測下一根持有的那一列相同);`aggregate_portfolio` 每個資產 `金額 × w`,
+  跟同標的的其他策略淨額相加,現貨每支策略的負權重先壓 0;再平衡之間權重不變 → 目標不變,帳本不因價格漂移交易;掉出權重的資產只平
+  Blave 帳本那一份;口數/股數的 Type C 這版不接(略過並 warning);沒有 `weights` 的舊 state = 還沒有 live 目標。`save_state` 改成
+  tmp＋replace(寫到一半的 state 會讓那支策略的目標整輪消失)。runtime:`_cmd_amounts` 只在磁碟上的 lib 能交易 Type C 時才接受
+  撥款(回報新增 `can_trade_portfolio`,電腦版部位分頁據此解鎖);`resume_wait` 對 Type C 記 `rebalance_at`,下一次再平衡才開始交易。
+  回報的 `states` 對 Type C 多帶 `type`、`weights`(驗證過:標的正規化、只收有限的非 0 數字、最多 100 個、權重大的優先)、
+  `rebalance_at`——網頁 `pfClientTargets` 與電腦版 `trClientTargets` 才拿得到權重。電腦版部位分頁的目標算進 Type C 每個資產。網頁 `workspace.html` 的目標計算與撥款鎖交前端。測試 `tests/check_typec_live.py`、
+  `tests/check_shell_own_positions.js`。
+
+- **現貨買進的手續費不再讓全平賣到用戶的幣**(testnet harness 抓到):交易所回報的 `executed_qty` 是扣手續費前的量,手續費用買到的幣付時
+  錢包只收到 executed − fee,帳本卻記 executed,每一次全平(含全部平倉)都多賣一筆手續費的用戶幣。帳本改記真正到帳的量
+  (`lib/venue_wiring.spot_book_qty`:Binance / OKX / Gate.io 讀 commission + commission_asset,Bybit 買單手續費一律是幣;BNB / USDT
+  付的不扣;不回報手續費(BingX)→ 少記 0.2% 並寫 audit `spot_fee_unknown`);市價、TWAP、追價、custom 的入帳點都改用它,
+  `executed_qty` 的意思不變。測試 `tests/check_spot_fee_book.py`。
+
+- **模擬情境 harness 抓到的五個下單路徑 bug**(`tests/check_paper_scenarios.py`,matrix `.claude/output/specs/paper-scenario-matrix-2026-09-23.md`):
+  MG-10b 寫基準那一輪也把等待中的幣排除在對帳外;TC-22 市價單也寫 in-flight 標記(寫進 `orders.jsonl` 才移除),在成交與記帳之間被殺掉時,
+  下次啟動 `reap_dead_inflight` 會 HALT,不再重買一份;MP-04 單向持倉帳戶上 Blave 的部位被淨進用戶反方向的倉時,出場改送一般單、剛好是
+  帳本那份,用戶原本的倉位復原(各家單向/雙向偵測:`venue_wiring._net_position_mode`,測試 `tests/check_net_mode.py`;全部平倉在 HALT 下,
+  order lib 擋非減倉單,那份留著);ED-25 全部平倉對口數/股數部位(unit "contracts")照口數平;ED-12 用帳本定量的平倉不再先讀市價。
+
+- **下單路徑稽核 Delta 4**:① 單向帳戶的淨額出場要有進場時記下的 `netted_qty`(上限就是它)、連兩次讀到、帳戶模式讀得到才送——
+  用戶自己平掉 Blave 的倉又開反向時,不再把他的倉放大(ZZ-01);② 全部平倉也還原被淨掉的份額,HALT 下只放行這一張
+  (`lib.guard.netted_restore`;各家 order lib 的 HALT 檢查改用 `guard.entry_blocked()`);③ 全部平倉與 `close_symbol` 比對每一家的
+  `executed_qty`,部分成交留在帳本、報「未平完」;④ 現貨手續費:Binance 市價單按每筆 fill 的幣種分開算(BNB 中途用完),追價單從
+  `myTrades` 讀,Bybit 的訂單列帶 `cumExecFee`,只剩 BingX 用 0.2% 上限;⑤ 完整解除綁定不再重設帳本(按交易所分開了),只有在同一家
+  綁了**別的帳戶**才把那一家歸零(怎麼認帳戶見下一條 Delta 5)。模擬情境新增 MP-04b / MP-04c,
+  測試 `tests/check_partial_close.py`、`check_net_mode.py`、`check_spot_fee_book.py`、`check_own_positions_only.py`。
+
+- **下單路徑稽核 Delta 5**:① 帳本認的是交易所自己的帳戶 id,不是金鑰(`lib.portfolio.book_account_check`,seed `venue_account`):
+  各家 `get_account_id`——Binance 現貨 `/api/v3/account` 的 `uid`、Gate.io `/api/v4/account/detail` 的 `user_id`(兩支新增)、
+  OKX／Bybit／BingX 原有、模擬帳戶用帳本的 `created_ts`。每次綁定(網頁、對話、電腦版都走 `_cmd_credentials`)用剛寫進去的金鑰讀一次
+  並記成那一家帳本的帳戶(`_bind_book_accounts`,模擬帳戶除外);讀不到不擋綁定,改記金鑰指紋。綁定、對帳器啟動、每次金鑰變動
+  (模擬帳戶含 `PAPER_BOUND_TS`)、全部平倉動手前都比一次:同一個 id 帳本照留(換金鑰不再歸零);不同 id 當場把那一家的帳本歸零再讀,
+  真交易所另外 HALT,清掉 HALT 不會把舊帳本帶回來——直接覆蓋綁定、或解綁→綁別家→再綁回原交易所的另一個帳戶,都不會再賣到新帳戶裡
+  用戶自己的倉。對不上(新金鑰讀不到 id,或帳本當初記的是讀不到 id 的金鑰)而那一家帳本還有部位時不猜:HALT 一次、之後每輪都不下單
+  (網路類錯誤只等下一輪、不 HALT),全部平倉在那一家什麼都不平並說明;報告 `account_guard.book_hold` {venue, reason, since} 問用戶,
+  新指令 `book_account_confirm {venue, same}` 一鍵回答:same=true 帳本照留、記成新金鑰的;false 那一家帳本從現在歸零(原本的部位歸用戶)。
+  兩個答案都不下、不平、不撤任何單,重送不重做,寫稽核;HALT 留給用戶按啟動下單。綁定回覆多一欄 `book_account` {venue: 判定}。
+  帳戶確認稽核(Delta 6)六修:① 答案只在那一家「現在正在問」、且交易所自己分不出來時才生效,過期或重送的答案回 `nothing_to_confirm`、
+  什麼都不寫(答過「同一個」後另一台裝置的舊「不同」不再清空帳本);② 保留期間那一家收不到 Blave 任何單:各家 order lib 的閘門
+  (`guard.check_account_hold`)連平倉、保護單都擋,進行中的 TWAP／追價在下一張子單前停下並照記已成交的量——`holds_all: true` 就是這個意思;
+  ③ 綁定時讀到另一個帳戶 id:帳本照歸零,並立刻 HALT、在帳戶守門留 `bind_reset`,對帳器下一輪走原本「換帳戶 → HALT 並通知」那條路發通知
+  (舊帳戶上 Blave 開的部位不再管),新帳戶在按啟動下單前不下單;若用戶已先按啟動,只補通知不再 HALT;④ 帳本空時讀不到 id 不再把驗證過的 id 洗掉;
+  ⑤ 換金鑰後讀 id 一直網路錯誤、那一家有部位:最多 10 分鐘／3 輪就當成讀不到——HALT 並問用戶,不再無限期「執行中」卻每輪跳過;
+  ⑥ 被保留擋下的啟動下單(`held:`)不再刪「主機重開停止」紀錄、也不起對帳器。重稽(Delta 7)補三條:換帳戶的通知就是那次 HALT 本身
+  (平台的 `halt` P1 事件帶著理由到頁面／email／TG),機器端不再另發 TG、已按過啟動的也不補發;paper 永遠不被下單閘擋;
+  任何一種回答都踢一下對帳器,過期的題目一個輪詢內就清掉。測試 `check_bind_account_id.py`、`check_own_positions_only.py`、
+  `check_reconciler_autohalt.py`、`check_net_mode.py`。
+  移除 runtime 以金鑰雜湊認帳戶的 `state/book_account.json`。群益讀不到 id,不比。api 端(`openclaw/agent_command.py` ALLOWED、
+  `openclaw/desktop_auth.py` CLOUD_MACHINE_ONLY_COMMANDS)要先上,這條指令才送得到機器。
+  ② HALT 下還原淨額的那一張:`guard.netted_restore` 改成只限本執行緒、只限一張、只限指定的幣／方向／不超過記錄的數量,
+  由各家 `place_market_order` 用自己的單去對(`guard.arm_restore`)。③ 限價追價的進場也記 `netted_qty`(開始前讀一次)。
+  ④ 一口不到 $10 的合約(Gate.io／OKX BTC 一口約 $8.4)Blave 自己的倉終於平得掉:整倉平倉門檻在一口小於 $20 時改為
+  $10 減半口(`manager/reconciler._close_gate`),平的量仍以帳本為上限。模擬情境新增 TC-36、TC-37、MP-04d,測試 `tests/check_account_ids.py`、`check_bind_account_id.py`、`check_close_gate_sublot.py`、
+  `check_net_mode.py`、`check_reconciler_autohalt.py`、`check_own_positions_only.py`。
+
+## 1.1.89
+
+- **資料規則那一段不再給模型「成品句」**(`agent_turn.py` `data_access_rule()`,`access == "0"`):
+  整段改寫成「給模型的事實與約束」,並明講**用戶讀到的每一句都由模型自己用該輪語言寫、不准照抄這一段**。
+  原本它用英文散文把要對用戶說的話寫成成品,模型直接抄走——2026-09-23 Wei 用中文問籌碼集中度、整則回英文,
+  逐輪語言錨(貼在 prompt 最尾端的一行)打不過一句「剛好就是這則要回的內容」的現成句子。
+  約束一條都沒少(缺哪些資料、怎樣才有、marker 一次對話只講一次、不要編數據、不要去別處找憑證、公開 K 線照答)。
+  測試 `tests/check_data_access_lang.py`。
+- **`access == "1"`(電腦版資料 key)那一段改成跟 api 現況一致**:api 已經**移除 `DATA_NOT_INCLUDED`**,
+  桌面 key 不含在試用／主機／API 方案裡時不再被擋,而是跟一般 key 走同一條**按小時**的資料費
+  (`decorators.py` 的 `blave_data_included` → `deduct_blave_api_credit`),扣不到才 403 `ERR007`(body 帶當下費率、
+  `retry_after` 是上限不是等待時間、以及儲值／API 方案／開主機三個出口)。這一段現在講三種不同的 403——
+  `ERR007`(這一小時的費扣不到)、`ERR005`(key 被刪／撤銷 → 在 app 重新登入)、`KEY_SCOPE`(越權),
+  並且明說「成功的呼叫也會花到錢,只抓這一輪要用的、不要輪詢」。同樣寫成事實與約束,不給可抄的成品句。
+
+## 1.1.88
+
+- **回報多 `portfolio_configured`(bool,**可能整個不出現**)**:`manager/portfolio_config.json`(或平台先寫的
+  `amounts.ui.json`)存在 = true。false = 從沒存過金額**而且**確定「接下來要跑的那份碼」帶唯讀閘門:對帳器活著時只認它自己
+  寫的證據(`last_reconcile.json` 的 `read_only`),沒活著才看 workspace `lib/portfolio.py` 上有沒有閘門;兩者都答不出來
+  就**不放這個 key**(舊機器分支,前端照舊提示會平倉)。欄位隨 runtime 自動出貨、閘門隨 workspace 半手動出貨,
+  只憑 runtime 自己的行為報 false 會對「runtime 已更新、workspace 還沒」的機器說謊(稽核 09-23 B2);
+  `restart_failed`(檔換好了但舊程式還在跑)是最貴的那一格。測試 `tests/check_unconfigured_readonly.py`。
+- **`_fresh_portfolio_config()` 的「這台交易過」只看 `manager/orders.jsonl`**:不再算 `last_reconcile.json`——唯讀那輪
+  照樣寫快照,於是用戶**第一次**存金額的設定檔少了 `self_ledger`,下一輪把他自己的手動部位平掉(稽核 09-23 B1,真錢)。
+  測試 `tests/check_unconfigured_readonly.py`、`tests/check_drift_band.py`。
+- **VERSION 一變就推 strategies 回報(帶 `config_version`)**:jobs.json 新增 `blave-agent-strategies.path`(api repo
+  `blave_agent/systemd/`,監看 `workspace/VERSION` → `blave-agent-strategies.service`);Windows 的 `file_watcher`
+  同步監看 `VERSION` → `strategy_reporter.py`。雲端更新寫完 VERSION 後 app／網頁幾秒內就看到新版本,不必等 2 分鐘 timer。
+  **出貨順序:api repo 的 unit 檔要先在(publish 從 `../api/blave_agent/systemd/` 打包),再發 runtime。**
+  測試 `tests/check_update_workspace.py` §8。
+- **`manager/update_workspace.py`(雲端更新腳本)三修**(稽核 09-23):① clone 的驗證從 `git status --porcelain` 改成
+  比對 `git ls-tree -r <expect-head>` 的 blob——官方檔清單直接來自那個 commit,所以被 `.gitignore` 藏起來的植入檔不算官方檔、
+  永遠不會被複製進 workspace,`VERSION` 也一併逐 byte 驗;② Windows 的 `nssm status` 是 UTF-16,`text=True` 解出來夾著 NUL,
+  **裝過對帳器服務的 Windows 機器一律卡在 plan**(`nssm_text` 修;Windows 分支仍未在真機驗過,`updating.md` §2 已寫明);
+  ③ 例外不再吐 traceback:最外層包成 `"outcome": "error"` 並帶上已完成的步驟(備份資料夾建立失敗、VERSION 寫入失敗等),
+  另外「plan 之後才出現的檔」不再撞 `os.path.join(None, …)`,改記成 `refused`。
+  **已知、這批不修**(稽核 B5/B6/B7/B8/B10):重啟會打斷進行中的 TWAP/chase(`reap_dead_inflight` 可能直接 HALT)、
+  `restart: "ok"` 只證明 supervisor 迴圈活著而非新碼跑起來、半成品(寫到一半被 `refused` 的 `lib/`)仍會重啟、
+  plan 與 apply 之間用戶按了啟動下單時 `--restart-ok` 仍成立
+  (文件側已改成「只有拿到用戶的 yes 才帶」)、以及舊的 tmux 機器一律 fail-closed 停在 plan(沒有替代路徑)。
+  測試 `tests/check_update_workspace.py` §7b–7e。文件側順手補:`updating.md` §2 的 clone 指令加 `-c core.autocrlf=false`
+  (Windows 預設會把 clone checkout 成 CRLF,逐檔比 blob 會全數不符、第一個檔就停——`cloud-handoff.md` U2 走 `GIT_CONFIG_NOSYSTEM=1`
+  的 `env -i`,不受影響),以及 §2 第 3 步要在同一則訊息問重啟(`--restart-ok` 的 yes 只能是這個,否則要重啟時就不跑 apply)。
+- **雲端更新只在該重啟時才重啟**(承上,原列為「已知不修」):`needs_restart` 不再把「VERSION 有差」當理由——每次真實更新
+  VERSION 都會變,等於**每次更新都重啟正在跑的對帳器**,連只換 `references/` 的純文件更新也是(重啟會切掉進行中的
+  TWAP/chase,還可能觸發 HALT),原本的 `touches_code` 幾乎是死碼。改成照 `cloud-handoff.md` U7 / `updating.md` §2 的字面:
+  要換的檔裡有 `lib/` 或 `manager/` 才重啟;要換的只有 `references/` 之類則不重啟、VERSION 照寫。
+  **VERSION 落後但三個清單全空**(上一輪檔案換完了卻沒做完重啟或寫 VERSION)仍算「上次沒做完」而重啟,U8 那條補做路徑完整。
+  **「要換的檔」在 apply 是 `todo`(真的會寫的那些),不是 `changed_here` 全集**(稽核 09-23):用戶改過一個官方 `lib/` 檔
+  又選擇保留時,舊算法每一次更新都會 `sudo systemctl restart` 一次下單程式,而**一個 byte 都沒寫**,且 `outcome` 永遠 `partial`、
+  VERSION 永遠寫不下去——更新燈對那台永遠亮著、U9 的「再按一次更新就能補完」永遠不會成真。plan 看不到 `--allow`,所以 plan
+  仍照最壞情況回答(那正是 U5 要問用戶的那一題);apply 看得到,就只算真的要寫的。
+- **重啟失敗會被記住**:`state/update_restart_pending.json`——新 `lib/` 已在磁碟、舊 `lib/` 還在跑著的程序裡,而**之後任何一輪的
+  檔案清單都看不出這件事**(清單只比磁碟與 clone,磁碟已經是對的)。於是重啟沒回到 running 的那一輪自己記下來,下一輪不管清單
+  長什麼樣都欠著這次重啟;沒有這個記錄時,「上一輪換了 `lib/` 但重啟失敗、這一輪只剩一個非碼檔要換」會安靜地寫下 VERSION、
+  對平台回報「已更新」,而下單程式還在跑舊碼。重啟回到 running、或任何一輪發現對帳器沒在跑(沒有東西握著舊碼,下次啟動從磁碟讀)
+  就清掉;`not_running_anymore` 同理不寫,`skipped_not_gated` 也不寫——那裡重啟是**被禁止**而非欠著,記了只會每輪索取一個
+  腳本必定再次拒絕的同意。判準依據:對帳器是常駐 daemon,啟動下單 只刪停止記錄、程序不重載碼(`manager/reconciler.py`
+  › `RESTART_STOP_PATH`)。plan/apply 的 JSON 多一個 `restart_pending`;文件側同步:`cloud-handoff.md` U3(欄位)、U7、U8 與
+  `updating.md` §2 重啟那組各補一句。**「讀不到對帳器狀態」算重啟失敗,不算「用戶把它停掉了」**(稽核 09-23):
+  `reconciler_state()` 回 tuple(`is-active` 回 `activating`、dbus 連不上、timeout)時,舊碼 `!= "running"` 成立 →
+  走 `not_running_anymore` → 清掉記錄、寫 VERSION、回報 `updated`,而 daemon 還在跑舊 `lib/`——正是記錄存在的那一格被繞過去,
+  且同一個值在 run 開頭是 `raise Stop`(同值兩種相反處理)。複製檔案要時間,期間 systemd 在 `Restart=` 退避就會回 `activating`,
+  不罕見。測試 `tests/check_update_workspace.py` §9–§13(四格 `needs_restart`、重啟失敗四步序列、讀不到狀態、保留檔不重啟,
+  每格各帶變異驗證;另加一行把 `"RESTART_STOP_PATH"` 這個字串 probe 釘在**真的** `manager/reconciler.py` 上——
+  `runtime/command_listener.py:1519` 的孿生 probe 也吃同一個符號,改名的話兩邊一起靜默翻面而測試全綠。
+  `lib/portfolio.py` 的 `def portfolio_configured(` 同理,補在 `tests/check_unconfigured_readonly.py`)。
+  **已知、這批不修**:① 上一輪 `failed`、這一輪 `skipped_not_gated` 時記錄不清但 `complete` 仍成立,
+  機器照樣寫 VERSION、回報「已更新」,而沒有 gate 的對帳器繼續拿舊碼下單——這是 U7 現行契約(「Without the gate … that is
+  not a failure」)的後果,U7 已補一句寫明後果(舊碼續跑到用戶自己停掉對帳器、VERSION 照樣寫),要堵得先改 U7 的語意;② 記錄分不出「現在跑的是新碼還是舊碼」,daemon 自己
+  重開過(reboot / crash)之後記錄仍在,下一次更新會多問一次、多重啟一次——取捨是寧可多重啟一次,不要漏重啟一次;
+  ③ `restart_reconciler()` 把 `sudo` 的 rc 與 stderr 丟掉,只回 True/False:沒有 `provision.sh:298` 那條 sudoers 的舊機
+  會每輪 `restart_failed`、記錄永在、VERSION 永不寫,而用戶與 agent 都無從分辨這是永久性(缺 sudoers)還是暫時性的——
+  建議之後在 JSON 加 `restart_error`(rc + stderr 前 120 字);④ **S2**:腳本以 `python3` 執行,`PYTHONPATH` / user-site
+  `.pth` / shell function 都能換掉真正跑的東西(一行 `/usr/bin/python3 -I` 可收);⑤ **S3**:`write_atomic()` 的
+  `shutil.copyfile(src, tmp)` 會跟 symlink——預先放一個 `lib/data.py.update-tmp` 指到 workspace 外,官方內容會寫出去一次
+  (下一輪 `plan` 才 fail-closed);`api/blave_agent/control/updater.py` 的 `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` 可照抄。
+  ④⑤ 都在「攻擊者已經是機器上的 `blaveagent`」這個 Accepted limit 內,沒有提權。
+
+## 1.1.87 — 2026-09-23
+
+- **電腦版 `mcp_rule` 加雲端更新例外**:掛 `blave` MCP 時,可寫範圍多一條 `references/cloud-handoff.md` ›
+  *Updating the cloud machine*(用戶在這段對話要求才做、只寫官方 clone 的整檔、永不碰 `control/`)。Wei 09-22:
+  電腦版任何動作都不觸發雲端 agent 回合,雲端更新改由本機 agent 經 MCP 做;規則另加一句:不得經 SSH 在雲端開 agent
+  回合(不跑它的 runtime 或 agent,會扣雲端 AI 額度)。測試 `tests/check_local_mcp_config.py`。
+- **回報分清「沒有設定檔」與「讀不到設定檔」**:`portfolio_config.json` 不存在時 `config` 照舊 `{}`;
+  存在但讀/解析失敗(或不是 object)改回 `config: null`。原本兩者都是 `{}`,電腦版存金額會當成「目前沒金額」
+  把主機上其他 key 整份蓋掉。null-safe 只對讀取側成立(api `_funded(None)` 直接跳過,比 `{}` 更不會誤報
+  deployed;web 顯示照舊);web 與電腦版存金額時須另擋 null(另批修)。測試 `tests/check_report_config_read.py`。
+- **主機重開機=自動下單停止(Wei 09-22,fail-closed;疊加在 downtime watch 之上,`downtime-lib-freeze` 那套 lib 擱置不出)**:
+  `command_listener.run()` 在排程執行緒與輪詢之前比對開機識別碼,記在 `state/boot_id`(Linux `boot_id`;Windows
+  `GetTickCount64`,tick 比紀錄小才算重開,watch 迴圈每 5 秒把紀錄跟上,不看 wall clock)。換了 → 重開前對帳器活著
+  (心跳在 `downtime_watch` 戳記前 300 秒內;已 HALT 也算,HALT 內容不動)就**先**寫 `state/reconciler_stopped.json`
+  與事件 `machine_restart_stopped`,**再**把這次開機起來的對帳器停掉(停不掉重試一次);停成功才在紀錄補 `stopped_at`。
+  停不掉:一律寫 `audit.jsonl`;workspace 的 `manager/reconciler.py` 沒有閘門(找不到 `RESTART_STOP_PATH`)時改送事件
+  `machine_restart_stop_failed`(`down_from`、`down_to`;api 要先登記),**只送這一則、不再送 `machine_restart_stopped`**(免兩則說法相反的 P1)。**紀錄在的期間一張單都不下**:對帳器每輪先看紀錄、
+  整輪跳過,解除那輪 `force_next`;`place_order` 開頭也擋;`lib/execute` 的 TWAP/chase/custom 切片看到紀錄就停;
+  `lib/guard.check_restart_stop` 擋在每個 `lib/order_*` 的共同關卡(進場、平倉、SL/TP 都擋,只放撤單與槓桿)——
+  Type B 策略、agent 自己的腳本一樣被擋。這幾半隨 workspace 出(要 bump blave-agent `VERSION`),沒更新 workspace 的機器
+  只靠殺。**不掛 HALT**。第一次無紀錄、runtime 換版、電腦版 local mode 都不動。回報 `reconciler.stopped =
+  {reason: "machine_restart", at, gated}`,期間 `alive: false`;`gated: false` = workspace 對帳器沒有閘門且停止後還在打
+  心跳(可能還在交易)。**只有整機 `resume`/`resume_wait`(用戶的啟動下單)能解除**:對帳器 15 秒內打過心跳且晚於
+  `stopped_at`(沒有就晚於偵測時間)→ 只刪紀錄(即解除)、不重啟;否則啟動它(電腦版雲端啟動不送 `restart_reconciler`);
+  啟動失敗或紀錄刪不掉都 raise(ack 失敗帶原因)、紀錄保留。兩種成功都吞掉網頁跟著送的那一個 `restart_reconciler`
+  (只吞一次,停止後即失效);紀錄在時單獨來的 `restart_reconciler` 一律拒絕。Windows 每次 listener 啟動(含 runtime
+  換版)在停止之後把對帳器服務校正成 DEMAND_START,結果只寫到 `deployments.json` 既有的 reconciler 那筆,失敗一律進 log。
+  平台的 `close_all`(網頁「暫停並關閉部位」)照樣平倉:listener 不掛 HALT(workspace 對帳器沒有閘門時照掛,否則舊對帳器
+  下一輪會把部位建回來)、寫一次性 `state/close_all_pass.json`(120 秒)再起
+  `flatten.py`,flatten 以 `guard.claim_close_all_pass()` 認領(原子 rename,一次性,只放行該行程的 reduce;進場與 SL/TP
+  照擋),平完紀錄仍在、機器仍停;ack 為 `close_all=restart_stopped:<狀態>`。沒有 pass 的 flatten(agent 自己跑)什麼都不平、
+  寫 order_errors(文案叫用戶到交易所自己平,啟動下單不會平倉;MVP 停止狀態沒有平倉鈕)。Type B:`run_strategy.sh` 看到紀錄就記一行 log、exit 0、不碰 heartbeat,healthcheck 把紀錄期間的過期
+  heartbeat 當暫停、不報。群益的檢查移到三個 `place_*` 開頭(SKCOM 登入之前)。paper `reset_account` 放行。HALT 拒單數
+  也算紀錄期間被拒的進場。已知行為(Wei 裁定):停損停利也擋,紀錄若恰好落在 `open_position` 進場成交與掛 SL/TP 之間,
+  該部位到按「啟動下單」前沒有停損(開機後數秒的窗口;交易所上已掛的停損不受影響)。
+  回報 `reconciler.stopped.recomputed`(bool):所有有金額的 Type A/C 策略都已經算到「開機那一刻最新收盤的那根 bar」
+  (`state/bar_wait/<name>.json` 的 `last_processed_bar` ≥ 那根的開盤標籤;或開機後檢查過、資料沒有比已處理的更新=休市/資料停住)
+  才是 true,前端在 false 時把「補齊部位」灰掉(`等新訊號` 照常);沒有這類策略=true;沒綁交易所(排程不跑)=true。
+  `_cmd_resume` 不加拒絕路徑。Type A/C 在停止期間照常由 runtime 排程計算。
+  `gated` 改看正在跑的行程:對帳器每輪跟心跳一起 touch `state/heartbeat/reconciler.gated`(只有新版會寫),listener 與
+  reporter 在對帳器正在跑時只認這個標記(≥ 心跳 − 10 秒);在跑卻沒有新鮮標記(舊行程,或剛起來還沒跑第一輪)一律當沒閘門;
+  沒在跑才看磁碟上的 `reconciler.py`(下次啟動載入的就是它)。`close_all` 只有在「對帳器確認有閘門 且 `flatten.py` 會認領
+  pass」時才不掛 HALT,其餘照舊同步掛;pass 寫不進去 ack 回 `nothing_closed` 不起 flatten,flatten 起不來就刪掉 pass。
+  開機識別碼換了、但 downtime 戳記比這次開機還新(有舊 runtime 在這次開機跑過:降版再升版)→ 只補記、不停機。
+  未來時間的 pass 無效。
+  `recomputed` 的「停滯=已最新」只在開機後那次檢查沒失敗時才算(`last_attempt_failed_at`/`wrapper_error_alerted_at` 晚於
+  `down_to` 就不算);整段包 try,任何例外=false、回報照送;`INTERVAL = "0m"` 不當 Type A/C。**「對帳器在跑」有兩條
+  路徑、兩個門檻,不是同一件事**:啟動下單(resume)判斷「已在跑、只刪紀錄不重啟」用 15 秒內的心跳;`close_all` 與停不掉時
+  判斷閘門(`_reconciler_gated`)改成跟 reporter 同一式子(停止後有心跳、300 秒內),不再是 15 秒。
+  已知行為(不修,都偏 fail-closed 或很低):① 短週期策略(例如 1m)收盤前最後一根資料晚到超過一個週期、或重開機剛好蓋住
+  那根收盤後的一個週期、或開機後第一次檢查失敗接著休市時,`recomputed` 會一路 false 到市場重開——「補齊部位」整晚/整個週末
+  灰掉,「等新訊號」照常可選;② 開機判斷可能漏判(fail-open)兩種:開機後 NTP 校時前 RTC 慢超過「停機時間 + 60 秒」;
+  Windows 上一次開機很短且這次 runtime 起得晚(僅這種 Windows 情況需要用戶在那段短開機期間按過啟動下單才會真的在跑);
+  ③ 策略的 `fetch_data` 把斷線吞成空資料(不 raise)時,`wait_for_bar` 當成「沒新資料」存檔、不寫失敗欄位,`recomputed`
+  可能提早變 true、補齊用到舊訊號。官方 TEMPLATE_C 與 examples 都有 `if close_df.empty: raise`;根治要改 `wait_for_bar`
+  (看到 None 而先前看過資料就記成失敗,或記「最近一次成功觀察資料的時間」),另案、要 bump `VERSION`。
+  **出貨順序:api(`machine_restart_stopped`、`machine_restart_stop_failed` 型別與文案、`reconciler_dead` 遇 `stopped`
+  跳過)→ runtime → web/電腦版顯示;對帳器/lib 閘門隨下一次 blave-agent `VERSION`**。測試
+  `tests/check_machine_restart_stop.py`、`tests/check_reconciler_restart_gate.py`、`tests/check_restart_stop_order_gate.py`。
+
+## 1.1.86 — 2026-09-22
+
+- **修 1.1.84/1.1.85 雲端機全數回滾**:`codex_engine.py` 模組頂層 `import tomllib`,雲端機是
+  Python 3.10(沒有 tomllib),updater 健康檢查 import 時 `ModuleNotFoundError` → 回滾。改成讀
+  config 時才 import;import 不到就不掛 blave MCP(stderr 一行,回合照跑)。新增閘門
+  `tests/check_runtime_py310_compat.py`:`runtime/*.py` 以 3.10 語法解析、擋 import 時就會跑到的
+  3.11+ stdlib 模組/名稱與 3.12 f-string 同引號巢狀。
+
+## 1.1.85 — 2026-09-22
+
+- **群益「全部平倉刻意未平倉」變成 P1 通知(機器端)**:`order_errors` 的群益跳過列多帶
+  `kind:"manual_close_required"`、`symbols`(逗號分隔帳本 key,如 `TMF,TXF`)、`reason:"identity"`,
+  平台據此分流成新事件型別;舊欄位 `symbol`/`error` 保留給舊 api/舊電腦版。`flatten.py` 一次平倉的所有群益
+  部位**合併成一列**(原本一部位一列,會擠掉 5 筆上限裡的加密錯誤);listener 的 `halted_capital_manual`
+  那列從群益快照檔讀 symbols(不登入群益,讀不到給 `""`;self_ledger 開時只列帳本裡同方向的機器人部位,
+  與 flatten 同口徑,讀帳本失敗退回全列),自己組列、不依賴 workspace 的
+  `_record_order_error` 新簽章。**出貨順序 api → web(與電腦版 shell)→ runtime(publish)→ workspace
+  (push 同 commit bump `VERSION`)**;api 先上是硬條件,反過來舊 api 只會當一般 `order_error`(不壞)。
+- **群益「全部平倉」誠實化(止血)**:Windows 的 `blave-agent-web` 出廠是 LocalSystem(uid=1 實機查證),
+  網頁／電腦版全部平倉起的 `flatten.py` 繼承這個身分 → SKCOM 602,群益部位根本沒平、畫面只看到 HALT。
+  現在:`flatten.py` 在「非 Administrator 密碼登入身分」(token 查 `GetUserNameW` + INTERACTIVE/BATCH/SERVICE
+  群組;判斷不了一律當不行)下**不送群益單**,每個群益部位記一條「請在群益下單軟體手動平倉」到
+  `order_errors`,加密腿照平、HALT 照掛;reporter 的 `can_flatten` 在唯一可平 venue 是群益時回 false
+  (前端只剩「暫停」);listener 對舊畫面送來的 close_all 回新狀態 `close_all=halted_capital_manual`
+  (純加法,下游無比對)、不起 flatten。根治(schtasks Administrator 載具)另案。
+  同批修 workspace 層 `flatten.py` 的既有真錢洞:
+  - self_ledger 歸零只給真的平掉的:身分跳過、平倉丟例外、查不到價格、壞資料列、群益回 `sent` 或成交不足
+    (不算已平,記錯)的標的一律不歸零;同一帳本 key 一列平、一列沒平也不歸零;任一 venue 有 order lib
+    卻沒 account lib(另記一筆錯)／讀部位失敗／有部位沒 order lib／出現沒代碼的部位列時,**整個收尾掃帳本
+    不做**(帳本 key 不帶 venue,分不出是誰的)。`DATA_<來源>` 金鑰不再被當成交易所(同
+    `account_reader._venues`)。未涵蓋:加密 venue 回報的成交量不檢查(各 lib 回傳形狀不一,未逐一驗)。
+  - 群益部位改以帳本 key(TM2610→TMF,只認「前綴+YYMM」)查帳本、記紀錄、歸零;原本用解析代碼查,永遠查不到。
+  - 群益只送「TX/MTX/TM + YYMM」期貨列:選擇權列(TXO/TX1…)等其他代碼一律不送、記「請在群益下單軟體手動平倉」。
+  - **已知風險、Wei 接受**:轉倉期間的非近月期貨列照今天的行為送出——平倉只能送近月 alias,所以平遠月那列
+    實際是在近月下單(可能開出新倉、遠月那口沒動)。開 self_ledger 時轉倉期同一個帳本 key 會有兩列、兩列都會送,
+    可能超平。根治待 capital_worker 回報 alias 當下對應的合約。
+  閘門:`tests/check_capital_flatten_identity.py`(含兩份身分函式 AST 相等)。
+
+## 1.1.84 — 2026-09-22
+
+- **Binance 綁定不再查提領權限**(Wei 09-22 拍板:電腦版 MVP 全面不查提領):`_binance_bind_check` 拿掉
+  `WITHDRAW_ENABLED` 那道——提領開著的 key 照寫 `.env`,不擋、不提醒;web 連接、電腦版、聊天綁定三條路都走這支,一起生效。
+  其餘照擋:交易權限全關(`TRADING_DISABLED`)、半套、查不到/看不懂、429/418 退讓;沒白名單照舊只提醒。ack 的 `binance` 形狀不變。
+  電腦版 app 那道(`shell/binance_check.js`)同步拿掉。閘門:`tests/check_credentials_withdraw_gate.py`、`tests/check_local_real_key_gate.py`。
+
+- **電腦版 Codex 引擎掛 `blave` MCP**:`codex_engine.mcp_server()` 判掛不掛,`agent_turn` 算一次、同一個值交給
+  `codex_engine.run(mcp_url=)` 與 `_codex_prompt`(`mcp_rule` 圍籬接上;`--viewing-env=cloud` 的提示段 Codex 也照真的有沒有掛)。
+  接入碼只走環境變數 `BLAVE_MCP_TOKEN`(`bearer_token_env_var`),argv 只有 url 與變數名;不掛就把兩個變數拔掉再 spawn。
+  **接入碼不進 agent 的 shell**:Codex 預設把整份 env 傳給 agent 跑的指令(0.150+ `ignore_default_excludes` 預設 true),
+  掛上時加 `-c shell_environment_policy.filters.BLAVE_MCP_TOKEN="exclude"` 只拔這一個(`BLAVE_WEB_REPORT_TOKEN` 聊天圖鏡射要留著);
+  0.155.x 的 `shell_snapshot`(stable、預設開)會把 policy 整個繞過(實測 `inherit="none"` 都漏),所以同時帶
+  `-c features.shell_snapshot=false`——**掛 MCP 的 Codex 回合每條指令多約 150 ms**;另一條路 `shell_snapshot_v2`(0.155 開發中、預設關,
+  用戶可開;會不會照 policy 未確立)也一併 `-c features.shell_snapshot_v2=false`。版本下限 0.146.0(`filters` 從 #34590 起);
+  另外先跑 `codex -c features.shell_snapshot=false features list` 確認真的關掉(managed requirements 釘住會無聲蓋過 `-c`),
+  關不掉、撞名(`mcp_servers.blave` 已存在)、用戶 config 用舊寫法 `exclude`/`include_only` 陣列(會被我們的 `filters` 頂掉)
+  → 這輪不掛(stderr 一行、回合照跑)。受管層在 `-c` 之上(`/etc/codex/managed_config.toml` 40、macOS MDM
+  `com.openai.codex` `config_toml_base64` 50,那裡的舊寫法陣列會反過來頂掉我們的 `filters`)→ 兩層任一碰
+  `shell_environment_policy`、或讀到但解析不了,也不掛。已接受的殘留:同 uid 以 `ps -E <codex pid>` 讀得到行程 env
+  (與 Claude 路徑 0600 設定檔同 uid 可讀對等)。`mcp_tool_call` 收據名改成 `mcp__<server>__<tool>`,`_tool_where` 才標得出雲端那步。
+  實機:codex 0.146.0 / 0.155.0-alpha.9.2 / 0.155.1 讓 agent 跑 `env | grep BLAVE_` 皆看不到碼。閘門:`tests/check_codex_engine.py`
+  第 6 節、`tests/check_shell_mcp_code.js`。
+
+- **電腦版 A′(操作對象隨視角走)runtime 那半**:`agent_turn.py` 認 `--viewing-env`(只在電腦版外殼的雲端視角
+  送 `cloud`;不設 choices,怪值與非 LocalSink 當沒送)→ prompt 多一段「這句做在雲端主機、上面的策略/頁面是
+  雲端那一份」;有掛 `blave` MCP 講「先用它取得連線,再照 cloud-handoff.md 做(含 NEVER 列表)」;這輪沒掛
+  (含 Codex 引擎)時改講「連不上雲端、不拿本機同名那支頂替,不用 ssh/scp/sftp/rsync、不用本機找到的金鑰/憑證/SSH
+  設定連線」,對齊 `mcp_rule` / cloud-handoff.md #31。沒送時 prompt 逐字不變。tool chunk(running 與 done)加 `where`:
+  `mcp__blave__*` = `cloud`;Bash 照 `|`、`;`、換行切段(不切 `&&`),剝掉 `env`/`VAR=`/`sudo`/`command`/`exec`/
+  `nohup`/`timeout` 包裝後任一段是 ssh/scp/sftp、或 rsync 帶 `[user@]host:path` 參數 = `cloud`,其餘 `local`(純加法)。
+  **出貨順序 runtime 先於 shell**:`parse_args()` 遇未知旗標 exit 2,外殼先送 `--viewing-env` 會讓雲端視角每輪都死。
+  閘門:`tests/check_viewing_env.py`、`tests/check_shell_viewing.js`。
+
+- **全部平倉單飛鎖**(真錢路徑):兩顆鈕永遠可按 → `close_all` 本來就會被重送,而 `_cmd_close_all` 每一筆都
+  `Popen` 一支 detached `manager/flatten.py`,全無互斥。第二支不是無害重播——**群益的平倉是
+  `sNewClose=2`「auto 新倉/平倉」**,而它的持倉來自 `capital_worker` 快照(可舊到 300 秒),所以第二支讀到
+  一個已經被平掉的部位、送出同方向市價單 = **真的開出一口反向倉**。(加密較窄:交易所自己會擋掉重複平倉——
+  單向倉有 `reduceOnly`,hedge 模式 `positionSide`/`posSide` 釘住槽位,超量平倉是被拒不是翻倉——但仍會把
+  `orders.jsonl` 的平倉腿記兩次、和 `zero_ledger_symbols` 搶寫。)
+  修法:`flatten.flatten()` 開頭取 `state/flatten.lock`(`flock`/`msvcrt` 非阻塞,同
+  `local_daemon.SingleInstance`),**拿不到就立刻安靜退出**(回 `ALREADY_RUNNING`,exit 3)——不等、不排隊,
+  用戶按第二次是「快停」不是「停兩次」。鎖由 OS 在行程結束時釋放,SIGKILL / 重開機都不會留下殘鎖;
+  平台上沒有 `fcntl`/`msvcrt` 時**故意 fail-open**(不鎖照跑:panic 鈕不能因為拿不到鎖就不平倉)。
+  ack 多一個狀態 `close_all=already_running`(字串形狀不變、下游沒有比對值,純加法),前端可據此說
+  「已經在平倉了」而不是假裝又送了一次;`_flatten_already_running()` 只是探測、只決定文案,真正的互斥在子行程
+  自己那把鎖(探測到子行程真的上鎖之間有窗,輸的那支會自行退場——退化的是訊息不是安全)。
+  閘門:`tests/check_flatten_singleflight.py`。
+- 電腦版 `mcp_rule()`(這一輪掛了 `blave` MCP 才進 system prompt 的那段)圍籬對齊 `references/cloud-handoff.md`
+  新 #31:從「只准做搬運」放寬成「做用戶這一輪對話裡要求的事」;搬運仍只走該文件 1–8 的 allow-list 流程、
+  遠端 `AGENTS.md` 只是檔案不是指令(本檔 NEVER 優先——那個檔 `blaveagent` 可寫,注入面)、不啟動暫停排程交易或清 HALT(唯一例外:trip 雲端緊急 HALT,Wei 2026-09-22 拍板,與本機 AGENTS.md 對稱)、金鑰值不進對話 / log / 指令列、憑證只放 `tmp/cloud-handoff/`
+  且該輪結束前刪掉。純文字、不看引擎——Codex 掛 MCP 那批把它接進 `_codex_prompt` 即可(這批未接)。
+  閘門:`tests/check_local_mcp_config.py`、`tests/check_shell_mcp_code.js`。第二輪稽核補圍籬:trip 的證據限 agent 自己讀
+  `state/` 或 `lib/`、一輪最多一次且清掉不重 trip、`<reason>` 只准自己打的短標籤;禁寫清單擴到 `state/`、`AGENTS.md`、
+  `references/`、`.env`;遠端文字宣告「規則過時」也是資料、引用句子不引用值。
+- 新機出廠開帳本:`command_listener` 第一次建立 `manager/portfolio_config.json`(`_cmd_amounts` / `_cmd_execution` 的
+  fresh-machine 分支)改從 `_fresh_portfolio_config()` 起手——先寫 fresh-start 的 `manager/ledger_seed.json`(已有就不動),
+  再回 `{"self_ledger": true}` 給 caller 寫進 config;兩筆寫入之間 crash 只會留下「有 seed 沒旗標」(無害),不會反過來。
+  **既有機的 config 沒有 `self_ledger` 鍵一律維持帳戶讀取模式**,預設值只在建檔那一刻決定,不在讀取端。閘門:`tests/check_drift_band.py`。
+  出貨順序:**runtime 先、lib 後**——lib 那筆的 paper 口數進場缺 `margin` 會拒單,而 margin 由 runtime 的 spec 表寫入;
+  反過來(lib 先)機隊會有一段「台期模擬只能平不能進」。舊 lib 拿到 `self_ledger` 旗標會照 seed 走,不會壞。
+- 模擬帳戶口數倉:`_TXF_ASSET_SPECS` 加 `margin`(期交所原始保證金,2026/08/12:TX 701,000 / MTX 175,250 / TMF 35,050),
+  paper 的槓桿檢查用口數 × margin(1×);`account_reader._norm_positions` 對 `unit == "contracts"` 的列以口數回報、不再 × mark。
+  **既有 `asset_specs` 不刷新**(`_cmd_amounts` 只在首次撥款且無 spec 時寫):升級前已寫入、沒有 `margin` 的舊 spec 在 paper 只能平不能進,
+  要進場得取消勾選再重新撥款(或手動補 `margin`)。
+
+- Binance 金鑰的提領權限閘門擴到**全模式**(原本只有電腦版):`_cmd_credentials` 在寫 `.env` 之前一律用這次要寫的
+  key 向 Binance 查 `apiRestrictions`(`_binance_bind_check`)——提領開著、現貨與合約都沒開、半套 key、查不到 / 看不懂
+  一律不寫(fail-closed)。查證必須由**機器自己**做:雲端機的白名單是機器的 IP,同一個請求從用戶電腦發只會拿到 -2015。
+  **web 的連接交易所流程也會走到**(同一個處理函式,Wei 2026-09-22 已知並同意):雲端機從此也擋提領開著的 key,
+  Binance 連不上時綁定會失敗要重試。`ipRestrict` 只回報不強制(沒設白名單照樣綁,由呼叫端提醒)。
+  Binance 以外(paper、OKX、Gate.io、Bybit、BingX、台灣券商、資料來源金鑰)完全不變,不發任何請求。
+  **ack 形狀改了**:成功回 `{"credentials": N, "binance": {checked, code, ipRestrict, spot, futures} | null}`
+  (舊 runtime 回字串 `"credentials=N"`,呼叫端據此分辨「沒查過」與「查過且乾淨」);被拒是
+  `ok:false` + `error="ValueError: <CODE>: …"`,CODE 用 `shell/binance_check.js` 同一套代號
+  (WITHDRAW_ENABLED / TRADING_DISABLED / INCOMPLETE_PAIR / IP_OR_KEY / BAD_KEY_FORMAT / BAD_SECRET /
+  CLOCK / RATE_LIMITED / NETWORK / UNKNOWN)。
+  被 Binance 限速(429/418)會**上鎖**(`_binance_rl_until`,429 鎖 60 秒、418 鎖 5 分鐘,與
+  `shell/binance_link.js` 同一組窗),窗內直接拒絕、**完全不發請求**:上層沒有任何退讓
+  (web 的 command endpoint 沒有 rate limit,用戶失敗就再按一次),而 429 被重試會升級成 418
+  = 這台機器的 IP 被 Binance 封,連用戶自己策略的下單一起死。
+  窗是**行程內**的:web / 桌面那條(長駐行程)有效,聊天貼 key 那條(`lib/venue.py` 每輪重載模組、跑在子行程)沒有——
+  刻意如此,聊天綁定每重試一次要多一輪對話,產生不了這個窗要擋的連點。閘門:`tests/check_credentials_withdraw_gate.py`。
+- 電腦版:本機真錢金鑰的權限閘門下沉到 `.env` 的唯一寫入點(`command_listener._cmd_credentials` 的本機分支 →
+  `_local_real_key_gate`):寫入前向 Binance 查 `apiRestrictions`,提領開著、現貨與合約都沒開、查不到或看不懂 → 不寫(fail-closed)。
+  `LOCAL_OPEN_VENUES` 預設仍只有 paper;Binance 只在 `local_daemon` 自己的行程裡打開,聊天綁定那條路打不開真錢。
+  (雲端見上面那條:同一道 Binance 檢查後來擴到全模式;留在本機的只剩「沒有檢查器的交易所一律不寫」。)
+- 電腦版:`agent_turn.py` 新增 `--mcp-config <路徑>`——外殼替這一輪準備的單次 MCP 設定檔(只有 `blave` 一個 server)。**只在 LocalSink 認**,機隊帶了也不理;
+  只收 workspace 以外的真檔;交給 SDK 的是路徑字串(dict 會讓 SDK 把 Bearer 放上 argv);`strict_mcp_config` 仍為 True(用戶全域的 MCP 照舊一個都不載)。
+  掛了才在 system prompt 多一段 `mcp_rule`;沒掛一個字都不變。外殼那邊這個功能預設關。
+- `agent_turn.py` 新增 `--message-stdin`:訊息從 stdin 讀、不放 argv(電腦版用;同一台電腦上的人 `ps` 看得到命令列,而聊天貼 key 是支援的流程)。
+  訊息的位置參數變成選填;機隊照舊帶位置參數,行為不變。stdin 最多讀 1 MiB(`MESSAGE_STDIN_MAX`),超過就以用法錯誤結束,不無上限地讀進記憶體。
+- 電腦版:`local_daemon` 的孤兒修正——app 被強殺時不再留下沒人管的下單機(stdin EOF 之外另外輪詢父行程;`_log` 不因 stderr 斷掉而中止收工)。
+
+## 1.1.83 — 2026-09-21
+
 - 停機跨 K 棒收盤 → 全部暫停等用戶逐支確認(雲端與電腦版同一條;設計:blave-canon
   `output/specs/downtime-pause-design-2026-09.md`)。runtime 這一半:`command_listener` 加
   downtime watch(5 秒一跳寫 `state/heartbeat/downtime_watch`;行程啟動時、每輪排程開頭、watch
@@ -94,6 +630,19 @@ miss it. (Channel rules: `.claude/docs/blave-agent-update-channels.md`.)
   §1、§4)。實測備忘(CLI 2.1.239,mock upstream):不帶 `--effort` 時 CLI 本來就送
   `output_config.effort="high"` + `effort-2025-11-24` beta(含 deepseek 模型名);haiku 則完全
   不送 effort,`--effort` 對它是 no-op。
+- 資料來源金鑰(BYO Data,命名 `DATA_<SOURCE>_<FIELD>`)不再被當成交易所。成對的
+  `DATA_X_API_KEY`+`DATA_X_SECRET_KEY/PASSWORD/PASSPHRASE` 形狀跟已綁場所一模一樣,舊行為是:下次
+  綁/換交易所時被當成「另一個場所」整對驅逐,還為一個不存在的場所觸發 HALT。改在
+  `command_listener._venue_cred_ids` 一處跳過 `DATA_` 開頭的 id(驅逐掃描、
+  `credentials.ui.json`、routing 繼承、排程的 bound 判斷、`lib/venue.py` 的 `_bound_ids` 全部吃這支);
+  `_cmd_credentials_remove` 移除 `DATA_*` 不算解除綁定(不 HALT、不動 account.json)——判斷對象是
+  去掉 `_API_KEY` 尾碼後的 **id**,跟綁定側同一個口徑(id 恰為 `DATA` 的自訂場所仍是場所,綁/解一致);
+  `portfolio_reporter.venues()` 與 `account_reader._venues()` 不回報/不讀 `data_x`。**必須早於任何 `DATA_` 金鑰落到機器**(出貨順序
+  runtime → api → lib → shell/web)。這一版只有「認得並跳過」,沒有 `data_credentials` 指令。
+  `credentials` 指令的 payload 裡出現 `DATA_` 開頭的 id 直接拒收(ValueError,`.env` 不動):這種 id
+  對所有場所判斷都隱形,網頁自訂交易所名稱被 slug 成 `DATA_MARKET` 時會綁了卻不驅逐、不進 manifest、
+  不排程,全部靜默——改成大聲失敗。**機隊上既有的 `DATA_*` 自訂場所不受這道閘保護,發版前仍要查一次。**
+  閘門:`tests/check_data_cred_skip.py`。
 
 ## 1.1.82 — 2026-09-18
 

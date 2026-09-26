@@ -53,7 +53,74 @@ t("rename 失敗 → 暫存檔不留", !fs.existsSync(f + ".blave-tmp"));
 
 // 兩把 key 各看各的:帳號 token(能燒 AI 額度)只在連的是 Blave 時才進 agent 的 env;資料 key 看的是
 // 有沒有登入,自帶 CLI 的人也拿得到。兩個條件對調任何一個,這裡就紅。
-t("帳號 token 只在 conn.kind === blave 時帶", /const acct = useBlave \? loadToken\(\) : null;/.test(src) && /\.\.\.\(acct \? \{ BLAVE_PROXY_TOKEN: acct \} : \{\}\)/.test(src));
-t("資料 key 看登入、不看連的是誰", /syncDataEnv\(signedIn && await dataIncluded\(\)\)/.test(src) && !/syncDataEnv\([^)]*useBlave/.test(src));
-fs.rmSync(WS, { recursive: true, force: true });
-console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0);
+// 決定本身是一支純函式(turnCreds),從原文切出來跑整張表;接線另外用原文斷言釘住。
+{ const i = src.indexOf("function turnCreds("); let d = 0, j = src.indexOf("{", i), end = -1;
+  for (let k = j; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) { end = k + 1; break; } }
+  const turnCreds = eval("(" + src.slice(i, end) + ")");
+  const row = (kind, signedIn, included) => { const r = turnCreds(kind, signedIn, included); return (r.proxyToken ? "T" : "-") + (r.dataKey ? "D" : "-"); };
+  t("連 Blave AI + 已登入 + 含資料 → 帳號 token 與資料 key 都帶", row("blave", true, true) === "TD");
+  t("連 Blave AI + 已登入 + 不含資料 → 只帶帳號 token", row("blave", true, false) === "T-");
+  t("連自己的 Claude Code + 已登入 + 含資料 → **只帶資料 key**(不燒 Blave AI 額度,但拿得到資料)", row("claude", true, true) === "-D" && row("codex", true, true) === "-D");
+  t("連自己的 CLI + 已登入 + 不含資料 → 兩個都不帶", row("claude", true, false) === "--" && row("codex", true, false) === "--");
+  t("未登入 → 兩個都不帶(不管連的是誰、不管 included 傳了什麼)", ["blave", "claude", "codex", undefined].every((k) => row(k, false, true) === "--"));
+  t("含不含資料查不到(null / undefined / 非布林)→ 當沒有", [null, undefined, 1, "true"].every((v) => row("claude", true, v) === "--"));
+  t("signedIn 不是布林 true → 當沒登入", row("blave", "yes", true) === "--"); }
+t("接線:帳號 token 吃 plan.proxyToken、只進 BLAVE_PROXY_TOKEN", /const acct = plan\.proxyToken \? loadToken\(\) : null;/.test(src) && /\.\.\.\(acct \? \{ BLAVE_PROXY_TOKEN: acct \} : \{\}\)/.test(src));
+t("接線:資料 key 吃 plan.dataKey,而且只經 syncDataEnv 進 workspace .env 的 managed block", /const dataAccess = syncDataEnv\(plan\.dataKey\);/.test(src) && (src.match(/syncDataEnv\(/g) || []).length === 3 && !/syncDataEnv\([^)]*useBlave/.test(src));
+t("接線:含不含資料只在有登入時才去問", /turnCreds\(conn\.kind, signedIn, signedIn && await hasBlaveData\(\), cloudHandoffOn\(\)\)/.test(src));
+{ const i = src.indexOf("function turnCreds("); let d = 0, end = -1; for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) { end = k + 1; break; } }
+  const tc = eval("(" + src.slice(i, end) + ")");
+  t("第三欄 mcp(契約 §2.3):自帶 CLI + 登入 → proxyToken:false、mcp:true;沒登入三個全 false;功能關 → mcp 一律 false", ["claude", "codex"].every((k) => { const r = tc(k, true, false, true); return r.proxyToken === false && r.mcp === true; })
+    && ["claude", "codex", "blave"].every((k) => { const r = tc(k, false, false, true); return !r.proxyToken && !r.dataKey && !r.mcp; }) && ["claude", "codex", "blave"].every((k) => tc(k, true, true, false).mcp === false)); }
+t("登出要清:signOutBlave → clearToken → clearDataKey → 刪本機那份 + syncDataEnv(false)", /async function signOutBlave\(\)[\s\S]{0,600}?\n  clearToken\(\);/.test(src) && /function clearToken\(\) \{[\s\S]{0,120}?\n  clearDataKey\(\);/.test(src) && /function clearDataKey\(\) \{\s*\n\s*try \{ fs\.unlinkSync\(dataKeyPath\(\)\); \} catch \(_\) \{\}\s*\n\s*syncDataEnv\(false\);/.test(src));
+// 沒有主機也能買資料(spec data-without-machine-pricing §E):account_status 的 data_access 三態 → 寫不寫資料 key → BLAVE_DATA_ACCESS。
+// included 與 billed 都算有資料;none 沒有;舊 api 沒有 data_access(外殼比 api 先出)→ 退回布林 data_included,跟以前一樣。
+// 真的跑 main.js 的 dataAccessOf + hasBlaveData(account_status 用假的)→ turnCreds → syncDataEnv → spawn 那一行的對應
+{ const cut = (name) => { const i = src.search(new RegExp("(async )?function " + name + "\\(")); let d = 0, end = -1;
+    for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) { end = k + 1; break; } } return src.slice(i, end); };
+  let lastAcct = null, body = null; const ACCT_FRESH_MS = 5 * 60 * 1000;
+  const accountStatus = async () => { if (body) lastAcct = { at: Date.now(), body }; return body; };
+  eval(cut("dataAccessOf")); eval(cut("hasBlaveData").replace(/^async function hasBlaveData/, "var hasBlaveData = async function"));
+  const tc = eval("(" + cut("turnCreds") + ")");
+  const m = /\.\.\.\(dataAccess === "own" \? \{\} : \{ BLAVE_DATA_ACCESS: dataAccess === "ours" \? "1" : "0" \}\)/.exec(src);
+  const envOf = (dataAccess) => (dataAccess === "own" ? {} : { BLAVE_DATA_ACCESS: dataAccess === "ours" ? "1" : "0" });
+  const run = async (b) => { body = b; lastAcct = null; const has = await hasBlaveData(); const plan = tc("claude", true, has, false);
+    const st = syncDataEnv(plan.dataKey); return { has, st, env: envOf(st).BLAVE_DATA_ACCESS, file: rd() }; };
+  const S = (o) => ({ can_run: true, ...o });
+  const rows = [
+    ["included(試用 / 主機 / 方案)", S({ data_access: "included", data_included: true, data_hourly: 2 }), true],
+    ["billed(按小時付、付得起)", S({ data_access: "billed", data_included: false, data_hourly: 2 }), true],
+    ["none(這小時付不出來)", S({ data_access: "none", data_included: false, data_hourly: 2 }), false],
+    ["舊 api 沒有 data_access、data_included:true", S({ data_included: true }), true],
+    ["舊 api 沒有 data_access、data_included:false", S({ data_included: false }), false],
+    ["認不得的 data_access 值 → 退回布林(true)", S({ data_access: "later", data_included: true }), true],
+    ["認不得的 data_access 值 → 退回布林(false)", S({ data_access: "later", data_included: false }), false],
+    ["data_access 說 none、布林說 true:認新欄位", S({ data_access: "none", data_included: true }), false],
+  ];
+  (async () => {
+    fs.rmSync(f, { recursive: true, force: true });
+    for (const [name, b, want] of rows) {
+      const r = await run(b);
+      t(`資料狀態 ${name} → ${want ? "寫資料 key、BLAVE_DATA_ACCESS=1" : "不寫、BLAVE_DATA_ACCESS=0"}`,
+        r.has === want && r.st === (want ? "ours" : "none") && r.env === (want ? "1" : "0") && (want ? r.file === BLOCK : r.file === null));
+    }
+    t("查不到 account_status(null)→ 當沒有資料", (await run(null)).has === false);
+    t("spawn 那一行的對應照舊由 syncDataEnv 的結果決定(ours → 1、none → 0、own → 不設)", !!m);
+    // BLAVE_DATA_ACCESS=0 的原因(BLAVE_DATA_ACCESS_WHY):09-24 真機,登入著、餘額不夠,agent 卻叫人去登入。
+    // 只在 =0(none)時帶;=1(ours)與 own 不帶。四種值全從 signedIn + account_status 對出來,不看連的是誰。
+    const w = /\.\.\.\(dataAccess === "none" \? \{ BLAVE_DATA_ACCESS_WHY: dataAccessWhy\(signedIn\) \} : \{\}\)/.exec(src);
+    t("spawn:BLAVE_DATA_ACCESS_WHY 只在 =0(none)時帶,=1(ours)/ own 不帶", !!w && w.index > m.index);
+    eval(cut("dataAccessWhy"));
+    const whyOf = (signedIn, b) => { lastAcct = b ? { at: Date.now(), body: b } : null; return dataAccessWhy(signedIn); };
+    t("WHY:沒登入 → signed_out(不看 account_status)", whyOf(false, S({ data_access: "none", reason: "NO_CREDIT" })) === "signed_out");
+    t("WHY:登入、reason NO_CARD → no_card", whyOf(true, S({ can_run: false, data_access: "none", reason: "NO_CARD" })) === "no_card");
+    t("WHY:登入、reason NO_CREDIT → no_balance", whyOf(true, S({ can_run: false, data_access: "none", reason: "NO_CREDIT" })) === "no_balance");
+    t("WHY:登入、data_access none 而 reason 空 → no_balance", whyOf(true, S({ data_access: "none", reason: null })) === "no_balance");
+    t("WHY:登入、舊 api 只有 data_included:false(沒有 data_access)→ unknown(那個布林是「不含資料」不是「餘額不夠」,N4)", whyOf(true, S({ data_included: false, reason: null })) === "unknown");
+    t("WHY:登入、account_status 查不到 → unknown", whyOf(true, null) === "unknown");
+    t("WHY:登入、答案太舊不沿用 → unknown", (() => { lastAcct = { at: Date.now() - ACCT_FRESH_MS - 1, body: S({ data_access: "none", reason: "NO_CARD" }) }; return dataAccessWhy(true) === "unknown"; })());
+    t("WHY:帳號有資料、本機卻沒 key 檔 → unknown(不是錢的問題)", whyOf(true, S({ data_access: "billed", reason: null })) === "unknown");
+    fs.rmSync(WS, { recursive: true, force: true });
+    console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0);
+  })(); }
+

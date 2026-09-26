@@ -34,6 +34,8 @@ exception to the no-silent-failure rule, and only for the LOG write).
 import json
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timezone
 
 HALT_PATH = "state/HALT"
@@ -60,6 +62,188 @@ def _now():
 
 def halted():
     return _halt_flag or os.path.exists(HALT_PATH)
+
+
+# ── netted restore: the one non-reduce order HALT lets through ─────────────
+# On a one-way account the bot's entry may have been netted into the user's
+# opposite position (lib.venue_wiring._netted_exit). Undoing it is a plain,
+# non-reduce order of at most the recorded netted quantity — the only way to
+# give the user their position back. HALT must not freeze the user's position
+# at the bot's size, so the caller opens this pass for THAT order: this thread
+# only, one order only, and only the symbol, direction and at most the quantity
+# it names. Each order lib's place_market_order offers its own order
+# (arm_restore) before sending; entry_blocked() lets through only an armed
+# pass, and spends it. Audited. The machine-restart stop still blocks it:
+# after a reboot nothing trades.
+_restore = threading.local()
+
+
+def _canon_symbol(symbol):
+    return str(symbol or "").upper().replace("-", "").replace("_", "").replace("/", "")
+
+
+class netted_restore:
+    def __init__(self, symbol, direction, qty, source):
+        self.fields = {"symbol": symbol, "direction": direction, "qty": float(qty),
+                       "source": source}
+
+    def __enter__(self):
+        _restore.pass_ = {**self.fields, "armed": False, "spent": False}
+        audit("netted_restore", **self.fields)
+        return self
+
+    def __exit__(self, *exc):
+        _restore.pass_ = None
+        return False
+
+
+def arm_restore(symbol, direction, qty, reduce_only=False):
+    """An order lib's place_market_order, about to send (symbol, direction =
+    the position it builds, qty in the caller's units): arms this thread's open
+    pass when the order is exactly the restore it was opened for."""
+    p = getattr(_restore, "pass_", None)
+    if not p or p["spent"] or reduce_only:
+        return
+    if (_canon_symbol(symbol) == _canon_symbol(p["symbol"]) and direction == p["direction"]
+            and 0 < float(qty) <= p["qty"] * (1 + 1e-9) + 1e-12):
+        p["armed"] = True
+
+
+def entry_blocked():
+    """HALT blocks an entry order — except the one armed netted restore."""
+    if not halted():
+        return False
+    p = getattr(_restore, "pass_", None)
+    if p and p["armed"] and not p["spent"]:
+        p["armed"], p["spent"] = False, True
+        return False
+    return True
+
+
+# ── machine-restart stop (Wei 2026-09-22) ────────────────────────────────────
+# Written by the runtime when the machine rebooted while trading
+# (runtime/command_listener.RESTART_STOP_PATH — same file; the runtime ships on
+# its own channel, so the string is repeated there and a check pins them equal),
+# removed only by the user's 啟動下單. Unlike HALT it blocks EVERY order —
+# entries, closes, reduces, SL/TP — from every caller that uses lib/order_*
+# (reconciler, TWAP/chase slices, Type B strategies, ad-hoc scripts): after a
+# reboot nothing trades until the user says so. Cancels and leverage changes
+# still pass: neither opens nor closes anything, and a cancel only lowers risk.
+RESTART_STOP_PATH = "state/reconciler_stopped.json"
+# cancel/leverage change nothing held; "reset" = order_paper.reset_account, the
+# user wiping their simulated book — not an order.
+_RESTART_PASS = frozenset({"cancel", "cancel_all", "leverage", "reset"})
+
+# The one exception (Wei 2026-09-22): the user's own close_all (the web's 暫停並關閉部位) still closes while
+# the machine stays stopped. command_listener._cmd_close_all writes this pass
+# right before launching manager/flatten.py; flatten claims it (claim_close_all_pass),
+# which lets THAT process's reduce orders through — nothing else, no entry, no
+# SL/TP, no other process. Strategies and the reconciler never hold it.
+CLOSE_ALL_PASS_PATH = "state/close_all_pass.json"
+CLOSE_ALL_PASS_TTL_S = 120
+_close_all_granted = False
+
+
+def restart_stopped():
+    return os.path.exists(RESTART_STOP_PATH)
+
+
+def claim_close_all_pass():
+    """manager/flatten.py only (tests/check_restart_stop_order_gate.py enumerates
+    every caller). True = this process may close positions during a restart stop.
+    The rename is atomic, so exactly one process consumes a pass; a pass older
+    than CLOSE_ALL_PASS_TTL_S is void. Code running as this user could forge the
+    file — but it could equally delete RESTART_STOP_PATH, so the pass adds no
+    power it did not already have, and it is reachable through no argument,
+    environment variable or public lib path."""
+    global _close_all_granted
+    claimed = f"{CLOSE_ALL_PASS_PATH}.{os.getpid()}"
+    try:
+        os.rename(CLOSE_ALL_PASS_PATH, claimed)
+    except OSError:
+        return False
+    try:
+        with open(claimed) as f:
+            ts = json.load(f).get("ts")
+        ok = isinstance(ts, (int, float)) and 0 <= time.time() - ts <= CLOSE_ALL_PASS_TTL_S
+    except (OSError, ValueError, AttributeError):
+        ok = False
+    finally:
+        try:
+            os.remove(claimed)
+        except OSError:
+            pass
+    if ok:
+        _close_all_granted = True
+    audit("close_all_pass_claimed" if ok else "close_all_pass_void")
+    return ok
+
+
+def check_restart_stop(intent, fields=None):
+    """Every order-lib gate calls this before its HALT check: raises Halted for
+    any order intent while the restart record exists. `fields` = the audit dict."""
+    fields = fields or {}
+    if intent in _RESTART_PASS or not restart_stopped():
+        return
+    if _close_all_granted and intent == "reduce":
+        audit("order_allowed_close_all", **{**fields, "intent": intent})
+        return
+    audit("order_denied_restart", **{**fields, "intent": intent})
+    raise Halted(
+        f"the machine restarted and trading is stopped until the user presses "
+        f"啟動下單 — {intent} order for {fields.get('symbol') or fields.get('instId') or fields.get('contract') or fields.get('currency_pair') or '?'} "
+        f"refused before reaching the venue (closes included). Never remove "
+        f"{RESTART_STOP_PATH} yourself.")
+
+
+# ── account hold: an unconfirmed exchange account gets no order at all ───────
+# manager/reconciler writes it (state/venue_account.json): a `book_hold` for a
+# venue — the bound key's account could not be matched to the one the bot's
+# positions are on — or a `pending` account-changed trip while HALT stands.
+# Until the user answers / presses 啟動下單, NO Blave order reaches that venue:
+# not an entry, not a close, not a protective order — a close there could sell
+# the user's own position on another account. This is what the report's
+# `halt.holds_all` promises, so it is enforced where every order passes: each
+# order lib's gate (check_account_hold), and lib.execute before each child
+# order of a running TWAP / chase. Cancels are not orders and still pass.
+ACCOUNT_GUARD_PATH = "state/venue_account.json"
+_HOLD_BLOCKS = frozenset(("entry", "reduce", "protective"))
+
+
+def account_held(venue):
+    if venue == "paper":
+        return False  # the simulated account is never someone else's
+    try:
+        with open(ACCOUNT_GUARD_PATH) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True  # unreadable guard state: fail closed, like HALT
+    if not isinstance(state, dict) or not venue:
+        return False
+    hold = state.get("book_hold")
+    if isinstance(hold, dict) and hold.get("venue") == venue:
+        return True
+    # an account-changed trip (or a bind that found one, before the reconciler
+    # took it over) holds while its HALT stands
+    pending, mark = state.get("pending"), state.get("bind_reset")
+    return ((isinstance(pending, dict) and pending.get("venue") == venue)
+            or (isinstance(mark, dict) and mark.get("venue") == venue
+                and not mark.get("acked"))) and halted()
+
+
+def check_account_hold(venue, intent, fields=None):
+    """Every order-lib gate calls this next to check_restart_stop."""
+    if intent not in _HOLD_BLOCKS or not account_held(venue):
+        return
+    fields = fields or {}
+    audit("order_denied_account_hold", **{**fields, "intent": intent, "venue": venue})
+    raise Halted(
+        f"{venue}: the bound key's exchange account is not confirmed as the one "
+        f"Blave's positions are on — no order is sent there until the user answers "
+        f"the account question and presses 啟動下單 ({intent} refused before "
+        f"reaching the venue)")
 
 
 def halt_info():

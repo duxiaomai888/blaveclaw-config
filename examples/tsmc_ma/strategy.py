@@ -9,13 +9,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODE          = "backtest"
 STRATEGY_NAME = "tsmc_ma"
 SYMBOL        = "2330"
 INTERVAL      = "1d"
 START         = "2015-01-01"
 END           = None
-FEE           = 0.003          # ~0.3% 證交稅 + 手續費（賣方含稅）
+FEE           = 0.003          # 單邊(per side):手續費 0.1425% ×2 + 證交稅 0.3%(賣方)平均 ≈ 0.29%
 
 SMA_FAST = 5                   # 週線
 SMA_SLOW = 60                  # 季線
@@ -49,6 +48,10 @@ def compute_signals(df, fast=SMA_FAST, slow=SMA_SLOW):
     signal = pd.Series(np.nan, index=df.index)
     signal[golden] = 1.0
     signal[death]  = 0.0
+    # Seed the state on the bars before the first cross: a backtest that starts inside a
+    # trend otherwise sits flat until the first cross (one seeded bar is dropped with WARMUP).
+    pre = signal.ffill().isna() & f.notna() & s.notna()
+    signal[pre] = (f > s)[pre].astype(float)
     return signal
 
 

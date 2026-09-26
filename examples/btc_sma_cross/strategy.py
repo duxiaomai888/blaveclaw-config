@@ -9,13 +9,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODE          = "backtest"
 STRATEGY_NAME = "btc_sma_cross"
 SYMBOL        = "BTCUSDT"
 INTERVAL      = "1h"
 START         = "2022-01-01"
 END           = None
-FEE           = 0.0005
+FEE           = 0.0005            # per side: Binance USDT-M taker 0.05%
 
 SMA_FAST = 45
 SMA_SLOW = 100

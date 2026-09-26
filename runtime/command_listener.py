@@ -49,8 +49,12 @@ import turn_slots
 
 try:
     import fcntl
-except ImportError:  # Windows — no concurrent .env writer there (first-boot
-    fcntl = None     # secret injection is a Linux systemd unit)
+except ImportError:  # Windows — _env_lock goes through msvcrt instead
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
 
 WORKSPACE = os.environ.get("BLAVE_AGENT_WORKSPACE", "/opt/blave-agent/workspace")
 WORKSPACE_STATE = os.path.join(WORKSPACE, "state")
@@ -106,12 +110,16 @@ _LOCAL_HOST = None  # local_daemon registers its reconciler supervisor here
 _LOCAL_ENV_PASS = ("PATH", "HOME", "LANG", "USER", "SHELL", "TMPDIR",
                    "BLAVE_AGENT_BASE", "BLAVE_AGENT_WORKSPACE", "BLAVE_AGENT_HOME",
                    "BLAVE_AGENT_STATE", "BLAVE_KLINE_SOURCE", "PYTHONPYCACHEPREFIX")
+# Windows only (see _local_child_env): prefixes stripped from the pass-through
+# environment; the _LOCAL_ENV_PASS names survive even when they match.
+_LOCAL_ENV_DROP = ("BLAVE_", "ANTHROPIC_", "OPENAI_")
 
 
-# Venues a local-mode machine may bind. Paper only until the real-key step
-# ships its permission check (withdrawals must be off) — widen it HERE, the one
-# gate both bind paths (the signed `credentials` command and the chat bind,
-# lib/venue.bind → _cmd_credentials) run through.
+# Venues a local-mode machine may bind. Paper only for now — widen it HERE, the
+# one gate both bind paths (the signed `credentials` command and the chat bind,
+# lib/venue.bind → _cmd_credentials) run through. Binance's permission check
+# (_binance_bind_check) is no longer what this is waiting for: it runs in every
+# mode now, cloud included.
 LOCAL_OPEN_VENUES = frozenset({"PAPER"})
 
 
@@ -119,14 +127,303 @@ def _local_mode():
     return os.environ.get("BLAVE_AGENT_LOCAL") == "1"
 
 
+class _BinanceCheckFailed(Exception):
+    """An apiRestrictions call that produced no verdict, tagged with the code
+    token shell/binance_check.js uses for the same situation (NETWORK,
+    RATE_LIMITED, IP_OR_KEY, BAD_KEY_FORMAT, BAD_SECRET, CLOCK, UNKNOWN) so the
+    app can map a machine-side refusal with the table it already has."""
+
+    def __init__(self, code, detail):
+        super().__init__(detail)
+        self.code = code
+
+
+# Every field must come back a boolean or there is no verdict — "absent means
+# false" is conservative for the trading flags and would wave a withdrawal key
+# through (shell/binance_check.js, the same four fields).
+_BINANCE_PERMISSION_FIELDS = ("enableWithdrawals", "enableSpotAndMarginTrading",
+                              "enableFutures", "ipRestrict")
+# Cooldown after Binance rate-limits us, monotonic deadline (audit S-2). The
+# caller has no back-off of its own: the web command endpoint has no rate limit
+# and a user whose connect attempt failed presses the button again — a 429
+# retried becomes a 418, which bans THIS MACHINE's IP from Binance and takes
+# the user's own strategy orders down with it. So the refusal has to cost
+# nothing on the wire. Same windows as the desktop app's own lock
+# (shell/binance_link.js:19 BACKOFF_MS). Plain module state, no lock: commands
+# are dispatched ONE AT A TIME (the poll loop's BLPOP, local_daemon's file
+# sweep) — whoever makes dispatch concurrent has to revisit this, or two
+# parallel binds both read a stale deadline and both go out.
+# SCOPE: this process. It covers the button (web command listener and the
+# desktop daemon are both long-lived), NOT the chat bind — lib/venue.py
+# exec_module()s a fresh copy of this file inside a per-turn child process, so
+# that path always starts at 0.0 while sharing the same outbound IP. Left that
+# way on purpose: a chat bind costs the user a whole turn to repeat, so it
+# cannot produce the rapid retries this window exists for, and persisting the
+# deadline to disk would need wall clock plus clamping for clock jumps — a
+# stale file or a bad clock would then lock someone out of binding entirely,
+# which is fail-closed in the wrong direction for a path nobody can spam.
+_BINANCE_RL_BACKOFF_S = {429: 60, 418: 300}
+_binance_rl_until = 0.0
+
+
+def _binance_restrictions(api_key, secret):
+    """GET /sapi/v1/account/apiRestrictions → the permission dict. Raises
+    _BinanceCheckFailed on anything else. Mainnet only, hard-coded: the host
+    decides which keys this verdict is about, so it is never a caller's choice.
+    -2015 (IP_OR_KEY) is told apart from the rest on purpose — on a cloud
+    machine the user's whitelist is the machine's IP, so "your whitelist does
+    not match this machine" is the single most likely refusal. A RATE_LIMITED
+    answer also arms a module-level cooldown (_binance_rl_until) that every
+    later call refuses inside, without a request."""
+    import hashlib
+    import hmac
+    global _binance_rl_until
+    if time.monotonic() < _binance_rl_until:
+        # inside the cooldown: refuse without touching the network. No seconds
+        # in the message on purpose — this string is shown to the user as is,
+        # and "try again in N seconds" is a promise the exact N would have to
+        # earn; the UI says "in a few minutes" instead (audit M-1).
+        raise _BinanceCheckFailed("RATE_LIMITED", "backing off from Binance's rate limit")
+    q = f"timestamp={int(time.time() * 1000)}&recvWindow=10000"
+    sig = hmac.new(secret.encode(), q.encode(), hashlib.sha256).hexdigest()
+    req = urllib.request.Request(
+        f"https://api.binance.com/sapi/v1/account/apiRestrictions?{q}&signature={sig}",
+        headers={"X-MBX-APIKEY": api_key})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # 429/418 = rate limited / IP banned: the caller must back off, not
+        # retry — a 429 retried turns into a 418 that also blocks the user's
+        # order flow from this machine (binance_check.js:32)
+        if e.code in (429, 418):
+            _binance_rl_until = time.monotonic() + _BINANCE_RL_BACKOFF_S[e.code]
+            raise _BinanceCheckFailed("RATE_LIMITED", f"HTTPError {e.code}")
+        try:
+            code = int((json.loads(e.read().decode("utf-8")) or {}).get("code"))
+        except Exception:  # noqa: BLE001 — an HTML error page has no code
+            code = None
+        raise _BinanceCheckFailed(
+            {-2015: "IP_OR_KEY", -2014: "BAD_KEY_FORMAT",
+             -1022: "BAD_SECRET", -1021: "CLOCK"}.get(code, "UNKNOWN"),
+            f"HTTPError {e.code}" + (f" binance {code}" if code is not None else ""))
+    except OSError as e:
+        # URLError's parent: a read timeout after connect raises socket.timeout
+        # (an OSError) rather than URLError, and "check your connection" is a
+        # better thing to tell the user than "unknown"
+        raise _BinanceCheckFailed("NETWORK", f"{type(e).__name__}")
+
+
+def _binance_bind_check(env):
+    """The ONE gate a Binance key passes before it reaches .env: the exchange
+    itself must say the key can trade and cannot withdraw (Wei 2026-09-25:
+    a withdrawal-enabled key is refused — a leaked key must not be able to
+    move money out; this reverses the 09-22 "bind, no warning" call). Runs in
+    every deployment mode —
+    desktop, cloud, and therefore the web 連接交易所 flow too, since that lands
+    on _cmd_credentials like everything else (Wei 2026-09-22). The check has to
+    happen HERE rather than on the connecting device because a cloud machine's
+    key is whitelisted to the MACHINE's IP: the same request from the user's
+    computer comes back -2015 and could never decide anything.
+
+    Returns the verdict dict on a pass (see _cmd_credentials for the shape);
+    raises ValueError on a refusal, with the message starting `<CODE>: ` —
+    WITHDRAW_ENABLED, TRADING_DISABLED, INCOMPLETE_PAIR, or a
+    _BinanceCheckFailed code. Fail-closed all the way: no answer, or an answer
+    that is not the permission object, is a refusal, never a silent write.
+    There is deliberately no parameter that skips any of this (binance_check.js
+    audit S3: a flag the caller can pass IS the off switch for the check).
+    Messages never carry a key value."""
+    got = {k.upper(): v for k, v in env.items()}
+    key, secret = got.get("BINANCE_API_KEY"), got.get("BINANCE_SECRET_KEY")
+    if not key or not secret:
+        # half a pair cannot be verified, and the sibling already in .env is
+        # not a stand-in: it is exactly what a two-step write would slip past
+        raise ValueError("INCOMPLETE_PAIR: 綁定 Binance 要 API key 與 secret 一起給,沒有儲存 "
+                         "(a Binance bind needs the API key and the secret together "
+                         "— not saved)")
+    try:
+        r = _binance_restrictions(key, secret)
+    except _BinanceCheckFailed as e:
+        raise ValueError(f"{e.code}: could not verify the key's permissions with "
+                         f"Binance ({e}) — not saved")
+    except Exception as e:  # urllib raises half a dozen types; none may pass
+        raise ValueError(f"UNKNOWN: could not verify the key's permissions with "
+                         f"Binance ({type(e).__name__}) — not saved")
+    if not isinstance(r, dict) or any(
+            not isinstance(r.get(f), bool) for f in _BINANCE_PERMISSION_FIELDS):
+        raise ValueError("UNKNOWN: Binance's permission answer could not be read "
+                         "— not saved")
+    # withdrawals first: a key that can move money out is refused whatever its
+    # trading flags say (same order as binance_check.js classify)
+    if r["enableWithdrawals"]:
+        raise ValueError("WITHDRAW_ENABLED: 這把金鑰有提領權限,沒有儲存 "
+                         "(this key has withdrawal permission — not saved)")
+    # spot OR futures: lib/order_binance places both (MARKET="spot" strategies),
+    # and reading the account needs neither — same rule as the app's screen
+    if not (r["enableSpotAndMarginTrading"] or r["enableFutures"]):
+        raise ValueError("TRADING_DISABLED: 這把金鑰沒有開交易權限(現貨與合約都沒開),沒有儲存 "
+                         "(neither spot nor futures trading is enabled on this key — not saved)")
+    # no whitelist = advise, don't block (Wei): the caller reports it, the bind
+    # goes through — same verdict split as binance_check.js:63
+    return {"checked": True, "code": "OK" if r["ipRestrict"] else "NO_IP_RESTRICT",
+            "ipRestrict": r["ipRestrict"], "spot": r["enableSpotAndMarginTrading"],
+            "futures": r["enableFutures"]}
+
+
+# The desktop's check for each venue it may bind besides Binance (which has its
+# own, every mode: _binance_bind_check): the fields the payload itself must
+# carry. The check is one signed read — lib/account_<id>.get_equity — with
+# those fields; the sibling already in .env is no stand-in, same rule as Binance.
+_LOCAL_KEY_CHECKS = {
+    "OKX": ("OKX_API_KEY", "OKX_SECRET_KEY", "OKX_PASSPHRASE"),
+    "BINGX": ("BINGX_API_KEY", "BINGX_SECRET_KEY"),
+    "GATEIO": ("GATEIO_API_KEY", "GATEIO_SECRET_KEY"),
+    "BYBIT": ("BYBIT_API_KEY", "BYBIT_SECRET_KEY"),
+}
+# The venues whose API can tell whether the calling key may withdraw
+# (lib/account_<id>.withdraw_enabled): OKX /account/config `perm`, Bybit
+# /user/query-api `permissions.Wallet`, BingX /account/apiPermissions
+# `enableWithdrawals`. Checked in EVERY mode (Wei 2026-09-25) — the desktop
+# inside _local_real_key_gate, a cloud box (and so the web connect flow) by
+# _withdraw_gate alone. Gate.io exposes no such field (its /account/detail has
+# none; /account/main_keys is undocumented) — the app tells the user to check
+# by hand instead (shell/renderer/trade.js CX_VENUES noWdCheck). A venue listed
+# here whose lib lacks the function is refused, never silently unchecked.
+_WITHDRAW_CHECKED = frozenset({"OKX", "BINGX", "BYBIT"})
+
+
+def _scrub(e, secrets):
+    """An exception's text with the payload's key values and URLs blanked, for
+    a refusal message that reaches the user's screen."""
+    msg = f"{type(e).__name__}: {e}"
+    for v in secrets:
+        if len(v) >= 4:
+            msg = msg.replace(v, "•••")
+    return re.sub(r"https?://\S+", "<url>", msg)[:200]
+
+
+def _withdraw_gate(venue_id, got, full):
+    """Refuse a _WITHDRAW_CHECKED venue's key that may withdraw. `got` = the
+    payload's own credential fields, `full` = those plus the .env flags the lib
+    reads (demo host …). Raises ValueError `<CODE>: <text>`: INCOMPLETE_PAIR
+    (the payload must carry the whole pair — the sibling already in .env is no
+    stand-in, same rule as Binance), WITHDRAW_ENABLED, UNKNOWN (endpoint
+    refused / answer not a bool), or "no permission check" when this
+    workspace's lib lacks withdraw_enabled. Fail-closed."""
+    venue = venue_id.lower()
+    need = _LOCAL_KEY_CHECKS[venue_id]
+    if not all(got.get(k) for k in need):
+        raise ValueError(f"INCOMPLETE_PAIR: {venue} needs {' + '.join(need)} together — not saved")
+    try:
+        wd = __import__(f"lib.account_{venue}", fromlist=["withdraw_enabled"]).withdraw_enabled
+    except (ImportError, AttributeError):
+        raise ValueError(f"no permission check exists for {venue} on this workspace "
+                         "(run 更新 blave agent first) — not saved") from None
+    try:
+        w = wd(full)
+    except Exception as e:  # the permission endpoint refusing is no verdict
+        raise ValueError(f"UNKNOWN: could not read the {venue} key's withdrawal permission "
+                         f"({_scrub(e, got.values())}) — not saved") from None
+    if not isinstance(w, bool):
+        raise ValueError(f"UNKNOWN: {venue}'s withdrawal-permission answer could not be read "
+                         "— not saved")
+    if w:
+        raise ValueError(f"WITHDRAW_ENABLED: 這把 {venue} 金鑰有提領權限,沒有儲存 "
+                         f"(this {venue} key has withdrawal permission — not saved)")
+
+
+def _env_flags():
+    """.env's non-credential lines (BYBIT_DEMO, GATEIO_DEMO … pick the host)."""
+    try:
+        with open(os.path.join(WORKSPACE, ".env")) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return {}
+    out = {}
+    for line in lines:
+        k, sep, v = line.partition("=")
+        k = k.strip()
+        if sep and k and not k.startswith("#") and not _CRED_ENV_RE.match(k):
+            out[k.upper()] = v.strip()
+    return out
+
+
+def _local_real_key_gate(venue_id, env):
+    """Desktop only: a real venue's keys reach .env only after that venue
+    accepted them — the check runs before anything is read for the write or
+    mutated, so a refusal leaves the machine as it was. A venue with no entry
+    in _LOCAL_KEY_CHECKS (or no lib/account_<id> on this workspace) is never
+    written on the user's own computer, however LOCAL_OPEN_VENUES is widened.
+    Binance is not routed here — _binance_bind_check gates it in every mode.
+
+    Raises ValueError `<CODE>: <text>`: INCOMPLETE_PAIR, REJECTED (the venue's
+    own error, key values and URLs scrubbed), UNKNOWN (an answer that is not an
+    equity, or a withdrawal answer that is not a bool), WITHDRAW_ENABLED (the
+    key may withdraw — _WITHDRAW_CHECKED venues only). Fail-closed: no answer
+    is a refusal."""
+    venue = venue_id.lower()
+    need = _LOCAL_KEY_CHECKS.get(venue_id)
+    if need is None:
+        raise ValueError(f"no permission check exists for {venue} — not saved")
+    got = {k.upper(): v for k, v in env.items()}
+    if not all(got.get(k) for k in need):
+        raise ValueError(f"INCOMPLETE_PAIR: {venue} needs {' + '.join(need)} together — not saved")
+    try:
+        getter = __import__(f"lib.account_{venue}", fromlist=["get_equity"]).get_equity
+    except (ImportError, AttributeError):
+        raise ValueError(f"no permission check exists for {venue} on this workspace "
+                         "(run 更新 blave agent first) — not saved") from None
+    full = {**_env_flags(), **got}
+    try:
+        r = getter(full)
+    except Exception as e:  # requests / venue errors: any of them is a refusal
+        raise ValueError(f"REJECTED: {venue} did not accept this key ({_scrub(e, got.values())}) "
+                         "— not saved") from None
+    if not isinstance(r, dict) or isinstance(r.get("equity"), bool) \
+            or not isinstance(r.get("equity"), (int, float)):
+        raise ValueError(f"UNKNOWN: {venue}'s account answer could not be read — not saved")
+    if venue_id in _WITHDRAW_CHECKED:
+        _withdraw_gate(venue_id, got, full)
+
+
 def _local_child_env(**extra):
     """Env for every workspace subprocess in local mode. Allowlist like the
     Linux one, plus the path variables that have no /opt/blave-agent default to
-    fall back on here. Any other BLAVE_* stays out of strategy code."""
-    env = {k: v for k, v in os.environ.items() if k in _LOCAL_ENV_PASS}
+    fall back on here. Any other BLAVE_* stays out of strategy code.
+
+    Windows: the allowlist starves python (no SystemRoot → it will not even
+    start; USERPROFILE / APPDATA / TEMP / PATHEXT / COMSPEC likewise), so there
+    it is a denylist — pass the environment through and strip the secrets,
+    the same shape _launch_flatten uses. Env names are case-insensitive on
+    Windows, hence the upper()."""
+    if os.name == "nt":
+        env = {k: v for k, v in os.environ.items()
+               if k in _LOCAL_ENV_PASS or not k.upper().startswith(_LOCAL_ENV_DROP)}
+    else:
+        env = {k: v for k, v in os.environ.items() if k in _LOCAL_ENV_PASS}
     env["BLAVE_AGENT_WORKSPACE"] = WORKSPACE
     env.update(extra)
     return env
+
+
+def _child_kw(**kw):
+    """Keyword arguments every subprocess this process starts must carry, on
+    top of the call's own. stdin is /dev/null unless the caller chose one: a
+    child inherits our stdin otherwise, and in the desktop app that is the
+    overlapped pipe Electron hands local_daemon for `--secret-stdin`, with the
+    parent-watch thread blocked in read(0) on it. A python that inherits it
+    hangs at interpreter start on Windows (0.1.3 Lightsail, 2026-09-25: every
+    wait_for_bar tick stuck at 3–8 MB, 36 orphaned interpreters an hour, and
+    the 30-minute kill() only reached the venv launcher) — and no child has
+    any business holding the secret channel anyway. Windows children also get
+    CREATE_NO_WINDOW: a console child of a GUI app would flash a console per
+    tick. Same shape on the cloud boxes; there it is merely hygiene."""
+    if "input" not in kw:  # run() refuses stdin= next to input=
+        kw.setdefault("stdin", subprocess.DEVNULL)
+    if os.name == "nt":
+        kw["creationflags"] = kw.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+    return kw
 
 
 def _in_workspace(fn, *a, **kw):
@@ -157,11 +454,10 @@ def _cmd_halt(args):
 
 
 # ── downtime pause (lib/downtime.py; rule: references/manager.md) ────────────
-# A stop that crossed a live strategy's bar close freezes every live strategy
-# until the user decides per strategy. `resume` / `resume_wait` take
-# {"strategies": [names]} for that; without it they stay whole-machine commands
-# and additionally end every pause — so a page that only knows the two
-# whole-machine buttons can always get a machine out of one.
+# A stop that crossed a live strategy's bar close freezes every live strategy.
+# The exit the pages offer is the whole-machine start: `resume` / `resume_wait`
+# without args, which also end every pause. The per-strategy form
+# ({"strategies": [names]}) is still accepted but no page sends it.
 
 def _strategy_names_arg(args):
     """None when the command is whole-machine, else the validated name list."""
@@ -188,6 +484,43 @@ def _downtime_lib(optional=False):
     return downtime
 
 
+def _book_hold_asking():
+    """The report's account_guard.book_hold, or None: a key change the machine
+    could not match to the account Blave's positions are on, awaiting the
+    user's book_account_confirm."""
+    try:
+        with open(_ACCOUNT_GUARD_PATH) as f:
+            hold = (json.load(f) or {}).get("book_hold")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return hold if isinstance(hold, dict) and hold.get("ask") and hold.get("venue") else None
+
+
+def _held_for_book(hold):
+    """啟動下單 while a book hold is unanswered: the HALT stays, carrying the
+    hold's reason — the page must not read 執行中 while that venue trades
+    nothing. Only book_account_confirm resolves it; then 啟動下單 again."""
+    from lib.guard import trip_halt
+
+    trip_halt(hold.get("reason") or f"{hold['venue']}: account unconfirmed", "reconciler")
+    return f"held: {hold['venue']} awaits book_account_confirm"
+
+
+def _ack_bind_reset():
+    """The user's 啟動下單 after a bind found another account: that start is the
+    confirmation. The reconciler still owes the notice (it sends it when it
+    next takes the marker); the marker no longer holds anything."""
+    try:
+        with open(_ACCOUNT_GUARD_PATH) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return
+    mark = state.get("bind_reset") if isinstance(state, dict) else None
+    if isinstance(mark, dict) and not mark.get("acked"):
+        mark["acked"] = True
+        _write_atomic(_ACCOUNT_GUARD_PATH, json.dumps(state))
+
+
 def _cmd_resume(args):
     from lib.guard import clear_halt
 
@@ -196,6 +529,9 @@ def _cmd_resume(args):
         # one strategy's decision never touches the machine-wide HALT
         done = _downtime_lib().decide(names, "sync")
         return f"resumed strategies={len(done)}"
+    hold = _book_hold_asking()
+    if hold:
+        return _held_for_book(hold)
     # 「啟動並補齊部位」must honor the choice: a signal gate left over from an
     # earlier resume_wait would silently keep excluding those strategies from
     # reconciling — remove it BEFORE clearing HALT (mirror of resume_wait's
@@ -210,6 +546,7 @@ def _cmd_resume(args):
     downtime = _downtime_lib(optional=True)
     if downtime is not None:
         downtime.clear_all()
+    _ack_bind_reset()
     clear_halt("web")
     return "resumed"
 
@@ -245,6 +582,9 @@ def _cmd_resume_wait(args):
     if names is not None:
         done = _downtime_lib().decide(names, "wait")
         return f"resumed_wait strategies={len(done)}"
+    hold = _book_hold_asking()
+    if hold:
+        return _held_for_book(hold)
     cfg = load_portfolio_config()
     amounts = strategy_amounts(cfg)
     exchanges = cfg.get("exchanges", {})
@@ -262,6 +602,7 @@ def _cmd_resume_wait(args):
             raise RuntimeError(
                 f"resume_wait: could not read a strategy state ({e}) — not resuming; "
                 f"press start again in a few seconds") from e
+        _ack_bind_reset()
         clear_halt("web")
         return f"resumed_wait gated={gated} waiting={waiting}"
     gate = {}
@@ -273,7 +614,12 @@ def _cmd_resume_wait(args):
             continue  # no state yet = nothing to gate; it trades on first signal
         try:
             with open(state_path) as f:
-                gate[name] = float(_json.load(f).get("position", 0))
+                st = _json.load(f)
+            # a portfolio (Type C, lib/runner.typec_live_state) has no single position:
+            # its "new signal" is the next rebalance, so the baseline is the bar it
+            # last rebalanced on (lib/portfolio.aggregate_portfolio compares it)
+            gate[name] = float(st.get("rebalance_at") or 0) if isinstance(st.get("weights"), dict) \
+                else float(st.get("position", 0))
         except (ValueError, TypeError, OSError) as e:
             # A CORRUPT/mid-write state.json is not "nothing to gate" — silently
             # skipping would leave this strategy un-gated and it would catch up
@@ -288,6 +634,7 @@ def _cmd_resume_wait(args):
     with open(tmp, "w") as f:
         _json.dump(gate, f, indent=2)
     os.replace(tmp, gate_path)
+    _ack_bind_reset()
     clear_halt("web")
     return f"resumed_wait gated={len(gate)}"
 
@@ -304,6 +651,16 @@ _CRED_ENV_RE = re.compile(
 # away from being read as a "bound venue" and silently evicted by an unrelated
 # rebind — see the RDP Password Incident this fleet already had.
 _CRED_KEEP_IDS = {"BLAVE", "ADMIN"}
+# Data-source credentials are named DATA_<SOURCE>_<FIELD> (BYO Data). A
+# DATA_POLYGON_API_KEY + DATA_POLYGON_SECRET_KEY pair has the exact shape of a
+# bound venue, and read as one it gets evicted by the next exchange bind — with
+# a HALT for a venue that never existed. A prefix, not a _CRED_KEEP_IDS entry:
+# the source list is open-ended and that set is an exact match.
+_DATA_CRED_PREFIX = "DATA_"
+
+
+def _is_data_cred_id(cred_id):
+    return cred_id.upper().startswith(_DATA_CRED_PREFIX)
 
 
 @contextlib.contextmanager
@@ -313,9 +670,18 @@ def _env_lock():
     injector's write can land inside our read→replace window (or vice versa)
     and either side's lines get eaten — 29026 2026-08-07 lost blave_api_key
     exactly this way. Lock file, not .env itself: our writes os.replace the
-    .env inode, and a lock on a replaced inode guards nothing."""
+    .env inode, and a lock on a replaced inode guards nothing.
+
+    Windows (desktop app): the other writer is the shell's data-source form
+    (shell/datasrc.js LOCK_PY), which holds msvcrt LK_LOCK on byte 0 of the
+    same .env.lock — _env_lock_nt takes exactly that byte, so the two exclude
+    each other. Only that file and that byte count, so keep them in sync."""
     if fcntl is None:
-        yield
+        if msvcrt is None:
+            yield
+            return
+        with _env_lock_nt():
+            yield
         return
     fd = os.open(os.path.join(WORKSPACE, ".env.lock"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -325,12 +691,39 @@ def _env_lock():
         os.close(fd)  # closing the fd releases the flock
 
 
+@contextlib.contextmanager
+def _env_lock_nt():
+    """msvcrt twin of _env_lock (same shape as lib/order_paper.py): LK_LOCK
+    gives up with OSError after ~10s, so loop until it lands — flock(LOCK_EX)
+    waits forever too. Unlock needs the position the lock was taken at (0),
+    and the OS drops the lock with the process either way."""
+    fd = os.open(os.path.join(WORKSPACE, ".env.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                pass
+        yield
+    finally:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        os.close(fd)
+
+
 def _venue_cred_ids(lines, skip_ids=frozenset()):
     """IDs holding a complete credential pair ({ID}_API_KEY + one of
     {ID}_SECRET_KEY / {ID}_PASSWORD / {ID}_PASSPHRASE) in these .env lines —
     the pair IS a bound venue, TW brokers same pool; a lone key with no
     secret-shaped sibling is a service key (OPENAI_API_KEY), not a venue.
-    Single source for both the eviction sweep and bound/unbound checks.
+    Single source for both the eviction sweep and bound/unbound checks — so
+    DATA_* ids (data sources, never a venue) are dropped here, once, for the
+    eviction sweep, the bind manifest, routing inheritance and the scheduler's
+    bound check alike.
     Capital's shape is {ID}_API_KEY + {ID}_PASSWORD (canonical env names
     decided 2026-08-14, references/capital-broker.md) — PASSWORD joined the
     accepted secret suffixes for this (fixes audit B6: capital never read as
@@ -338,7 +731,8 @@ def _venue_cred_ids(lines, skip_ids=frozenset()):
     suffixes = {}
     for l in lines:
         m = _CRED_ENV_RE.match(l.split("=", 1)[0].strip())
-        if m and m.group(1).upper() not in _CRED_KEEP_IDS | skip_ids:
+        if (m and m.group(1).upper() not in _CRED_KEEP_IDS | skip_ids
+                and not _is_data_cred_id(m.group(1))):
             suffixes.setdefault(m.group(1).upper(), set()).add(m.group(2).upper())
     return {
         i for i, s in suffixes.items()
@@ -378,6 +772,252 @@ def _write_ui_amounts_mirror(amounts, exchanges, only_if_present=False):
         os.replace(tmp, path)  # atomic, same convention as portfolio_config
     except OSError as e:
         _log(f"ui amounts mirror write failed: {type(e).__name__}: {e}")
+
+
+def _fresh_portfolio_config():
+    """The dict a machine's FIRST portfolio_config.json starts from: self_ledger
+    on — the bot diffs against its own quantity book, so a held position
+    never trades on a mark move — with the book's baseline written here,
+    BEFORE the caller writes the config. The reconciler refuses to trade on
+    the flag without a baseline (lib/portfolio.reconcile), so a crash between
+    the two writes must leave seed-without-flag (inert), never the reverse.
+    Fresh-start shape mirrors lib/portfolio.seed_ledger — duplicated, not
+    imported: this runtime never imports the workspace lib. An account that
+    already holds something is the user's by this baseline, which is the one
+    safe reading with no reconciler history on the machine. An EXISTING config
+    is not touched here: a missing key is decided by the workspace lib
+    (lib/portfolio.own_positions_only — the book, since 2026-09-23; account-read
+    on an older lib). Nor is a machine that has TRADED on a real venue but lost
+    or never kept its config: its account may hold bot positions a zero book
+    would re-buy on top of — the lib's first round sorts that out. Traded = a
+    non-paper fill in manager/orders.jsonl, or any fill while paper is bound;
+    paper fills say nothing about a real account.
+    NOT last_reconcile.json: the never-configured read-only reconciler
+    (lib/portfolio.reconcile) writes that snapshot every round without placing
+    anything, and counting it made the user's FIRST save come out without
+    self_ledger — the next round then read their manual positions as the bot's
+    and closed them (audit 2026-09-23 B1, measured)."""
+    if _traded_on_a_real_venue():
+        return {}
+    if not _ledger_seeded():
+        _write_fresh_ledger_seed()  # a hand-run seed_ledger.py baseline stands
+    return {"self_ledger": True}
+
+
+def _traded_on_a_real_venue():
+    """manager/orders.jsonl has a fill on anything but the paper account — or on
+    paper too, when paper is the venue bound now: those fills ARE this account's
+    bot position, and a zero book would buy it again (version matrix V1-10).
+    Paper fills say nothing about a real account (2026-09-23: two paper fills
+    kept Wei's Binance config off the book, and his manual longs read as the
+    bot's). Unreadable counts as traded — the conservative answer."""
+    paper_bound = False
+    try:
+        with open(os.path.join(WORKSPACE, ".env")) as f:
+            paper_bound = "PAPER" in _venue_cred_ids(f.read().splitlines())
+    except OSError:
+        pass
+    path = os.path.join(WORKSPACE, "manager", "orders.jsonl")
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    if paper_bound or json.loads(line).get("exchange") != "paper":
+                        return True
+                except (ValueError, AttributeError):
+                    return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def _ledger_seeded():
+    """ledger_seed.json carries a whole-account cutoff. A file with per-symbol
+    rows only (lib zero_ledger_symbols after a flatten) is no baseline."""
+    try:
+        with open(os.path.join(WORKSPACE, "manager", "ledger_seed.json")) as f:
+            return bool((json.load(f) or {}).get("seeded_at"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _write_fresh_ledger_seed():
+    """The bot's book starts at zero from now: everything on the account is the
+    user's. Same shape as lib/portfolio.seed_ledger(absorb=False) — duplicated,
+    this runtime never imports the workspace lib."""
+    from datetime import datetime
+    seed_path = os.path.join(WORKSPACE, "manager", "ledger_seed.json")
+    os.makedirs(os.path.dirname(seed_path), exist_ok=True)
+    doc = {"seeded_at": datetime.utcnow().isoformat(), "symbols": {}}
+    tmp = seed_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=2)
+    os.replace(tmp, seed_path)
+
+
+def _ws_lib_resets_by_account():
+    """The workspace lib/portfolio.py keeps each venue's book per exchange
+    account (seed `venue_account`, reset through `venue_reset`)."""
+    try:
+        with open(os.path.join(WORKSPACE, "lib", "portfolio.py"), encoding="utf-8",
+                  errors="replace") as f:
+            return "def book_account_check" in f.read()
+    except OSError:
+        return False
+
+
+_ws_portfolio_mtime = {}
+
+
+def _ws_portfolio():
+    """The workspace lib/portfolio.py — re-read when the file changed since it
+    was imported (更新 can replace it under this long-lived process). Called
+    only inside _in_workspace (cwd + sys.path)."""
+    import importlib
+    mod = importlib.import_module("lib.portfolio")
+    try:
+        mtime = os.path.getmtime(mod.__file__)
+    except (OSError, TypeError):
+        return mod
+    seen = _ws_portfolio_mtime.setdefault(mod.__file__, mtime)
+    if mtime != seen:
+        mod = importlib.reload(mod)
+        _ws_portfolio_mtime[mod.__file__] = mtime
+    return mod
+
+
+def _mark_book_hold(venue, reason):
+    """state/venue_account.json `book_hold`, so the report asks the user at once
+    even while no reconciler runs; a running one re-derives the same hold on
+    its next round (the key changed) and HALTs once."""
+    try:
+        with open(_ACCOUNT_GUARD_PATH) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    held = state.get("book_hold") if isinstance(state.get("book_hold"), dict) else {}
+    since = held.get("since") if held.get("venue") == venue else None
+    state["book_hold"] = {"venue": venue, "reason": str(reason or "")[:300],
+                          "since": since or int(_clock()), "ask": True,
+                          "halted": bool(held.get("halted")) if held.get("venue") == venue else False}
+    _write_atomic(_ACCOUNT_GUARD_PATH, json.dumps(state))
+
+
+def _mark_bind_account_change(venue, reason):
+    """A bind found another exchange account on `venue`. HALT now (source
+    reconciler, its own account-changed reason) and leave `bind_reset` in the
+    account-guard state: the reconciler's next check takes it exactly like an
+    account change it found itself — pending trip, HALT re-sent with the
+    notice (manager/reconciler._get_positions_guarded). Raises if the HALT did
+    not land: the caller then leaves the book for the reconciler to reset."""
+    from lib.guard import trip_halt
+
+    trip_halt(reason, "reconciler")
+    try:
+        with open(_ACCOUNT_GUARD_PATH) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    state["bind_reset"] = {"venue": venue, "at": int(_clock())}
+    _write_atomic(_ACCOUNT_GUARD_PATH, json.dumps(state))
+
+
+def _bind_book_accounts(venue_ids):
+    """After a bind: read each newly bound venue's exchange account id with the
+    keys just written and record it as that venue's book account
+    (lib.portfolio.book_account_check) — later key changes are then decided
+    without asking. An unreadable id never refuses the bind: the key's
+    fingerprint is recorded instead, or — when the key changed under an open
+    book — the report asks the user (book_hold). Paper is exempt (the
+    reconciler reads its ledger stamp); a venue without get_account_id
+    (群益, a custom exchange) records nothing. Best-effort: the keys are
+    already written. Returns {venue: verdict}."""
+    out = {}
+    ids = sorted(v.lower() for v in venue_ids if v.upper() != "PAPER")
+    if not ids or not _ws_lib_resets_by_account():
+        return out
+    try:
+        pf = _ws_portfolio()
+        from lib.venue_wiring import read_env
+        env = read_env(os.path.join(WORKSPACE, ".env"))
+    except Exception as e:
+        _log(f"book account not recorded ({type(e).__name__})")
+        return out
+    for v in ids:
+        try:
+            acct = pf._read_account_id(v, env)
+            if acct[0] is None and acct[1] is None:
+                continue
+            rec_id = ((pf._load_ledger_seed().get("venue_account") or {}).get(v) or {}).get("id")
+            if acct[0] is not None and rec_id and str(rec_id) != acct[0]:
+                # another account: HALT first — nothing may trade the new account on
+                # the reset book before the user's 啟動下單 — then reset
+                _mark_bind_account_change(v, pf.account_changed_reason(v))
+            verdict, detail = pf.book_account_check(env, v, account=acct)
+        except Exception as e:
+            _log(f"book account not recorded for {v} ({type(e).__name__})")
+            continue
+        out[v] = verdict
+        if verdict == "unreadable":
+            try:
+                _mark_book_hold(v, detail)
+            except OSError as e:
+                _log(f"book hold not recorded for {v} ({type(e).__name__})")
+    return out
+
+
+def _cmd_book_account_confirm(args):
+    """The user's one-tap answer to a book hold (report `account_guard.book_hold`):
+    is the key now bound on `venue` the same exchange account Blave's positions
+    there were opened on? {"venue": "<id>", "same": true|false}. true keeps the
+    bot's book; false starts it empty (what the bot held becomes the user's).
+    Never places or cancels an order; idempotent; audited
+    (lib.portfolio.book_account_confirm). Clears the hold and kicks a running
+    reconciler so it re-checks now; a HALT stays for the user's 啟動下單."""
+    venue = str(args.get("venue") or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9]{2,20}", venue):
+        raise ValueError("bad venue")
+    same = args.get("same")
+    if not isinstance(same, bool):
+        raise ValueError("same must be true or false")
+    if not _ws_lib_resets_by_account():
+        raise ValueError("this workspace lib keeps no per-account book — update the workspace")
+    from lib.venue_wiring import read_env
+    outcome = _ws_portfolio().book_account_confirm(
+        venue, same, env=read_env(os.path.join(WORKSPACE, ".env")))
+    if outcome in ("kept", "reset"):
+        try:
+            with open(_ACCOUNT_GUARD_PATH) as f:
+                state = json.load(f)
+            hold = state.get("book_hold") if isinstance(state, dict) else None
+            if isinstance(hold, dict) and hold.get("venue") == venue:
+                state.pop("book_hold")
+                _write_atomic(_ACCOUNT_GUARD_PATH, json.dumps(state))
+        except (OSError, ValueError):
+            pass
+    # kicked on every outcome: a stale question the answer could not act on is
+    # re-derived by the reconciler within a poll, not at the 5-minute heartbeat
+    _kick_reconciler()
+    _log(f"book account on {venue}: {'same' if same else 'different'} → {outcome}")
+    return {"venue": venue, "same": same, "outcome": outcome}
+
+
+def _kick_reconciler():
+    """Touch state/execution/kick (a mtime the reconciler watches): a round
+    follows within one poll instead of at the 5-minute heartbeat. Best-effort."""
+    try:
+        kick = os.path.join(WORKSPACE, "state", "execution", "kick")
+        os.makedirs(os.path.dirname(kick), exist_ok=True)
+        with open(kick, "a"):
+            os.utime(kick, None)
+    except OSError:
+        pass
 
 
 def _write_ui_cred_manifest(lines):
@@ -455,11 +1095,41 @@ def _cmd_credentials(args):
     {ID}_PASSWORD / {ID}_PASSPHRASE sibling) — that shape IS the previously
     bound venue(s); singleton service keys (OPENAI_API_KEY — no secret sibling),
     venue support keys (SINOPAC_CA_PATH), user-added lines and comments all
-    survive, deliberately.
+    survive, deliberately. DATA_<SOURCE>_* lines (data-source keys) also
+    survive every bind — and are refused as a payload: that prefix is never a
+    venue, so writing one here would be a bind nothing can see.
 
     Also the chat-bind path: blave-agent's lib/venue.py loads this module
     from <base>/current and calls _in_workspace(_cmd_credentials, {"env": …})
     and reads _venue_cred_ids over .env — keep those names and shapes stable.
+
+    A Binance payload is checked against the exchange first
+    (_binance_bind_check) — in EVERY mode, so the web 連接交易所 flow and the
+    desktop connect screen both go through it, since all of them end here
+    (Wei 2026-09-22). Two consequences for the web path, which previously
+    wrote whatever it was handed: a key with no trading permission is now
+    refused, and a bind fails when Binance cannot be reached from the machine
+    (fail-closed — the user retries). Everything that is not Binance (paper,
+    OKX, Gate.io, Bybit, BingX, the TW brokers, data-source keys) is untouched:
+    no call, same behaviour as before — except OKX, BingX and Bybit, whose
+    key's withdrawal permission is refused in every mode (_withdraw_gate), and
+    the desktop, where those plus Gate.io first pass _local_real_key_gate.
+
+    Ack shape (`_send_ack`). Success: `result` = {"credentials": N, "binance":
+    {"checked": true, "code": "OK"|"NO_IP_RESTRICT", "ipRestrict", "spot",
+    "futures"} | null, "book_account"?: {venue: "ok"|"reset"|"unreadable"|
+    "transient"}} — `book_account` = what the bind-time account-id read decided
+    for each venue's book (_bind_book_accounts; absent when nothing was read);
+    `binance` is null when the payload was not a Binance
+    bind, and a runtime that predates this returns the STRING "credentials=N"
+    instead, which is how a caller tells "not checked here" from "checked and
+    clean" (the app labels an unchecked bind honestly rather than claiming a
+    verdict it never got). `ipRestrict` is reported, never enforced: a key with
+    no whitelist binds, the caller only warns. Refusal: `ok:false` and `error`
+    = "ValueError: <CODE>: <text>", CODE being
+    WITHDRAW_ENABLED, TRADING_DISABLED, INCOMPLETE_PAIR, or one of binance_check.js's
+    inconclusive codes (NETWORK, RATE_LIMITED, IP_OR_KEY, BAD_KEY_FORMAT,
+    BAD_SECRET, CLOCK, UNKNOWN) — nothing was written in any of those cases.
     """
     env = args.get("env")
     if not isinstance(env, dict) or not env:
@@ -479,8 +1149,31 @@ def _cmd_credentials(args):
     # platform keys
     if writing & _CRED_KEEP_IDS:
         raise ValueError("platform credentials are not writable here")
+    # DATA_* ids are invisible to every venue check (_venue_cred_ids), so a
+    # custom exchange the web slugs to DATA_MARKET would bind without eviction,
+    # never reach the manifest, never schedule — all silently. Refuse loudly;
+    # data-source keys have no business on this command either.
+    if any(_is_data_cred_id(i) for i in writing):
+        raise ValueError(
+            "交易所名稱不能以「DATA_」開頭——這個前綴保留給資料來源金鑰,請換一個名稱再綁定 "
+            "(exchange names starting with DATA_ are reserved for data-source keys — "
+            "use a different name)")
     if _local_mode() and writing - LOCAL_OPEN_VENUES:
         raise ValueError("這一版電腦版只開放模擬交易(paper),真實交易所的綁定尚未開放")
+    if _local_mode():
+        for vid in sorted(writing - {"PAPER", "BINANCE"}):
+            _local_real_key_gate(vid, env)  # raises = nothing written
+    else:
+        # cloud box (and so the web connect flow): no account read, but a key
+        # that can withdraw is refused here too — one request to the venue
+        got = {k.upper(): v for k, v in env.items()}
+        for vid in sorted(writing & _WITHDRAW_CHECKED):
+            _withdraw_gate(vid, got, {**_env_flags(), **got})
+    # Binance permission gate, every mode. Last thing before the write and
+    # nothing has been read or mutated yet, so a refusal leaves the machine
+    # exactly as it was — no half-written .env, no eviction of the venue the
+    # user is currently trading on, no manifest, no rebind halt.
+    binance = _binance_bind_check(env) if "BINANCE" in writing else None
 
     path = os.path.join(WORKSPACE, ".env")
     with _env_lock():
@@ -522,6 +1215,10 @@ def _cmd_credentials(args):
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)  # atomic — a torn .env would strand the machine keyless
     _write_ui_cred_manifest(kept)  # final lines = the UI-confirmed bound set
+    book_account = {}
+    if binding:
+        _unpark_account_state(_account_identity(kept))
+        book_account = _bind_book_accounts(binding)
     if evicted_ids:
         # eviction == unbind for the old venue: halt like credentials_remove
         # does, or strategies still routed there run blind until auto-halt
@@ -566,7 +1263,11 @@ def _cmd_credentials(args):
             _sync_strategy_crons(set(amounts))
     except (OSError, ValueError, AttributeError):
         pass
-    return f"credentials={len(env)}"  # count only — never the keys or values
+    # count only — never the keys or values
+    out = {"credentials": len(env), "binance": binance}
+    if book_account:
+        out["book_account"] = book_account
+    return out
 
 
 # ── strategy signal-refresh scheduling(選到就跑,2026-08-03 拍板)────────────
@@ -741,7 +1442,7 @@ def _sync_strategy_tasks_windows(names):
         with _cron_lock:
             out = subprocess.run(["schtasks", "/query", "/fo", "csv", "/nh"],
                                  capture_output=True, text=True, errors="replace",
-                                 timeout=30)
+                                 timeout=30, **_child_kw())
             existing = set()
             for line in (out.stdout or "").splitlines():
                 tn = line.split('","')[0].strip('"').lstrip("\\")
@@ -753,7 +1454,7 @@ def _sync_strategy_tasks_windows(names):
             for n in sorted(existing - wanted):
                 r = subprocess.run(["schtasks", "/delete", "/tn", _WIN_TASK_PREFIX + n, "/f"],
                                    capture_output=True, text=True, errors="replace",
-                                   timeout=30)
+                                   timeout=30, **_child_kw())
                 if r.returncode != 0:  # a survivor keeps refreshing signals unseen
                     _log(f"task sync: delete {n} failed: "
                          f"{(r.stderr or r.stdout or '').strip()[:120]}")
@@ -764,7 +1465,7 @@ def _sync_strategy_tasks_windows(names):
                 r = subprocess.run(["schtasks", "/create", "/tn", _WIN_TASK_PREFIX + n,
                                     "/tr", tr, "/ru", "SYSTEM", "/f"] + cadence,
                                    capture_output=True, text=True, errors="replace",
-                                   timeout=30)
+                                   timeout=30, **_child_kw())
                 if r.returncode != 0:
                     _log(f"task sync: create {n} failed: "
                          f"{(r.stderr or r.stdout or '').strip()[:120]}")
@@ -776,7 +1477,7 @@ def _sync_strategy_tasks_windows(names):
                     # kicking those too can race two writers into state.json,
                     # which lib/execute writes non-atomically (audit B1)
                     subprocess.run(["schtasks", "/run", "/tn", _WIN_TASK_PREFIX + n],
-                                   capture_output=True, timeout=30)
+                                   capture_output=True, timeout=30, **_child_kw())
             _log(f"task sync: {len(wanted)} strategy task(s)")
     except Exception as e:
         _log(f"task sync failed: {type(e).__name__}: {e}")
@@ -808,7 +1509,8 @@ def _sync_strategy_crons(names):
         return
     try:
         with _cron_lock:
-            out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+            out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10,
+                                 **_child_kw())
             lines = out.stdout.splitlines() if out.returncode == 0 else []
             kept = [l for l in lines if _CRON_TAG not in l]
             for n in sorted(b):
@@ -950,7 +1652,7 @@ def _downtime_report(down_from, down_to):
         r = subprocess.run(
             [interp, "-m", "lib.downtime", "gap", repr(down_from), repr(down_to), "runtime"],
             cwd=WORKSPACE, env=_strategy_subprocess_env(),
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, text=True, timeout=60, **_child_kw())
     except (OSError, subprocess.SubprocessError) as e:
         _log(f"downtime check failed to run: {type(e).__name__}")
         return False
@@ -1015,7 +1717,717 @@ def _downtime_watch_loop():
             _downtime_check()
         except Exception as e:
             _log(f"downtime watch failed: {type(e).__name__}: {e}")
+        try:  # its own try: a failing downtime check must not freeze the boot tick
+            _refresh_boot_record()
+        except Exception as e:
+            _log(f"boot record refresh failed: {type(e).__name__}: {e}")
         time.sleep(DOWNTIME_TICK_S)
+
+
+# ── machine restart = trading stopped (Wei 2026-09-22) ───────────────────────
+# After an OS boot (reboot, VM stop/start, maintenance) the reconciler stays
+# down — not HALT, which still lets closes out — until the user presses
+# 啟動下單. A runtime release restarts this process but not the OS, so the boot
+# id is unchanged and nothing happens; a dropped connection is not a boot at
+# all. The cloud reconciler already has no boot persistence (no [Install] /
+# DEMAND_START); what this adds is the stop for boxes that still autostart it,
+# the reason the pages show instead of "dead", and the event. Runs once, from
+# run(), before the scheduler thread exists: that thread's first _downtime_check
+# overwrites the stamp read here as "when was this machine last up".
+BOOT_RECORD = os.path.join(WORKSPACE_STATE, "boot_id")
+RESTART_STOP_PATH = os.path.join(WORKSPACE_STATE, "reconciler_stopped.json")
+RECONCILER_HEARTBEAT = os.path.join(WORKSPACE_STATE, "heartbeat", "reconciler")
+RECONCILER_ALIVE_S = 300  # portfolio_reporter.HEARTBEAT_STALE_S
+# "Running right now": the reconciler touches its heartbeat every POLL_INTERVAL
+# (5 s) at the top of each round, gated or not — three beats. The 300 s window
+# above would call a reconciler that died two minutes ago alive.
+RECONCILER_RUNNING_S = 15
+# The web sends restart_reconciler right after resume whenever its (up to two
+# minutes old) report says the daemon is down; resume has just started it, and
+# a second restart would kill it mid-round. Swallows that one follow-up only.
+RESUME_START_DEDUPE_S = 60
+STRAY_RESULT = "reconciler running outside the supervisor — not started again"
+# Touched when an unbind confirmed the reconciler stopped: a heartbeat not newer
+# than this is the stopped one's, however fresh (TC-28: unbind → rebind → start
+# inside RECONCILER_RUNNING_S read the dead daemon as running).
+RECONCILER_STOP_MARK = os.path.join(WORKSPACE_STATE, "reconciler_stop_mark")
+# A full unbind parks the old account's snapshot and guard state here; the
+# rebind restores them only for the same account (TC-13).
+PARKED_ACCOUNT_STATE = os.path.join(WORKSPACE_STATE, "unbound_account_state.json")
+_SNAPSHOT_PATH = os.path.join(WORKSPACE, "manager", "last_reconcile.json")
+_ACCOUNT_GUARD_PATH = os.path.join(WORKSPACE_STATE, "venue_account.json")
+_resume_started_at = None
+_clock = time.time
+
+
+def _boot_marker():
+    """This boot's identity, or None when it cannot be read. Windows has no
+    boot id: its marker is the uptime tick, which restarts from 0 on every boot
+    and never moves with the wall clock — a smaller tick than the recorded one
+    means a new boot (the record is refreshed while the machine runs)."""
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            tick = ctypes.windll.kernel32.GetTickCount64
+            tick.restype = ctypes.c_ulonglong
+            return f"win:{int(tick())}"
+        except (AttributeError, OSError):
+            return None
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _same_boot(prev, cur):
+    if prev == cur:
+        return True
+    if prev.startswith("win:") and cur.startswith("win:"):
+        try:
+            return int(cur[4:]) >= int(prev[4:])
+        except ValueError:
+            return False
+    return False
+
+
+def _read_boot_record():
+    try:
+        with open(BOOT_RECORD) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _write_atomic(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def _refresh_boot_record():
+    """Windows only (the watch loop, every few seconds): keep the recorded tick
+    close to now, or a reboot whose new uptime has already passed the tick
+    recorded at the last runtime start would read as the same boot."""
+    if _local_mode() or platform.system() != "Windows":
+        return
+    cur, prev = _boot_marker(), _read_boot_record()
+    if cur and prev and prev != cur and _same_boot(prev, cur):
+        try:
+            _write_atomic(BOOT_RECORD, cur)
+        except OSError:
+            pass
+
+
+def _machine_restart_check():
+    """Returns the stop record it wrote, or None. The boot is recorded whatever
+    happens after detection: an unrecorded boot would be re-judged on the next
+    runtime restart and stop a reconciler the user has since started."""
+    if _local_mode():
+        return None  # the desktop app is stopped on every launch already
+    try:
+        return _judge_boot()
+    finally:
+        # EVERY listener start on Windows (a runtime update restarting the
+        # bridges included), reboot or not, so the service is DEMAND_START before
+        # the first reboot ever happens. After the stop: it is two more nssm
+        # calls. Never raises (run() also guards the whole check).
+        if platform.system() == "Windows":
+            _ensure_demand_start()
+
+
+def _judge_boot():
+    # record before tick: a concurrent refresh between the two reads could
+    # otherwise leave the record ahead of cur and read as a new boot
+    prev = _read_boot_record()
+    cur = _boot_marker()
+    if not cur:
+        _log("boot id unreadable — machine-restart stop skipped")
+        return None
+    if prev is not None and _same_boot(prev, cur):
+        if prev != cur:
+            try:
+                _write_atomic(BOOT_RECORD, cur)
+            except OSError:
+                pass
+        return None
+    try:
+        if prev is None:
+            return None
+        if _runtime_already_ran_this_boot():
+            # A runtime without this check (a downgrade, then back) already ran
+            # on this boot and kept the machine trading: this is an upgrade, not
+            # the boot. Only record it.
+            _log("boot id changed but a runtime already ran on this boot — "
+                 "recorded, nothing stopped")
+            return None
+        return _stop_after_restart()
+    finally:
+        try:
+            _write_atomic(BOOT_RECORD, cur)
+        except OSError as e:
+            _log(f"boot id not recorded: {type(e).__name__}")
+
+
+BOOT_SLACK_S = 60
+
+
+def _uptime_s():
+    """Seconds since this OS booted, or None."""
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            tick = ctypes.windll.kernel32.GetTickCount64
+            tick.restype = ctypes.c_ulonglong
+            return tick() / 1000.0
+        except (AttributeError, OSError):
+            return None
+    try:
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _runtime_already_ran_this_boot():
+    """The downtime stamp (written every 5 s by any runtime with the downtime
+    watch) is newer than this boot: some runtime was alive after the boot
+    already. On a real boot the check runs before this process's own watch
+    starts, so the stamp is still the pre-boot one."""
+    up, stamp = _uptime_s(), _downtime_read_stamp()
+    if up is None or stamp is None:
+        return False
+    return stamp > _clock() - up + BOOT_SLACK_S
+
+
+def _stop_after_restart():
+    """Fail-closed (Wei 2026-09-22): the record goes down FIRST — the reconciler
+    gates every round on it (manager/reconciler.py RESTART_STOP_PATH), so an
+    autostarted one that survives the kill still sends nothing, closes
+    included. Then whatever came up on this boot is stopped. The record is for
+    a machine whose reconciler was alive when it went down — halted included
+    (HALT left as it is): halted, it was still running closes and stops, which
+    this boot no longer does, and the pages must not keep saying it does. A
+    reconciler already dead stays dead, without a record."""
+    last_up = _downtime_read_stamp()
+    try:
+        hb = os.path.getmtime(RECONCILER_HEARTBEAT)
+    except OSError:
+        hb = None
+    trading = (hb is not None and last_up is not None
+               and hb >= last_up - RECONCILER_ALIVE_S)
+    info = None
+    if trading:
+        info = {"reason": "machine_restart", "at": int(hb),
+                "down_from": int(last_up), "down_to": int(_clock())}
+        try:
+            _write_atomic(RESTART_STOP_PATH, json.dumps(info))
+        except OSError as e:
+            _log(f"!!! restart stop record NOT written ({type(e).__name__}: {e}) — "
+                 "the reconciler is not gated; relying on the kill alone")
+    failed_sent = False
+    if not (_stop_reconciler() or _stop_reconciler()):
+        failed_sent = _restart_stop_failed(last_up)
+    elif info is not None:
+        # a heartbeat after this is a reconciler started since, not the one killed
+        info["stopped_at"] = int(_clock())
+        try:
+            _write_atomic(RESTART_STOP_PATH, json.dumps(info))
+        except OSError:
+            pass
+    if info is None:
+        return None
+    if failed_sent:
+        # one P1, not two that contradict each other ("stopped" vs "may be trading")
+        return info
+    import events
+    events.append("machine_restart_stopped", {
+        "at": info["at"], "down_from": info["down_from"], "down_to": info["down_to"],
+        "offline_s": max(0, info["down_to"] - info["down_from"])})
+    _log(f"machine restarted after {info['down_to'] - info['down_from']}s — "
+         "reconciler kept stopped until 啟動下單")
+    return info
+
+
+RECONCILER_GATED_MARKER = os.path.join(WORKSPACE_STATE, "heartbeat", "reconciler.gated")
+GATED_MARKER_SLACK_S = 10  # marker and heartbeat are touched together each round
+
+
+def _mtime_or_none(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def _reconciler_gated():
+    """Does the reconciler honour the restart record?
+
+    "Running" is the same test as portfolio_reporter.restart_stop's `gated`: a
+    heartbeat after the stop (stopped_at, else down_to) and within
+    RECONCILER_ALIVE_S. Not 15 s: a long reconcile round only touches the
+    heartbeat at its start. A running reconciler must prove it is gated: the
+    gated version touches
+    state/heartbeat/reconciler.gated with its heartbeat every round, an old
+    process never does — so a new reconciler.py copied onto disk under an old
+    process still reads False. A running one with no fresh marker (e.g. right
+    after it started, before its first round) is taken as NOT gated. Nothing
+    running: the next start loads the file on disk, so the file decides."""
+    hb = _mtime_or_none(RECONCILER_HEARTBEAT)
+    try:
+        with open(RESTART_STOP_PATH) as f:
+            rec = json.load(f)
+        since = rec.get("stopped_at", rec.get("down_to")) if isinstance(rec, dict) else None
+    except (OSError, ValueError):
+        since = None
+    running = (hb is not None and _clock() - hb < RECONCILER_ALIVE_S
+               and (not isinstance(since, (int, float)) or int(hb) > since))
+    if running:
+        marker = _mtime_or_none(RECONCILER_GATED_MARKER)
+        return marker is not None and marker >= hb - GATED_MARKER_SLACK_S
+    try:
+        with open(os.path.join(WORKSPACE, "manager", "reconciler.py"), encoding="utf-8") as f:
+            return "RESTART_STOP_PATH" in f.read()
+    except OSError:
+        return False
+
+
+def _restart_stop_failed(last_up):
+    """The kill could not be confirmed. Always one audit.jsonl line. On a
+    workspace whose reconciler gates on the record that is all (P3: it sends
+    nothing anyway); on an older workspace the survivor may be trading, so it
+    also goes to the platform as an event — and then that event is the only one
+    (returns True: the caller does not also send machine_restart_stopped)."""
+    gated = _reconciler_gated()
+    _log("machine restarted but the reconciler could not be confirmed stopped — "
+         + ("it stays gated by the restart record" if gated
+            else "this workspace's reconciler has no restart gate: it may keep trading"))
+    payload = {"down_from": int(last_up) if last_up is not None else None,
+               "down_to": int(_clock())}
+    try:
+        os.makedirs(WORKSPACE_STATE, exist_ok=True)
+        with open(os.path.join(WORKSPACE_STATE, "audit.jsonl"), "a") as f:
+            f.write(json.dumps({
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                "event": "machine_restart_stop_failed", "gated": gated, **payload}) + "\n")
+    except OSError:
+        pass
+    if not gated:
+        import events
+        events.append("machine_restart_stop_failed",
+                      {k: v for k, v in payload.items() if v is not None})
+        return True
+    return False
+
+
+def _ensure_demand_start():
+    """Windows boxes installed before 2026-08-20 have an AUTO_START reconciler
+    that only gets corrected on a 啟動下單 press. Correct it on every runtime
+    start, so the next boot never brings it up at all. The outcome goes where
+    _cmd_restart_reconciler records its own (deployments.json), but only onto
+    an existing entry — a failure always reaches the log."""
+    try:
+        st = subprocess.run(["nssm", "status", "blaveclaw-reconciler"],
+                            capture_output=True, timeout=15, **_child_kw())
+        if st.returncode != 0:
+            return  # not installed
+        _nssm_run(["set", "blaveclaw-reconciler", "Start", "SERVICE_DEMAND_START"])
+        ok = True
+    except (OSError, subprocess.SubprocessError, RuntimeError) as e:
+        _log(f"start-type correction failed: {type(e).__name__}: {e}")
+        ok = False
+    try:
+        with open(os.path.join(WORKSPACE, "state", "deployments.json")) as f:
+            known = "reconciler" in json.load(f)
+    except (OSError, ValueError, TypeError):
+        known = False
+    if known:  # never register a stopped daemon (healthcheck would call it dead)
+        _register_reconciler_deployment(start_type_ok=ok)
+
+
+def _clear_restart_stop():
+    """True once the record is gone. False = it is still there: the reconciler
+    stays gated, so the caller must not report the start as done."""
+    try:
+        os.remove(RESTART_STOP_PATH)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        _log(f"restart stop record not cleared: {type(e).__name__}: {e}")
+        return False
+    return True
+
+
+def _clear_or_fail():
+    if not _clear_restart_stop():
+        raise RuntimeError(f"resumed, but {RESTART_STOP_PATH} could not be removed — "
+                           "the reconciler stays gated; press 啟動下單 again")
+
+
+def _start_after_restart_stop():
+    """A whole-machine resume / resume_wait is the user's 啟動下單 — only the
+    web and desktop start buttons queue it — and the ONLY thing that lifts a
+    restart stop. It starts the reconciler here too, because the desktop app's
+    cloud start sends no restart_reconciler (without a record:
+    _ensure_reconciler_running). A failed start raises (the ack says so) and
+    keeps the record, so the page keeps saying why trading is off."""
+    global _resume_started_at
+    # Alive (a fresh heartbeat after the boot's stop — or after detection when
+    # the kill never confirmed): a gated reconciler that survived the kill, or
+    # one started outside the button. Deleting the record is what un-gates it;
+    # restarting it would cut its first round, so the web's follow-up
+    # restart_reconciler is swallowed as for a start.
+    try:
+        with open(RESTART_STOP_PATH) as f:
+            rec = json.load(f)
+        since = rec.get("stopped_at", rec.get("down_to"))
+        hb = os.path.getmtime(RECONCILER_HEARTBEAT)
+        # int(hb): the record holds whole seconds, and a heartbeat in that same
+        # second belongs to the stop itself, not to a new start
+        running = (isinstance(since, (int, float)) and int(hb) > since
+                   and _clock() - hb < RECONCILER_RUNNING_S)
+    except (OSError, ValueError, AttributeError):
+        running = False
+    if running:
+        _clear_or_fail()
+        _resume_started_at = time.monotonic()
+        return "reconciler already running"
+    if _stray_reconciler_pids():
+        # it outlived the boot's supervisor kill; lifting the record is the start
+        _clear_or_fail()
+        _resume_started_at = time.monotonic()
+        return STRAY_RESULT
+    try:
+        result = _restart_reconciler({})
+    except Exception as e:
+        _log(f"reconciler start after restart stop failed: {type(e).__name__}: {e}")
+        raise RuntimeError(f"resumed, but the reconciler did not start: "
+                           f"{type(e).__name__}: {str(e)[:200]}") from None
+    _clear_or_fail()
+    _resume_started_at = time.monotonic()
+    return result
+
+
+def _reconciler_supervised():
+    """Does the service manager say the reconciler process is up? None = it
+    cannot tell. Read-only (is-active / has-session / nssm status need no root)."""
+    try:
+        if platform.system() == "Windows":
+            st = subprocess.run(["nssm", "status", "blaveclaw-reconciler"],
+                                capture_output=True, timeout=30, **_child_kw())
+            if st.returncode != 0:
+                return False  # service never installed
+            out = (st.stdout or b"").replace(b"\x00", b"").decode("ascii", "ignore")
+            if "SERVICE_STOPPED" in out:
+                return False
+            # *_PENDING (start / stop / pause / continue) is a transition: can't tell
+            return True if "SERVICE_RUNNING" in out else None
+        if os.path.isfile(RECONCILER_UNIT_PATH):
+            state = subprocess.run(["systemctl", "is-active", RECONCILER_UNIT],
+                                   capture_output=True, text=True, timeout=15,
+                                   **_child_kw()).stdout.strip()
+            if state in ("active", "activating", "reloading"):
+                return True
+            # deactivating / failed read as NOT running here, on purpose, unlike
+            # _stop_reconciler's set: that one promises "nothing is watching";
+            # this one only decides whether `systemctl restart` may run, which
+            # waits a stop out and replaces a failed unit — safe on both.
+            if state not in ("inactive", "failed", "deactivating"):
+                return None
+        try:
+            has = subprocess.run(["tmux", "has-session", "-t", "reconciler"],
+                                 capture_output=True, timeout=20, **_child_kw())
+        except FileNotFoundError:
+            return False
+        return has.returncode == 0
+    except Exception as e:  # TimeoutExpired, OSError, …
+        _log(f"reconciler status unreadable: {type(e).__name__}")
+        return None
+
+
+def _reconciler_script(argv):
+    """The reconciler path this argv RUNS, or None. A run is `python [options]
+    <script>` or the desktop daemon's `local_daemon.py --run-reconciler
+    <script>`; -m / -c (py_compile, a one-liner) only read the file."""
+    if len(argv) < 2 or not os.path.basename(argv[0].replace("\\", "/")).lower().startswith("python"):
+        return None
+    i = 1
+    while i < len(argv) and argv[i].startswith("-") and argv[i] != "-":
+        opt = argv[i]
+        i += 1
+        if opt == "--":
+            break
+        if opt.startswith("--"):
+            continue
+        for k, ch in enumerate(opt[1:], 1):
+            if ch in "cm":
+                return None
+            if ch in "WX":
+                if k == len(opt) - 1:
+                    i += 1  # its value is the next word
+                break
+    if i >= len(argv):
+        return None
+    script = argv[i]
+    name = os.path.basename(script.replace("\\", "/"))
+    if name == "reconciler.py":
+        return script
+    if name == "local_daemon.py" and argv[i + 1:i + 2] == ["--run-reconciler"] and len(argv) > i + 2:
+        return argv[i + 2] if os.path.basename(argv[i + 2].replace("\\", "/")) == "reconciler.py" else None
+    return None
+
+
+def _runs_reconciler(argv, cwd, target):
+    """argv runs this workspace's manager/reconciler.py. A relative path is
+    resolved against the process's cwd; with no cwd (unreadable, or Windows,
+    where target is None too) naming manager/reconciler.py is enough: one
+    workspace per machine."""
+    script = _reconciler_script(argv)
+    if script is None:
+        return False
+    norm = script.replace("\\", "/")
+    if target is None or (cwd is None and not os.path.isabs(script)):
+        return norm.endswith("manager/reconciler.py")
+    if os.path.isabs(script):
+        return os.path.realpath(script) == target
+    return os.path.realpath(os.path.join(cwd, script)) == target
+
+
+def _proc_supervised(proc, pid):
+    """Linux: will _restart_reconciler replace this process? Yes when it runs in
+    the systemd unit's cgroup (systemctl restart) or under tmux (kill-session)."""
+    try:
+        with open(os.path.join(proc, str(pid), "cgroup")) as f:
+            if RECONCILER_UNIT in f.read():
+                return True
+    except OSError:
+        pass
+    seen = set()
+    while pid > 1 and pid not in seen and len(seen) < 32:
+        seen.add(pid)
+        try:
+            with open(os.path.join(proc, str(pid), "stat")) as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])
+            with open(os.path.join(proc, str(pid), "cmdline"), "rb") as f:
+                arg0 = f.read().split(b"\0", 1)[0].decode("utf-8", "replace")
+        except (OSError, ValueError, IndexError):
+            return False
+        # the tmux server retitles itself "tmux: server (/tmp/tmux-N/default)"
+        if os.path.basename(arg0.split(" ", 1)[0]).startswith("tmux"):
+            return True
+    return False
+
+
+def _unsupervised_reconciler_pids(proc="/proc"):
+    """pids running this workspace's reconciler that no supervisor restart would
+    replace (ours excluded), or None when the process list cannot be read.
+    /proc is read directly, not pgrep -f: a pattern on a command line also
+    matches whatever runs the pattern."""
+    target = os.path.realpath(os.path.join(WORKSPACE, "manager", "reconciler.py"))
+    me = os.getpid()
+    if platform.system() == "Windows":
+        return _windows_unsupervised_pids(me)
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        return None
+    pids = []
+    for d in entries:
+        if not d.isdigit() or int(d) == me:
+            continue
+        try:
+            with open(os.path.join(proc, d, "cmdline"), "rb") as f:
+                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+        except OSError:
+            continue  # gone meanwhile
+        try:
+            cwd = os.readlink(os.path.join(proc, d, "cwd"))
+        except OSError:
+            cwd = None
+        if _runs_reconciler(argv, cwd, target) and not _proc_supervised(proc, int(d)):
+            pids.append(int(d))
+    return pids
+
+
+def _windows_unsupervised_pids(me):
+    ps = ("Get-CimInstance Win32_Process | ForEach-Object { "
+          "\"$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.Name)`t$($_.CommandLine)\" }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                             capture_output=True, text=True, timeout=30, **_child_kw())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return _parse_windows_unsupervised(out.stdout, me)
+
+
+def _parse_windows_unsupervised(text, me):
+    """Win32_Process rows `pid<TAB>ppid<TAB>name<TAB>cmdline`. There is no cwd:
+    a python whose command line runs manager\\reconciler.py counts (one
+    workspace per machine). Supervised = an nssm.exe ancestor (the service
+    that nssm stop/start replaces)."""
+    rows = {}
+    for line in (text or "").splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) == 4 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+            rows[int(parts[0])] = (int(parts[1]), parts[2].strip().lower(), parts[3])
+    pids = []
+    for pid, (ppid, _, cmdline) in rows.items():
+        if pid == me:
+            continue
+        argv = [q or u for q, u in re.findall(r'"([^"]*)"|(\S+)', cmdline)]
+        if not _runs_reconciler(argv, None, None):
+            continue
+        seen, up, supervised = {pid}, ppid, False
+        while up in rows and up not in seen:
+            seen.add(up)
+            if rows[up][1] == "nssm.exe":
+                supervised = True
+                break
+            up = rows[up][0]
+        if not supervised:
+            pids.append(pid)
+    return pids
+
+
+def _stray_reconciler_pids():
+    """Reconciler processes a supervisor restart would not replace: starting
+    another beside them doubles every order (a reconciler.py from before the
+    singleton lock never takes it, and the runtime updates on its own while the
+    workspace updates only on 更新). A new one would exit on the lock instead,
+    so refusing loses nothing. [] when none or unreadable (logged)."""
+    pids = _unsupervised_reconciler_pids()
+    if pids is None:
+        _log("process list unreadable — reconciler duplicate check skipped")
+        return []
+    return pids
+
+
+def _ensure_reconciler_running():
+    """The whole-machine start with no restart record: a machine whose
+    reconciler never ran (a fresh box) or was stopped without a record (an
+    unbind, a death) must not come out of 啟動下單 with HALT cleared and nothing
+    trading — the desktop's cloud start sends only this command.
+
+    Alive is never restarted: a restart mid-round kills an order in flight and
+    the next start's reap trips HALT. A heartbeat inside RECONCILER_RUNNING_S is
+    alive; missing or older than the report's RECONCILER_ALIVE_S is dead (what
+    the web's own follow-up restart goes by). In between a round may just be
+    long, so the service manager decides, and "cannot tell" counts as alive.
+    Either way the web's follow-up restart_reconciler is swallowed once. A
+    reconciler process outside every supervisor is never started beside
+    (_stray_reconciler_pids). A failed start raises: HALT is already
+    cleared, but with nothing running nothing trades, and the ack is what
+    tells the page."""
+    global _resume_started_at
+    hb = _mtime_or_none(RECONCILER_HEARTBEAT)
+    stopped = _mtime_or_none(RECONCILER_STOP_MARK)
+    if hb is not None and stopped is not None and hb <= stopped:
+        hb = None  # the beat of the daemon an unbind stopped, not of a live one
+    age = None if hb is None else _clock() - hb
+    if age is not None and age < RECONCILER_RUNNING_S:
+        alive = True
+    elif age is None or age >= RECONCILER_ALIVE_S:
+        alive = False
+    else:
+        alive = _reconciler_supervised() is not False
+    if alive:
+        _resume_started_at = time.monotonic()
+        return "reconciler already running"
+    strays = _stray_reconciler_pids()
+    if strays:
+        # a supervised one (systemd / tmux / NSSM) is replaced by the restart below;
+        # one outside them would run beside it. The web's follow-up is swallowed too
+        _log(f"reconciler running outside the supervisor (pid {strays[0]}) — not starting another")
+        _resume_started_at = time.monotonic()
+        return STRAY_RESULT
+    try:
+        result = _restart_reconciler({})
+    except Exception as e:
+        _log(f"reconciler start on resume failed: {type(e).__name__}: {e}")
+        raise RuntimeError(f"resumed, but the reconciler did not start: "
+                           f"{type(e).__name__}: {str(e)[:200]}") from None
+    _resume_started_at = time.monotonic()
+    return result
+
+
+def _mark_reconciler_stopped():
+    try:
+        _write_atomic(RECONCILER_STOP_MARK, str(int(_clock())))
+    except OSError as e:
+        _log(f"reconciler stop mark not written: {type(e).__name__}")
+
+
+def _account_identity(lines):
+    """Which exchange account these .env lines trade: a digest of the venue
+    credential values (the reconciler's _key_fingerprint rule) plus
+    PAPER_BOUND_TS — a newer paper bind re-seeds the paper account, so it is a
+    different account under the same fixed keys. None = no credential at all."""
+    import hashlib
+    h, any_cred = hashlib.sha256(), False
+    for line in sorted(lines):
+        k, sep, v = line.partition("=")
+        ku = k.strip().upper()
+        if not sep or ku.startswith(("BLAVE_", _DATA_CRED_PREFIX)):
+            continue
+        if ku.endswith(("_API_KEY", "_SECRET_KEY", "_API_SECRET", "_PASSPHRASE", "_PASSWORD")) \
+                or ku == "PAPER_BOUND_TS":
+            h.update(f"{ku}={v.strip()}\n".encode())
+            any_cred = True
+    return h.hexdigest() if any_cred else None
+
+
+def _park_account_state(identity):
+    """Full unbind: the old account's last snapshot and account-guard state go
+    aside, so a rebind to another account starts fresh instead of tripping the
+    guard on the old account's positions (TC-13). Parked first, removed
+    second: a failed park leaves both in place (today's behaviour)."""
+    parked = {"identity": identity, "files": {}}
+    for path in (_SNAPSHOT_PATH, _ACCOUNT_GUARD_PATH):
+        try:
+            with open(path) as f:
+                parked["files"][path] = f.read()
+        except FileNotFoundError:
+            pass
+    if not parked["files"]:
+        return
+    try:
+        _write_atomic(PARKED_ACCOUNT_STATE, json.dumps(parked))
+    except OSError as e:
+        _log(f"account state not parked ({type(e).__name__}) — left in place")
+        return
+    for path in parked["files"]:
+        try:
+            os.remove(path)
+        except OSError as e:
+            _log(f"account state not cleared ({type(e).__name__}): {os.path.basename(path)}")
+
+
+def _unpark_account_state(identity):
+    """Rebind: the same account gets its parked state back (the guard judges it
+    as before the unbind); any other account drops it."""
+    try:
+        with open(PARKED_ACCOUNT_STATE) as f:
+            parked = json.load(f)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        parked = {}
+    if isinstance(parked, dict) and identity and parked.get("identity") == identity:
+        for path, text in (parked.get("files") or {}).items():
+            if path in (_SNAPSHOT_PATH, _ACCOUNT_GUARD_PATH) and not os.path.exists(path):
+                try:
+                    _write_atomic(path, text)
+                except OSError as e:
+                    _log(f"parked account state not restored ({type(e).__name__})")
+                    return  # parked copy kept: the next bind tries again
+    try:
+        os.remove(PARKED_ACCOUNT_STATE)
+    except OSError:
+        pass
 
 
 def _bound_venue():
@@ -1147,7 +2559,7 @@ def _tick_one(name):
             [interp, os.path.join("manager", "wait_for_bar.py"), name],
             cwd=WORKSPACE, env=_strategy_subprocess_env(),
             capture_output=True, text=True,
-            timeout=SCHEDULER_TICK_TIMEOUT_SECONDS,
+            timeout=SCHEDULER_TICK_TIMEOUT_SECONDS, **_child_kw()
         )
         if r.returncode != 0:
             _log(f"scheduler tick {name}: wait_for_bar.py exited {r.returncode} "
@@ -1244,7 +2656,7 @@ def _migrate_legacy_ac_crons():
             with _cron_lock:
                 out = subprocess.run(["schtasks", "/query", "/fo", "csv", "/nh"],
                                      capture_output=True, text=True, errors="replace",
-                                     timeout=30)
+                                     timeout=30, **_child_kw())
                 existing = set()
                 for line in (out.stdout or "").splitlines():
                     tn = line.split('","')[0].strip('"').lstrip("\\")
@@ -1253,7 +2665,8 @@ def _migrate_legacy_ac_crons():
                 stale = {n for n in existing if _strategy_has_interval(n)}
                 for n in sorted(stale):
                     r = subprocess.run(["schtasks", "/delete", "/tn", _WIN_TASK_PREFIX + n, "/f"],
-                                       capture_output=True, text=True, errors="replace", timeout=30)
+                                       capture_output=True, text=True, errors="replace", timeout=30,
+                                       **_child_kw())
                     if r.returncode != 0:
                         _log(f"cron migration: delete task {n} failed: "
                              f"{(r.stderr or r.stdout or '').strip()[:120]}")
@@ -1264,7 +2677,8 @@ def _migrate_legacy_ac_crons():
         return
     try:
         with _cron_lock:
-            out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+            out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10,
+                                 **_child_kw())
             if out.returncode != 0:
                 return  # no crontab at all — nothing to migrate
             kept, dropped = [], 0
@@ -1400,7 +2814,8 @@ def _fire_due_reports():
                 continue
             try:
                 subprocess.Popen(_report_runner_cmd(job_id), cwd=WORKSPACE,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 **_child_kw())
                 _log(f"report trigger: started {job_id}")
             except Exception as e:
                 _log(f"report trigger: {job_id} failed to start: {type(e).__name__}: {e}")
@@ -1419,7 +2834,7 @@ def _sweep_legacy_report_schedules():
             with _cron_lock:
                 out = subprocess.run(["schtasks", "/query", "/fo", "csv", "/nh"],
                                      capture_output=True, text=True, errors="replace",
-                                     timeout=30)
+                                     timeout=30, **_child_kw())
                 stale = set()
                 for line in (out.stdout or "").splitlines():
                     tn = line.split('","')[0].strip('"').lstrip("\\")
@@ -1428,7 +2843,7 @@ def _sweep_legacy_report_schedules():
                 for tn in sorted(stale):
                     r = subprocess.run(["schtasks", "/delete", "/tn", tn, "/f"],
                                        capture_output=True, text=True, errors="replace",
-                                       timeout=30)
+                                       timeout=30, **_child_kw())
                     if r.returncode != 0:
                         _log(f"report sweep: delete task {tn} failed: "
                              f"{(r.stderr or r.stdout or '').strip()[:120]}")
@@ -1439,7 +2854,8 @@ def _sweep_legacy_report_schedules():
         return
     try:
         with _cron_lock:
-            out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+            out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10,
+                                 **_child_kw())
             if out.returncode != 0:
                 return  # no crontab at all — nothing to sweep
             lines = out.stdout.splitlines()
@@ -1505,7 +2921,7 @@ def _cmd_report_run_now(args):
     carries the outcome from runs.jsonl. A paused job may be run this way."""
     job_id, _d = _report_job(args)
     subprocess.Popen(_report_runner_cmd(job_id), cwd=WORKSPACE,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_child_kw())
     return {"started": True}
 
 
@@ -1550,10 +2966,18 @@ def _cmd_report_edit_pending(args):
 # same layer, already keeps the same boundary). A static SYMBOL->spec lookup,
 # no AI judgment involved — TW stock strategies (asset_specs "tw_stock" shape)
 # are intentionally NOT covered here.
+# `margin` = TAIFEX initial margin per lot in TWD (臺灣期貨交易所 保證金一覽表
+# 股價指數類, 更新日期 2026/08/12: TX 701,000 / MTX 175,250 / TMF 35,050). The
+# paper venue's leverage check counts lots × margin (lib/order_paper); the
+# exchange revises these with volatility, so refresh the three numbers and
+# this date together. Real brokers ignore the field.
 _TXF_ASSET_SPECS = {
-    "TXF": {"type": "futures_contracts", "contract_value": 200, "currency": "TWD", "lot_size": 1},
-    "MXF": {"type": "futures_contracts", "contract_value": 50, "currency": "TWD", "lot_size": 1},
-    "TMF": {"type": "futures_contracts", "contract_value": 10, "currency": "TWD", "lot_size": 1},
+    "TXF": {"type": "futures_contracts", "contract_value": 200, "currency": "TWD", "lot_size": 1,
+            "margin": 701000},
+    "MXF": {"type": "futures_contracts", "contract_value": 50, "currency": "TWD", "lot_size": 1,
+            "margin": 175250},
+    "TMF": {"type": "futures_contracts", "contract_value": 10, "currency": "TWD", "lot_size": 1,
+            "margin": 35050},
 }
 
 
@@ -1578,6 +3002,12 @@ def _strategy_futures_symbol(name):
         if isinstance(sym, str) and sym.strip():
             return sym.strip().upper()
     return None
+
+
+def _portfolio_trading_supported():
+    """portfolio_reporter.can_trade_portfolio — the workspace lib trades Type C."""
+    import portfolio_reporter  # same runtime dir
+    return portfolio_reporter.can_trade_portfolio()
 
 
 def _strategy_is_portfolio(name):
@@ -1681,10 +3111,10 @@ def _cmd_amounts(args):
             was_funded = False  # a garbage stored value is not a funded config
         if was_funded:
             continue
-        if _strategy_is_portfolio(k):
+        if _strategy_is_portfolio(k) and not _portfolio_trading_supported():
             raise ValueError(
-                f"「{k}」是投資組合(Type C)策略,暫不支援自動下單——"
-                f"請取消勾選這支策略後再儲存"
+                f"「{k}」是投資組合(Type C)策略,這台機器的程式還不能讓它自動下單——"
+                f"請先更新 blave agent,或取消勾選這支策略後再儲存"
             )
         newly_funded.add(k)
 
@@ -1693,7 +3123,7 @@ def _cmd_amounts(args):
         with open(path) as f:
             cfg = json.load(f)
     except FileNotFoundError:
-        cfg = {}  # fresh machine — first write creates the file
+        cfg = _fresh_portfolio_config()  # fresh machine — first write creates the file
     except (OSError, ValueError) as e:
         # fail-closed like _cmd_execution: unreadable can mean manager.py
         # mid-write — rebuilding from {} here would wipe keys this command
@@ -1812,7 +3242,7 @@ def _cmd_amounts(args):
                     # strategies a bare env too, so this also matches prod)
                     env=_strategy_subprocess_env(),
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True,
+                    start_new_session=True, **_child_kw()
                 )
             except OSError as e:
                 _log(f"kickoff run failed for {n}: {type(e).__name__}")
@@ -1888,7 +3318,7 @@ def _cmd_execution(args):
         with open(path) as f:
             cfg = json.load(f)
     except FileNotFoundError:
-        cfg = {}  # fresh machine — first write creates the file
+        cfg = _fresh_portfolio_config()  # fresh machine — first write creates the file
     except (OSError, ValueError) as e:
         # fail-closed like _cmd_delete_strategy: manager.py writes this file
         # non-atomically, so unreadable can mean mid-write — falling back to {}
@@ -1952,11 +3382,11 @@ def _stop_reconciler():
             return _LOCAL_HOST is not None and _LOCAL_HOST.stop_reconciler()
         if platform.system() == "Windows":
             st = subprocess.run(["nssm", "status", "blaveclaw-reconciler"],
-                                capture_output=True, timeout=30)
+                                capture_output=True, timeout=30, **_child_kw())
             if st.returncode != 0:
                 return True  # service never installed — nothing watching
             r = subprocess.run(["nssm", "stop", "blaveclaw-reconciler"],
-                               capture_output=True, timeout=60)
+                               capture_output=True, timeout=60, **_child_kw())
             return r.returncode == 0
 
         # unit file absent = never installed here, nothing systemd can be
@@ -1964,7 +3394,7 @@ def _stop_reconciler():
         # this may promise that nothing is watching.
         if os.path.isfile(RECONCILER_UNIT_PATH):
             state = subprocess.run(["systemctl", "is-active", RECONCILER_UNIT],
-                                   capture_output=True, text=True, timeout=15)
+                                   capture_output=True, text=True, timeout=15, **_child_kw())
             # deactivating counts as RUNNING: stop is in flight but the process
             # can live up to TimeoutStopSec more — treating it as stopped would
             # let the full-unbind path clear membership while the daemon gets
@@ -1985,7 +3415,7 @@ def _stop_reconciler():
                 # _cmd_restart_reconciler hits the same wall from the other side.
                 stop = subprocess.run(["sudo", "-n", "/usr/bin/systemctl", "stop",
                                        RECONCILER_UNIT],
-                                      capture_output=True, text=True, timeout=30)
+                                      capture_output=True, text=True, timeout=30, **_child_kw())
                 if stop.returncode != 0:
                     _log("reconciler stop failed: sudo systemctl stop rc="
                          f"{stop.returncode} {(stop.stderr or '').strip()[:150]}")
@@ -1993,7 +3423,7 @@ def _stop_reconciler():
 
         try:
             has = subprocess.run(["tmux", "has-session", "-t", "reconciler"],
-                                 capture_output=True, timeout=20)
+                                 capture_output=True, timeout=20, **_child_kw())
         except FileNotFoundError:
             return True  # no tmux binary on this machine = no session possible
         if has.returncode != 0:
@@ -2008,7 +3438,7 @@ def _stop_reconciler():
             # "kill failed" must stay distinguishable here.
             return True
         kill = subprocess.run(["tmux", "kill-session", "-t", "reconciler"],
-                              capture_output=True, text=True, timeout=20)
+                              capture_output=True, text=True, timeout=20, **_child_kw())
         if kill.returncode != 0:
             _log(f"reconciler stop failed: tmux kill-session rc={kill.returncode} "
                  f"{(kill.stderr or '').strip()[:150]}")
@@ -2028,6 +3458,8 @@ def _stop_reconciler():
         # Type A/C (_sync_deployment_registry), whose comment left this entry
         # "untouched either way". A later 啟動下單 registers it again.
         _purge_deployment_registry(["reconciler"])
+        global _resume_started_at
+        _resume_started_at = None  # the next start is a real one, not a follow-up
     return ok
 
 
@@ -2071,8 +3503,14 @@ def _cmd_credentials_remove(args):
     # Prune the unbound venues from account.json right away — the account
     # reader only rewrites it every 2 min, and until then the web would keep
     # showing a live-looking equity for an account that no longer has a key.
+    # DATA_* excluded: removing a data-source key is not an unbind — no venue
+    # to prune, and it must not halt trading. Judged on the ID (suffix off),
+    # the same thing _venue_cred_ids judges: the env NAME of a venue called
+    # "DATA" (DATA_API_KEY) starts with the prefix, its id does not.
     dropped_ids = {
-        n[: -len("_API_KEY")].lower() for n in drop if n.upper().endswith("_API_KEY")
+        n[: -len("_API_KEY")].lower() for n in drop
+        if n.upper().endswith("_API_KEY")
+        and not _is_data_cred_id(n[: -len("_API_KEY")])
     }
     if dropped_ids:
         apath = os.path.join(WORKSPACE, "manager", "account.json")
@@ -2136,6 +3574,8 @@ def _cmd_credentials_remove(args):
             # Partial unbind on a multi-venue machine keeps daemon and
             # portfolio as-is.
             if _stop_reconciler():
+                _mark_reconciler_stopped()
+                _park_account_state(_account_identity(lines))
                 # mirror first, config second (P2-2 write order) — and if the
                 # config write below then fails, a {}/{} mirror over a stale
                 # config fails in the SAFE direction (nothing funded).
@@ -2156,6 +3596,10 @@ def _cmd_credentials_remove(args):
                     pass  # no portfolio was ever written — nothing to clear
                 except (OSError, ValueError) as e:
                     _log(f"membership clear failed: {type(e).__name__}: {e}")
+                # The book is kept per venue, so it survives the unbind: binding the
+                # SAME exchange account back finds the bot's own positions still its
+                # own; a DIFFERENT account resets that venue's book the first time
+                # the workspace lib reads its id (lib.portfolio.book_account_check).
             else:
                 _log("reconciler not confirmed stopped — membership kept")
 
@@ -2213,7 +3657,7 @@ def _purge_strategy_schedules(entries):
             if platform.system() == "Windows":
                 out = subprocess.run(["schtasks", "/query", "/fo", "csv", "/nh"],
                                      capture_output=True, text=True, errors="replace",
-                                     timeout=30)
+                                     timeout=30, **_child_kw())
                 existing = set()
                 for line in (out.stdout or "").splitlines():
                     existing.add(line.split('","')[0].strip('"').lstrip("\\"))
@@ -2224,12 +3668,13 @@ def _purge_strategy_schedules(entries):
                             continue
                         r = subprocess.run(["schtasks", "/delete", "/tn", tn, "/f"],
                                            capture_output=True, text=True,
-                                           errors="replace", timeout=30)
+                                           errors="replace", timeout=30, **_child_kw())
                         if r.returncode != 0:  # a survivor keeps alerting unseen
                             _log(f"schedule purge: delete {tn} failed: "
                                  f"{(r.stderr or r.stdout or '').strip()[:120]}")
                 return
-            out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+            out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10,
+                                 **_child_kw())
             if out.returncode != 0:
                 return  # no crontab at all — nothing scheduled
             pats = []
@@ -2349,8 +3794,8 @@ def _cmd_delete_strategy(args):
             os.remove(p)
             entries.add(base[:-3] if base.endswith(".py") else base)
     _purge_strategy_schedules(entries)
-    # a deleted strategy must not stay on the downtime-pause card, freezing its
-    # symbol with nobody left to decide. Best-effort: the files are gone already.
+    # a deleted strategy must not stay in the downtime pause, freezing its
+    # symbol after the strategy is gone. Best-effort: the files are gone already.
     try:
         downtime = _in_workspace(_downtime_lib, True)
         for n in entries | {name}:
@@ -2373,10 +3818,10 @@ def _cmd_retest_accounts(args):
     sys_py = "python" if platform.system() == "Windows" else "/usr/bin/python3"
     if _local_mode():
         subprocess.Popen([sys.executable, reader], cwd=WORKSPACE, env=_local_child_env(),
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_child_kw())
         return "retesting"
     subprocess.Popen([sys_py, reader], cwd=WORKSPACE,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_child_kw())
     return "retesting"
 
 
@@ -2422,7 +3867,7 @@ def _nssm_run(step, timeout=15):
     dispatch loop's generic `except Exception as e: _log(...)`."""
     try:
         out = subprocess.run(["nssm"] + step, capture_output=True,
-                             text=True, timeout=timeout)
+                             text=True, timeout=timeout, **_child_kw())
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"nssm {' '.join(step[:3])} timed out")
     if out.returncode != 0:
@@ -2471,6 +3916,26 @@ def _register_reconciler_deployment(start_type_ok=None):
 
 
 def _cmd_restart_reconciler(args):
+    global _resume_started_at
+    if (_resume_started_at is not None
+            and time.monotonic() - _resume_started_at < RESUME_START_DEDUPE_S):
+        _resume_started_at = None
+        return "reconciler already started by resume"
+    # Only the user's start (resume / resume_wait) lifts a restart stop; this
+    # command can come from other paths (settings 重啟, a turn) and must not.
+    if os.path.exists(RESTART_STOP_PATH):
+        raise RuntimeError("machine restarted — trading stays stopped until "
+                           "the user presses 啟動下單")
+    if not _local_mode():  # the desktop daemon's own lock guards its reconciler
+        strays = _stray_reconciler_pids()
+        if strays:
+            raise RuntimeError(f"a reconciler not run by this machine's supervisor is running "
+                               f"(pid {strays[0]}) — starting another would double every "
+                               f"order; stop that process first")
+    return _restart_reconciler(args)
+
+
+def _restart_reconciler(args):
     """Start the order daemon through its watchdog wrapper, never directly —
     the wrapper restarts on crash and alerts on each exit (references/manager.md)."""
     if _local_mode():
@@ -2500,7 +3965,7 @@ def _cmd_restart_reconciler(args):
         # way: installing a unit needs root, which blaveagent doesn't have.
         # It's covered by the release channel instead, see below.)
         st = subprocess.run(["nssm", "status", "blaveclaw-reconciler"],
-                            capture_output=True, timeout=30)
+                            capture_output=True, timeout=30, **_child_kw())
         if st.returncode != 0:
             ps1 = os.path.join(WORKSPACE, "manager",
                                "start_reconciler_windows.ps1")
@@ -2538,7 +4003,7 @@ def _cmd_restart_reconciler(args):
             # kill the restart (start is what decides)
             try:
                 subprocess.run(["nssm", "stop", "blaveclaw-reconciler"],
-                               capture_output=True, timeout=60)
+                               capture_output=True, timeout=60, **_child_kw())
             except subprocess.TimeoutExpired:
                 pass
             if admin_pw is not None:
@@ -2563,7 +4028,7 @@ def _cmd_restart_reconciler(args):
                      "this machine still auto-resumes trading on reboot")
                 _register_reconciler_deployment(start_type_ok=False)
         cmd = ["nssm", "start", "blaveclaw-reconciler"]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, **_child_kw())
         if out.returncode != 0:
             raise RuntimeError((out.stderr or out.stdout or "").strip()[:200])
         return "reconciler restarted"
@@ -2593,10 +4058,10 @@ def _cmd_restart_reconciler(args):
         # kill any existing session first: a crash-looping one would
         # otherwise keep its name and this would silently no-op
         subprocess.run(["tmux", "kill-session", "-t", "reconciler"],
-                       capture_output=True, timeout=20)
+                       capture_output=True, timeout=20, **_child_kw())
         cmd = ["tmux", "new-session", "-d", "-s", "reconciler",
                f"cd {WORKSPACE} && bash manager/start_reconciler.sh"]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, **_child_kw())
         if out.returncode != 0:
             raise RuntimeError((out.stderr or out.stdout or "").strip()[:200])
         _register_reconciler_deployment()
@@ -2621,7 +4086,7 @@ def _cmd_restart_reconciler(args):
     # must not require it).
     try:
         subprocess.run(["tmux", "kill-session", "-t", "reconciler"],
-                       capture_output=True, timeout=20)
+                       capture_output=True, timeout=20, **_child_kw())
     except FileNotFoundError:
         pass
 
@@ -2634,7 +4099,7 @@ def _cmd_restart_reconciler(args):
     # this fails fast (no password prompt).
     restart = subprocess.run(
         ["sudo", "-n", "/usr/bin/systemctl", "restart", RECONCILER_UNIT],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, timeout=30, **_child_kw())
     if restart.returncode != 0:
         # sudo failing does NOT mean the unit isn't running: the sudoers rule
         # may have been removed/broken AFTER an earlier successful start.
@@ -2643,7 +4108,7 @@ def _cmd_restart_reconciler(args):
         # Wei 2026-08-20: when the unit IS running but uncontrollable, the
         # button must fail honestly, not silently double the daemons.
         state = subprocess.run(["systemctl", "is-active", RECONCILER_UNIT],
-                               capture_output=True, text=True, timeout=15)
+                               capture_output=True, text=True, timeout=15, **_child_kw())
         # Kept identical to _stop_reconciler's running-set on purpose — three
         # audit rounds in a row caught a gap in exactly one of these two sets
         # not matching the other, so: deactivating raises too (the dying
@@ -2666,17 +4131,233 @@ def _cmd_restart_reconciler(args):
     return "reconciler restarted"
 
 
+def _write_close_all_pass():
+    """lib/guard.CLOSE_ALL_PASS_PATH, stamped now: the flatten about to launch
+    claims it within CLOSE_ALL_PASS_TTL_S. The only writer (a test enumerates).
+    False = not written: the caller must not report a close as started."""
+    try:
+        _write_atomic(os.path.join(WORKSPACE_STATE, "close_all_pass.json"),
+                      json.dumps({"ts": time.time()}))
+        return True
+    except OSError as e:
+        _log(f"close-all pass not written ({type(e).__name__}) — nothing launched")
+        return False
+
+
+def _flatten_already_running():
+    """Is a manager/flatten.py holding state/flatten.lock right now?
+
+    ADVISORY — it only shapes the ack. The real single-flight guard is
+    flatten.py's own lock (manager/flatten.py › SINGLE-FLIGHT): between this
+    probe and the child actually taking the lock there is a window, so two
+    presses can both be told "started" and the loser will exit on its own.
+    That degrades the message, never the safety — and the first flatten IS
+    running either way, which is what the user asked for.
+
+    Unreadable / no lock primitive → False: never let this probe be the reason
+    a panic close isn't launched."""
+    path = os.path.join(WORKSPACE, "state", "flatten.lock")
+    if not os.path.isfile(path):
+        return False
+    try:
+        fh = open(path, "a+")
+    except OSError:
+        return False
+    try:
+        if platform.system() == "Windows":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            # a fresh open() = a separate open-file-description, so flock here
+            # contends with the child's exactly like another process would
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+    except ImportError:
+        return False
+    finally:
+        fh.close()
+
+
+def _capital_only_unflattenable():
+    """Same verdict the report sends as can_flatten=false (flatten.py already
+    known present here). Unreadable → False: never let this be why a panic
+    close isn't launched — flatten.py skips the 群益 leg on its own."""
+    try:
+        import portfolio_reporter
+        return not portfolio_reporter.can_flatten(portfolio_reporter.venues())
+    except Exception:
+        return False
+
+
+# same mapping as manager/flatten.py _book_key (tests hold them equal) — copied,
+# not imported: this runtime may sit on an older workspace
+_CAPITAL_BOOK_KEY = {"TX": "TXF", "MTX": "MXF", "TM": "TMF"}
+_CAPITAL_FUT_RE = re.compile(r"^(MTX|TX|TM)(\d{2})(0[1-9]|1[0-2])$")
+
+
+def _capital_open_book_keys():
+    """"TMF,TXF" from the 群益 worker's snapshot file (never logs in to SKCOM);
+    "" when it can't be read — the platform then words it without symbols.
+    self_ledger on → only the bot's own positions, same scope as flatten.py,
+    so the user isn't told to close positions they deliberately hold."""
+    try:
+        from lib.account_capital import get_positions
+        positions = dict(get_positions({}))
+    except Exception:
+        return ""
+    ledger = None
+    try:
+        import lib.portfolio as _pf
+        cfg = _pf.load_portfolio_config()
+        own = getattr(_pf, "own_positions_only", None)
+        # no baseline = no trustworthy book (flatten.py closes nothing then) → list them all
+        ready = _pf.book_ready(cfg) if hasattr(_pf, "book_ready") else bool(_pf._load_ledger_seed()["seeded_at"])
+        if (own(cfg) if own else cfg.get("self_ledger")) and ready:
+            ledger = (_pf.ledger_positions("capital") if hasattr(_pf, "book_ready")
+                      else _pf.ledger_positions())
+    except Exception:
+        ledger = None  # unreadable (or pre-ledger workspace) → list them all
+    try:
+        keys = set()
+        for sym, p in positions.items():
+            sym = str(sym).upper()
+            m = _CAPITAL_FUT_RE.match(sym)
+            key = _CAPITAL_BOOK_KEY[m.group(1)] if m else sym
+            if ledger is not None:
+                led = ledger.get(key)
+                if not led or led.get("side") != (p.get("side") if isinstance(p, dict) else None):
+                    continue
+            keys.add(key)
+        return ",".join(sorted(keys))
+    except Exception:
+        return ""  # a bad row must not cost the row itself
+
+
+def _record_manual_close_row(symbols):
+    """Built here rather than via lib.portfolio._record_order_error(extra=...):
+    an older workspace's version doesn't take the extra fields."""
+    from datetime import datetime
+    path = os.path.join(WORKSPACE, "manager", "order_errors.json")
+    try:
+        with open(path) as f:
+            rows = json.load(f)
+        if not isinstance(rows, list):
+            rows = []
+    except (OSError, ValueError):
+        rows = []
+    rows.append({"kind": "manual_close_required", "symbols": symbols, "reason": "identity",
+                 "ts": datetime.utcnow().isoformat(), "symbol": "*", "exchange": "capital",
+                 "error": "close-all: 群益部位未平倉(此身分無法登入群益 API),請在群益下單軟體手動平倉"})
+    with open(path, "w") as f:
+        json.dump(rows[-5:], f, indent=2)
+
+
 def _cmd_close_all(args):
     """Panic: trip HALT synchronously, then flatten every venue position in a
     detached process (fills can take a while — the command loop must not wait;
-    results surface through orders.jsonl → the report, like everything else)."""
+    results surface through orders.jsonl → the report, like everything else).
+
+    Ack vocabulary (opaque `close_all=<state>` string, same shape throughout —
+    nothing downstream matches on the value, so new states are additive):
+      started        — HALT tripped, a flatten was launched
+      already_running — HALT tripped, but one flatten is already working; this
+                       press launched nothing. The 暫停/全部平倉 buttons stay
+                       pressable on purpose (Wei), so a second press is normal
+                       and means "stop faster" — the UI should say 已經在平倉了
+                       rather than pretend it sent another one, because a
+                       second flatten on 群益 would open a reversed position
+                       (manager/flatten.py › SINGLE-FLIGHT)
+      halted_only    — this workspace has no manager/flatten.py
+      halted_capital_manual — HALT tripped, nothing launched: 群益 is the only
+                       closable venue and this identity can't log in to SKCOM
+                       (portfolio_reporter.can_flatten); recorded in
+                       order_errors for the user to close by hand
+    After a machine restart (state/reconciler_stopped.json, Wei 2026-09-22) the
+    press still closes but does NOT halt (unless this workspace's reconciler
+    has no restart gate — then it halts as before), and the machine stays stopped: the
+    flatten gets a one-time close-only pass (lib/guard.claim_close_all_pass) and
+    every state above carries a `restart_stopped:` prefix instead of the halt —
+    e.g. `close_all=restart_stopped:started`."""
     from lib.guard import trip_halt
 
-    trip_halt("close all positions", "web")
-    if not os.path.isfile(os.path.join(WORKSPACE, "manager", "flatten.py")):
+    restart = os.path.exists(RESTART_STOP_PATH)
+    prefix = "close_all=restart_stopped:" if restart else "close_all="
+    flatten_path = os.path.join(WORKSPACE, "manager", "flatten.py")
+    try:
+        with open(flatten_path, encoding="utf-8") as f:
+            claims_pass = "claim_close_all_pass" in f.read()
+    except OSError:
+        claims_pass = False
+    # No HALT only when the record really holds everything back: the reconciler
+    # is proven gated (_reconciler_gated) AND this flatten claims the pass.
+    # Anything else — an old reconciler that only honours HALT, an old flatten —
+    # trips it synchronously as before, or the old reconciler re-opens what the
+    # flatten closes.
+    if not (restart and claims_pass and _reconciler_gated()):
+        trip_halt("close all positions", "web")
+    if not os.path.isfile(flatten_path):
         # workspace 還沒更新到有平倉層——誠實回報只掛了 halt(reporter 的
         # can_flatten 同一判準,前端本來就不會給這顆選項;這裡是最後防線)
-        return "close_all=halted_only"
+        return prefix + ("nothing_closed" if restart else "halted_only")
+    if _flatten_already_running():
+        return prefix + "already_running"
+    if _capital_only_unflattenable():
+        # 前端照 can_flatten 不會給這顆;舊畫面/舊報告還是可能送來。不起 flatten:
+        # 還沒更新的 flatten.py 會在這個身分下硬登 SKCOM(602)
+        try:
+            _record_manual_close_row(_capital_open_book_keys())
+        except Exception:
+            pass
+        return prefix + ("capital_manual" if restart else "halted_capital_manual")
+    pass_written = False
+    if restart and claims_pass:
+        if not _write_close_all_pass():
+            return prefix + "nothing_closed"  # the flatten could close nothing without it
+        pass_written = True
+    try:
+        return _launch_flatten(prefix)
+    except BaseException:
+        if pass_written:  # never leave a claimable pass behind a flatten that did not start
+            try:
+                os.remove(os.path.join(WORKSPACE_STATE, "close_all_pass.json"))
+            except OSError:
+                pass
+        raise
+
+
+# manager/flatten.py EXIT_ALREADY_RUNNING (the runtime does not import the workspace module)
+FLATTEN_EXIT_ALREADY_RUNNING = 3
+
+
+def _kick_when_flatten_exits(proc):
+    """The positions the page shows are the reconciler's snapshot, and a
+    flatten sells without a round: the closes stayed invisible until the
+    heartbeat (29026, 2026-09-24: five minutes). manager/flatten.py kicks on
+    its own now; this covers a workspace whose flatten.py predates that (the
+    runtime updates first). Under the HALT that round only re-reads. Windows
+    launches through powershell and has no process to wait on."""
+    if not hasattr(proc, "wait"):
+        return
+
+    def _run():
+        try:
+            proc.wait()
+        finally:
+            # the loser of a double press exits within a second having sold
+            # nothing: kicking then makes the reconciler read the half-closed
+            # account while the holder is still selling. The holder's exit kicks.
+            if proc.returncode != FLATTEN_EXIT_ALREADY_RUNNING:
+                _kick_reconciler()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _launch_flatten(prefix):
     # log 進檔案不進 DEVNULL:detached 程序的失敗路徑(沒 order lib、平倉炸)
     # 除了 order_errors.json 外,還要有完整紀錄可查
     log_path = os.path.join(WORKSPACE, "state", "flatten.log")
@@ -2688,10 +4369,11 @@ def _cmd_close_all(args):
     if _local_mode():
         # own session: the flatten must outlive a daemon that is shutting down
         with open(log_path, "ab") as logf:
-            subprocess.Popen([sys.executable, "manager/flatten.py"], cwd=WORKSPACE,
-                             env=_local_child_env(), stdout=logf, stderr=logf,
-                             start_new_session=True)
-        return "close_all=started"
+            proc = subprocess.Popen([sys.executable, "manager/flatten.py"], cwd=WORKSPACE,
+                                    env=_local_child_env(), stdout=logf, stderr=logf,
+                                    start_new_session=True, **_child_kw())
+        _kick_when_flatten_exits(proc)
+        return prefix + "started"
     if platform.system() == "Windows":
         # 脫離 NSSM 的 process tree:bridge 重啟時 NSSM 會殺整棵樹,平倉做一半
         # 被砍=HALT 掛著、倉平一半。經由一個立刻退場的 powershell 中轉
@@ -2704,17 +4386,18 @@ def _cmd_close_all(args):
         )
         subprocess.Popen(["powershell", "-NoProfile", "-Command", ps_cmd],
                          cwd=WORKSPACE, env=child_env,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return "close_all=started"
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_child_kw())
+        return prefix + "started"
     # Linux:bridge unit 是 KillMode=process(見 systemd/blave-agent-web.service)
     # ——重啟只殺 bridge 本體,flatten 活到收工
     with open(log_path, "ab") as logf:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["python3", "manager/flatten.py"],
             cwd=WORKSPACE, env=child_env,
-            stdout=logf, stderr=logf, start_new_session=True,
+            stdout=logf, stderr=logf, start_new_session=True, **_child_kw()
         )
-    return "close_all=started"
+    _kick_when_flatten_exits(proc)
+    return prefix + "started"
 
 
 # ── 策略管理(工作頁 投資組合 › 策略管理)──────────────────────────────────────
@@ -3067,7 +4750,7 @@ def _pid_cmdline(pid):
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
-                capture_output=True, text=True, timeout=5)  # runs on the poll loop
+                capture_output=True, text=True, timeout=5, **_child_kw())  # runs on the poll loop
         except (OSError, subprocess.SubprocessError, ValueError):
             return ""
         return r.stdout or ""
@@ -3078,7 +4761,7 @@ def _pid_cmdline(pid):
         pass
     try:  # no /proc (dev macOS)
         r = subprocess.run(["ps", "-o", "args=", "-p", str(int(pid))],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, **_child_kw())
     except (OSError, subprocess.SubprocessError, ValueError):
         return ""
     return r.stdout or ""
@@ -3257,7 +4940,7 @@ def _cmd_manage_optimize(args):
         try:
             r = subprocess.run(argv, cwd=WORKSPACE, env=_strategy_subprocess_env(),
                                capture_output=True, encoding="utf-8", errors="replace",
-                               timeout=_MANAGE_OPTIMIZE_TIMEOUT_S)
+                               timeout=_MANAGE_OPTIMIZE_TIMEOUT_S, **_child_kw())
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"optimizer timed out after {_MANAGE_OPTIMIZE_TIMEOUT_S}s")
         if r.returncode != 0:
@@ -3303,7 +4986,7 @@ def _cmd_manage_backtest(args):
     env = _strategy_subprocess_env() | {"PYTHONUNBUFFERED": "1"}
     with open(paths["log"], "wb") as logf:
         proc = subprocess.Popen(argv, cwd=WORKSPACE, env=env,
-                                stdout=logf, stderr=logf, **popen_kw)
+                                stdout=logf, stderr=logf, **_child_kw(**popen_kw))
     doc = {
         "status": "running", "pid": proc.pid, "members": members,
         # only what was actually pinned — see _mgmt_result_matches on why an
@@ -3388,7 +5071,7 @@ def _cmd_manage_cancel(args):
         try:
             if platform.system() == "Windows":
                 subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
-                               capture_output=True, timeout=30, check=True)
+                               capture_output=True, timeout=30, check=True, **_child_kw())
             else:
                 os.killpg(pid, signal.SIGTERM)
         except (OSError, subprocess.SubprocessError) as e:
@@ -3588,6 +5271,7 @@ HANDLERS = {
     "reply_lang_set": _cmd_reply_lang_set,
     "tz_set": _cmd_tz_set,
     "telegram_reset": _cmd_telegram_reset,
+    "book_account_confirm": _cmd_book_account_confirm,
 }
 
 
@@ -3606,9 +5290,20 @@ def dispatch(command):
     # a swallowed ImportError or a HALT file in the wrong cwd); credentials for
     # the same reason (its rebind-eviction halt).
     if cmd in ("halt", "resume", "resume_wait", "downtime_hold", "close_all",
-               "credentials", "credentials_remove"):
-        return _in_workspace(fn, args)
-    return fn(args)
+               "credentials", "credentials_remove", "book_account_confirm"):
+        result = _in_workspace(fn, args)
+    else:
+        result = fn(args)
+    # a start held for an unanswered account question changed nothing: the
+    # restart-stop record and a stopped reconciler stay as they are
+    if cmd in ("resume", "resume_wait") and args.get("strategies") is None \
+            and not str(result).startswith("held:"):
+        if os.path.exists(RESTART_STOP_PATH):
+            result = f"{result}; {_start_after_restart_stop()}"
+        elif not _local_mode():
+            # the local app supervises its own reconciler and sends its own follow-up
+            result = f"{result}; {_ensure_reconciler_running()}"
+    return result
 
 
 def poll_once():
@@ -3681,6 +5376,10 @@ def run(on_applied=None, on_progress=None):
         _log("BLAVE_PROXY_TOKEN not set; command listener disabled")
         return
     _log("started")
+    try:
+        _machine_restart_check()
+    except Exception as e:
+        _log(f"machine restart check failed: {type(e).__name__}: {e}")
     global _ON_APPLIED, _ON_PROGRESS
     _ON_APPLIED = on_applied
     _ON_PROGRESS = on_progress

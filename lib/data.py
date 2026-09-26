@@ -1,10 +1,14 @@
 import os
+import io
+import csv
 import json
 import shutil
 import numbers
 import time
 import threading
+import logging
 import requests
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -55,6 +59,55 @@ def _kline_source():
     return os.environ.get('BLAVE_KLINE_SOURCE', 'blave').strip().lower()
 
 
+class DataAccessError(RuntimeError):
+    """No Blave data access this turn (BLAVE_DATA_ACCESS=0, or a scheduled desktop run whose `.env`
+    holds no working key). Its own type so a caller with a
+    public fallback (the report templates) can tell it from a fetch that failed."""
+
+
+def _check_data_access(headers=None):
+    """Desktop shell sets BLAVE_DATA_ACCESS=0 when it withheld the Blave key this turn
+    (no balance for the hourly fee / not signed in). Failing here, before any request,
+    is what stops the agent from hunting for credentials after a low-level error —
+    a KeyError or 403 reads as a bug to fix, this reads as a fact. Unset or 1: no-op, except
+    that a scheduled desktop run with no key in `headers` fails the same way (_check_desktop_key)."""
+    if os.environ.get('BLAVE_DATA_ACCESS') == '0':
+        raise DataAccessError(_NO_ACCESS_MSG)
+    if headers is not None:
+        _check_desktop_key(headers)
+
+
+_NO_ACCESS_MSG = ('Blave data is not reachable on this desktop this turn (no balance for the '
+                  'hourly fee / not signed in); stop here, do not look for credentials in .env, '
+                  'the environment or elsewhere, and answer the user with what public klines allow.')
+
+
+def _daemon_on_desktop():
+    """A scheduled report job on the desktop: report_runner marks it BLAVE_SCHEDULED_RUN=1 next
+    to BLAVE_AGENT_LOCAL=1. Not inferred from BLAVE_DATA_ACCESS being absent — the shell leaves
+    that unset on a chat turn too when the user put their own key in `.env`."""
+    return os.environ.get('BLAVE_AGENT_LOCAL') == '1' and os.environ.get('BLAVE_SCHEDULED_RUN') == '1'
+
+
+def _check_desktop_key(headers):
+    """On the desktop the shell keeps workspace `.env` in step with the account — the Blave
+    key is there only while the account has data access — so an empty key is that state
+    file saying "no access", not a bug to chase. Scheduled runs have no per-turn flag and
+    read it here; nothing is sent."""
+    if _daemon_on_desktop() and not (headers or {}).get('api-key'):
+        raise DataAccessError(_NO_ACCESS_MSG)
+
+
+def _desktop_denied(r):
+    """Scheduled run on the desktop: the key in `.env` stopped working since the shell last
+    synced it (hour fee not chargeable ERR007, key revoked ERR005, 401). Same meaning as an
+    empty key. A chat turn keeps the raw 403 — its body carries what the user must be told."""
+    if not _daemon_on_desktop():
+        return
+    if r.status_code == 401 or (r.status_code == 403 and any(c in r.text for c in ('ERR007', 'ERR005'))):
+        raise DataAccessError(_NO_ACCESS_MSG)
+
+
 def _retry_get(url, max_retries=6, **kwargs):
     """GET with exponential backoff on transient failures (2, 4, 8, 16, 32, 64 s).
 
@@ -69,6 +122,9 @@ def _retry_get(url, max_retries=6, **kwargs):
     A non-retried 4xx raises requests.HTTPError with the response body appended
     (truncated to 200 chars) — the 4xx bodies carry the only explanation there is.
     """
+    blave = url.startswith(BASE)   # BingX klines share this helper and stay public
+    if blave:
+        _check_data_access(kwargs.get('headers') or {})
     for attempt in range(max_retries):
         try:
             r = requests.get(url, **kwargs)
@@ -80,6 +136,8 @@ def _retry_get(url, max_retries=6, **kwargs):
             time.sleep(wait)
             continue
         if r.status_code != 429 and r.status_code < 500:
+            if blave:
+                _desktop_denied(r)
             try:
                 r.raise_for_status()
             except requests.HTTPError as exc:
@@ -815,11 +873,56 @@ def _sanity_check_ohlc(df, label):
     return df
 
 
+_closed_bars_only = 0   # >0 while a strategy's fetch_data runs under closed_bars_only()
+
+
+class closed_bars_only:
+    """Scope in which the crypto kline fetchers drop the bar that has not closed yet.
+
+    The runner and wait_for_bar wrap a strategy's fetch_data in it: every 24/7 crypto
+    source hands the forming bar back — Blave /kline resamples closed 1m/5m base bars into
+    the requested period without dropping the partial last bucket (at 10:32 the "10:00 1h
+    bar" holds 32 minutes), Binance / BingX klines always include the open candle — and the
+    live tick reads iloc[-1], so the signal would come from a half bar the backtest never
+    sees. Outside the scope nothing changes: paper fills, reports and the drift-band sigma
+    read the current price / trim the forming bar themselves.
+    """
+    def __enter__(self):
+        global _closed_bars_only
+        _closed_bars_only += 1
+        return self
+
+    def __exit__(self, *exc):
+        global _closed_bars_only
+        _closed_bars_only -= 1
+        return False
+
+
+def _drop_forming_bar(df, interval, now=None, force=False):
+    """Rows with label + interval <= now (label = bar open time, crypto/UTC/continuous).
+    No-op outside closed_bars_only() unless force; a weekly-or-longer or unparseable
+    interval passes through untouched — its label convention is not open-time."""
+    if not (force or _closed_bars_only):
+        return df
+    try:
+        td = pd.Timedelta(interval)
+    except (ValueError, TypeError):
+        return df
+    if df.empty or not isinstance(df.index, pd.DatetimeIndex) or td >= pd.Timedelta(days=7):
+        return df
+    now = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
+    if df.index.tz is None:
+        now = (now.tz_convert('UTC') if now.tz is not None else now).tz_localize(None)
+    elif now.tz is None:
+        now = now.tz_localize('UTC')
+    return df[df.index + td <= now]
+
+
 def _is_sub_5min(interval):
     return pd.Timedelta(interval) < pd.Timedelta('5min')
 
 
-def _fetch_kline_raw(symbol, interval, start, end, headers):
+def _fetch_kline_raw(symbol, interval, start, end, headers, max_retries=6):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     sub_5min = _is_sub_5min(interval)
     s = datetime.strptime(start, '%Y-%m-%d')
@@ -835,7 +938,7 @@ def _fetch_kline_raw(symbol, interval, start, end, headers):
         # Sub-5min cold fetches hit Binance fapi server-side and can take minutes;
         # _retry_get also covers transient 429/5xx/timeouts a bare requests.get dropped.
         try:
-            r = _retry_get(f'{BASE}/kline', headers=headers, params={
+            r = _retry_get(f'{BASE}/kline', headers=headers, max_retries=max_retries, params={
                 'symbol': symbol, 'period': interval,
                 'start_date': cs, 'end_date': ce,
             }, timeout=300 if sub_5min else 60)
@@ -878,7 +981,7 @@ def normalize_symbol(symbol):
     return symbol.replace('/', '').replace('-', '').replace('_', '').upper()
 
 
-def fetch_kline(symbol, interval, start, end, headers):
+def fetch_kline(symbol, interval, start, end, headers, max_retries=6):
     """Fetch OHLCV kline data from Blave API with date chunking and local cache.
 
     All intervals reach back to the symbol's Binance um-futures listing date
@@ -894,6 +997,9 @@ def fetch_kline(symbol, interval, start, end, headers):
     same bars: measured 2026-09-19, 8 of 41,335 1h BTCUSDT bars come back from
     /kline as placeholders (O=H=L=C, Volume 0) where Binance has the real bar,
     so a cache dir fed by both sources is a mixed one.
+
+    `max_retries` is _retry_get's (default 6, ~2 min of backoff on 429/5xx):
+    a caller inside a latency budget passes fewer (the reconciler's σ lookup).
     """
     # Venue forms like 'BTC/USDT' → Binance 'BTCUSDT'; the API 400s on
     # separator forms and the separator would leak into the cache dir name.
@@ -901,12 +1007,12 @@ def fetch_kline(symbol, interval, start, end, headers):
     if _kline_source() == 'binance':
         fetch_raw = lambda s, e: _fetch_binance_kline_raw(symbol, interval, s, e)
     else:
-        fetch_raw = lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers)
+        fetch_raw = lambda s, e: _fetch_kline_raw(symbol, interval, s, e, headers, max_retries)
     df = _extend_cache_monthly(
         'kline2', {'symbol': symbol, 'period': interval},
         fetch_raw, start, end,
     )
-    return _sanity_check_ohlc(df, f'{symbol} {interval} kline')
+    return _drop_forming_bar(_sanity_check_ohlc(df, f'{symbol} {interval} kline'), interval)
 
 
 def fetch_kline_batch(symbols, interval, start, end, headers):
@@ -944,7 +1050,8 @@ def fetch_kline_batch(symbols, interval, start, end, headers):
         chunk_size=20, start_param='start_date', end_param='end_date',
         date_chunk_days=30 if _is_sub_5min(interval) else 365,
     )
-    return {sid: _sanity_check_ohlc(df, f'{sid} {interval} kline') for sid, df in results.items()}
+    return {sid: _drop_forming_bar(_sanity_check_ohlc(df, f'{sid} {interval} kline'), interval)
+            for sid, df in results.items()}
 
 
 # ── Exchange-native kline ─────────────────────────────────────────────────────
@@ -1029,7 +1136,7 @@ def fetch_bingx_kline(symbol, interval, start, end):
         lambda s, e: _fetch_bingx_kline_raw(symbol, interval, s, e),
         start, end,
     )
-    return _sanity_check_ohlc(df, f'{symbol} {interval} bingx_kline')
+    return _drop_forming_bar(_sanity_check_ohlc(df, f'{symbol} {interval} bingx_kline'), interval)
 
 
 # ── BYO kline source: Binance fapi, no key ────────────────────────────────────
@@ -1175,10 +1282,10 @@ def _fetch_alpha_raw(endpoint, params, headers, start, end):
         cursor = chunk_end
 
     def _fetch_one(cs, ce):
-        r = requests.get(f'{BASE}/{endpoint}', headers=headers, params={
+        # 3 not the default 6: worst case ~3 min instead of ~8, which would swallow a 1m/5m strategy's cycle
+        r = _retry_get(f'{BASE}/{endpoint}', max_retries=3, headers=headers, params={
             **params, 'start_date': cs, 'end_date': ce,
         }, timeout=60)
-        r.raise_for_status()
         data = r.json().get('data', {})
         return data.get('timestamp', []), data.get('alpha', [])
 
@@ -1293,6 +1400,162 @@ def fetch_liquidation_coin(symbol, headers):
     return r.json().get('data', {})
 
 
+def _raw_snapshot(endpoint, headers, params=None, allow_404=False):
+    """Shared GET for the raw cross-exchange snapshot endpoints (long/short ratio, open
+    interest, CVD, liquidation matrix). No local cache — the server holds the snapshot;
+    every call means "now". A 503 (the scheduled job has no fresh result / a feed is
+    silent) propagates as requests.HTTPError after _retry_get's backoff: an empty table
+    would read as "nothing is happening", which is a different claim from "unknown".
+    allow_404 → None for a coin no source collects (an answer, not an error)."""
+    try:
+        r = _retry_get(f'{BASE}/{endpoint}', headers=headers, params=params, timeout=30)
+    except requests.exceptions.HTTPError as e:
+        if allow_404 and e.response is not None and e.response.status_code == 404:
+            return None
+        raise
+    return r.json().get('data', {})
+
+
+def fetch_long_short_ratio_table(headers):
+    """多空比總表 Long/short ratio (GET /long_short_ratio/get_table), every coin × every source, latest cross-section.
+    Returns a dict — a point-in-time snapshot, not a time series:
+      coins[]: token, token_id, and one ratio per source key (null when that exchange has
+        no such feed for the coin). Ordered by Binance open-interest notional
+      sources[]: the 10 feeds — exchange, key, type ('account' / 'top_account' /
+        'top_position'), last_at, stale. Binance / OKX / Gate publish all three types,
+        Bybit only 'account'. **Read `sources[]`, never a hard-coded key list.**
+      summary{binance_long_majority, binance_tokens}, tokens_shown / tokens_total, full,
+        updated_at
+    The ratio is longs ÷ shorts; long share = r / (1 + r), computed by the caller.
+    **"Top trader" means something different at each exchange** — Binance = the top 20 %
+    of users by margin balance, OKX = the top 5 % of traders by open-position value, Gate
+    has never published its rule. So `binance_top_account` and `okx_top_account` are not
+    comparable as levels; compare each source against its own history instead.
+    Only coins that resolve to a CoinMarketCap crypto are listed. An API key sees every
+    row (`full: true`); anonymous callers get 30."""
+    return _raw_snapshot('long_short_ratio/get_table', headers)
+
+
+def fetch_long_short_ratio_coin(symbol, headers):
+    """一檔幣的多空比 — one coin's long/short ratio per source (GET /long_short_ratio/get_coin). Returns a dict:
+      latest{<source key>: {ts, value}}: newest 5-minute sample of each source
+      series: bucket_seconds=3600, days=7, timestamp[] (epoch seconds, 168 slots,
+        old → new), one array per source key (last sample of each hour, null for an hour
+        with no sample), price[] (Binance perp close on the same frame, null when the coin
+        has no Binance perp) with price_symbol / price_multiplier, and provisional_from
+        (first slot that can still change)
+      sources[]: the full roster — exchange, key, type, listed (False = that exchange has
+        no such feed for this coin, its array is all null), last_at, stale
+      symbol, token_id, updated_at (the newest source; it says nothing about the others —
+        judge a single source by its own `last_at` / `stale`)
+    `symbol` accepts BTC / BTCUSDT / btc. Returns None for a coin no source collects (the
+    API's 404); 503 (a listed source unreadable) propagates as requests.HTTPError."""
+    return _raw_snapshot('long_short_ratio/get_coin', headers,
+                         {'symbol': symbol}, allow_404=True)
+
+
+def fetch_open_interest_table(headers):
+    """未平倉量總表 Open interest (GET /oi_imbalance/get_table — the path still carries the
+    old "imbalance" name; this is the RAW table, not that indicator, see below), every coin
+    × 5 exchanges, in USD notional.
+    Basis: USDT-margined perpetuals only, USD notional, one-sided — an exchange that
+    reports both sides is halved (`exchanges[].side_factor`, Gate = 0.5). Returns a dict:
+      coins[]: token, token_id, oi_total (USD, summed across exchanges), chg_1h / chg_4h /
+        chg_24h (decimal fractions, null when no exchange has a baseline at that window's
+        start), market_cap, oi_mcap (= oi_total ÷ market cap), by_exchange{name: {oi,
+        chg_1h, chg_4h, chg_24h}}
+      exchanges[]: binance / okx / bingx / bybit / gate — whole-market oi, side_factor,
+        since + full_7d (False = that feed started less than 7 days ago), last_at, stale
+      total{oi, chg_*, n_exchanges, n_full_7d}, summary{oi_mcap_leader,
+        oi_mcap_leader_value}, tokens_shown / tokens_total, full, updated_at
+    Each exchange's value is already USD notional, so 1000PEPE-style multiplied contracts
+    add up across exchanges without rescaling.
+    **`oi_total` / `oi_mcap` here are NOT the "OI 失衡" indicator** (`/oi_imbalance/
+    get_overview_data`, Binance + OKX + BingX only) — two different numbers; a threshold
+    tuned on one does not carry over to the other.
+    Built by a scheduled job, so this is not a per-second feed; a stale result is a 503,
+    never a table of zeros. API key sees every row; anonymous callers get 30."""
+    return _raw_snapshot('oi_imbalance/get_table', headers)
+
+
+def fetch_open_interest_coin(symbol, headers):
+    """一檔幣的未平倉量 — one coin's open interest per exchange (GET /oi_imbalance/get_coin;
+    same basis as fetch_open_interest_table). Returns a dict:
+      exchanges[]: the full roster — key, oi (USD), share, chg_1h / chg_4h / chg_24h /
+        chg_7d, side_factor, listed (False = not listed there, values null), since /
+        full_7d, last_at, stale
+      oi_total, market_cap, oi_mcap, oi_mcap_rank / tokens_total (from the table job's last
+        round; null when it has no fresh result)
+      windows{'1h','4h','24h','7d'}: chg, chg_usd, and `exchanges` = which exchanges were
+        counted in that window (only those with a baseline at its start — numerator and
+        denominator over the same set, so 24h and 7d can count fewer exchanges than 1h)
+      series: bucket_seconds=3600, days=7, timestamp[] (epoch seconds, 168 slots),
+        total[] (only the `total_exchanges` — the feeds with a full 7 days — are in this
+        line), total_exchanges[], price[] + price_symbol / price_multiplier,
+        provisional_from
+      symbol, token_id, updated_at
+    `symbol` accepts BTC / BTCUSDT / btc. 404 → None; 503 propagates."""
+    return _raw_snapshot('oi_imbalance/get_coin', headers,
+                         {'symbol': symbol}, allow_404=True)
+
+
+def fetch_cvd_table(headers):
+    """主動買賣淨額總表 CVD (cumulative volume delta; GET /taker_intensity/get_cvd_table), every coin × 3 exchanges, USD.
+    Basis: each exchange's own reported taker turnover, never volume × a borrowed price —
+    Binance = the 5-minute kline's taker-buy quote volume (sell = the bar's total minus
+    it), OKX = its USD taker volume, Gate = taker contracts × the same row's multiplier
+    and mark price. Perpetuals only: **no spot, and not trade-by-trade**. Returns a dict:
+      coins[]: token, token_id, buy_24h / sell_24h, net_1h / net_4h / net_24h (USD;
+        net = buy − sell), by_exchange{name: {buy_24h, sell_24h, net_1h, net_4h, net_24h}}
+      exchanges[]: binance / okx / gate — whole-market buy_24h / sell_24h / net_24h,
+        last_at, stale. A feed more than an hour behind answers null windows and
+        `stale: true` rather than a sum that quietly covers less than the window; the
+        totals then add only the fresh exchanges
+      total{buy_24h, sell_24h, net_24h}, tokens_shown / tokens_total, full, updated_at
+    Windows are rolling, ending at the last closed bar. Built by a scheduled job; a stale
+    result is a 503, never zeros. API key sees every row; anonymous callers get 30."""
+    return _raw_snapshot('taker_intensity/get_cvd_table', headers)
+
+
+def fetch_cvd_coin(symbol, headers):
+    """一檔幣的主動買賣淨額 — one coin's CVD per exchange (GET /taker_intensity/get_cvd_coin;
+    same basis as fetch_cvd_table). Returns a dict:
+      windows{'1h','4h','24h','7d'}: buy / sell / net in USD, summed over the fresh
+        exchanges
+      exchanges[]: the full roster — key, listed, windows{...} per exchange, since /
+        full_7d (False = fewer than 7 days of history here; its 7d window is null and it
+        is left out of the 7d total and of the series), last_at, stale
+      series: bucket_seconds=3600, days=7, timestamp[] (epoch seconds, 168 slots), net[]
+        (clock-hour sums), cvd[] (running total, cvd[0] = 0), exchanges[] (who is in the
+        line), price[] + price_symbol / price_multiplier, provisional_from
+      symbol, token_id, updated_at
+    `symbol` accepts BTC / BTCUSDT / btc. 404 → None; 503 propagates."""
+    return _raw_snapshot('taker_intensity/get_cvd_coin', headers,
+                         {'symbol': symbol}, allow_404=True)
+
+
+def fetch_liquidation_exchanges(headers, hours=24, top_n=10):
+    """爆倉矩陣 (GET /liquidation/get_exchanges) — forced liquidations aggregated across exchanges for the whole market,
+    as the coin × exchange matrix behind fetch_liquidation_coin. USD notional is converted
+    at collection time, so exchanges can be added up. Returns a dict:
+      exchanges[]: binance / bybit / gate / okx / htx / bitfinex — total / long /
+        short_liq_usd, long_pct / short_pct, events, last_event_at, and the two basis
+        columns (price_basis, coverage, time_basis) that say how comparable a row is
+      coins[]: the top `top_n` by cross-exchange total — token, token_id, total / long /
+        short_liq_usd, by_exchange{name: {total/long/short_liq_usd}}
+      others{total/long/short_liq_usd, by_exchange, coin_count}: everything the top_n cut
+        off, so coins[] + others adds back up to each exchange's total
+      total{total/long/short_liq_usd, long_pct, short_pct}, covered_hours, buckets,
+        window_hours / window_start / window_end, updated_at
+    `long_liq_usd` = long positions liquidated (price fell), `short_liq_usd` = shorts.
+    The window is rolling, aligned to 5-minute buckets — the same frame as
+    fetch_liquidation_coin's `windows`, so a coin's 24 h total matches on both.
+    `hours` 1–168 and `top_n` 1–50; outside that the API answers 400 (it does not clamp).
+    No local cache — the server caches 5 minutes."""
+    return _raw_snapshot('liquidation/get_exchanges', headers,
+                         {'hours': hours, 'top_n': top_n})
+
+
 def fetch_market_direction(interval, start, end, headers):
     """市場方向 Market Direction (market-wide, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('market_direction/get_alpha',
@@ -1317,6 +1580,36 @@ def fetch_top_trader_exposure(interval, start, end, headers):
                         {'period': interval}, headers, start, end)
 
 
+_ALPHA_FETCHERS = (
+    'fetch_holder_concentration', 'fetch_funding_rate', 'fetch_taker_intensity',
+    'fetch_whale_hunter', 'fetch_unusual_movement', 'fetch_squeeze_momentum',
+    'fetch_liquidation', 'fetch_market_direction', 'fetch_capital_shortage',
+    'fetch_market_sentiment', 'fetch_top_trader_exposure',
+)
+
+
+class UnknownFetcher(ImportError):
+    """A guessed fetcher name (`fetch_alpha`, `get_alpha`, `fetch_indicator`, a misspelt
+    `fetch_<alpha>`): the message lists the real alpha fetchers with their signatures.
+    ImportError on purpose — `from lib.data import fetch_alpha` (the agent's usual first
+    guess) swallows an AttributeError raised by a module __getattr__ and prints only the
+    bare `cannot import name`; an ImportError propagates as is. Cost: hasattr(lib.data,
+    'fetch_<missing>') raises instead of answering False — no caller does that."""
+
+
+def __getattr__(name):
+    if name.startswith('__') or not (name.startswith(('fetch_', 'get_'))
+                                     or 'alpha' in name or 'indicator' in name):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import inspect
+    sigs = '; '.join(f'{n}{inspect.signature(globals()[n])}' for n in _ALPHA_FETCHERS)
+    raise UnknownFetcher(
+        f"lib.data has no {name!r}. There is no generic alpha fetcher — each Blave alpha has "
+        f"its own function (all return a DataFrame with an 'alpha' column; 'headers' is the "
+        f"api-key/secret-key dict, see references/lib.md > 'Alpha fetchers - quick reference'): "
+        f"{sigs}", name=__name__)
+
+
 # ── CME / NYMEX / ICE futures (via /studio/market/db) ────────────────────────
 
 _DB_CHUNK_DAYS = {'ohlcv-1m': 28, 'ohlcv-1h': 365, 'ohlcv-1d': 3650}
@@ -1326,6 +1619,7 @@ def _fetch_db_raw(dataset, symbol, schema, start, end, headers):
     """Fetch OHLCV — chunks fetched concurrently, chunk size by schema."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    _check_data_access(headers)
     s    = datetime.strptime(start, '%Y-%m-%d')
     e    = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
     days = _DB_CHUNK_DAYS.get(schema, 30)
@@ -1405,6 +1699,393 @@ def fetch_db_kline(dataset, symbol, schema, start, end, headers):
 
 # ── Taiwan stock data ─────────────────────────────────────────────────────────
 
+# ── Daily bars straight from the exchanges (free, no key) ─────────────────────
+# 資料來源:臺灣證券交易所、證券櫃檯買賣中心(政府資料開放授權)
+# The daily bar travels source → this machine only, never through a Blave server: Blave
+# ships the code (as the twstock package does), the user fetches public data for their own
+# use. Both sites' terms exempt their open-data sets and ask that the source be named —
+# _TW_PUBLIC_SOURCE_ZH is the line a report must carry. One request answers one stock-
+# month, which is the monthly cache's own unit; neither site documents a rate limit, so
+# everything here (FinMind included) goes through one shared 1 request/s throttle.
+_TWSE_STOCK_DAY      = 'https://www.twse.com.tw/exchangeReport/STOCK_DAY'
+_TWSE_STOCK_DAY_ALL  = 'https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL'
+_TWSE_EXRIGHT        = 'https://www.twse.com.tw/rwd/zh/exRight/TWT49U'
+_TPEX_TRADING_STOCK  = 'https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock'
+_TPEX_MAINBOARD      = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes'
+_TPEX_EXRIGHT        = 'https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ'
+_FINMIND_DATA        = 'https://api.finmindtrade.com/api/v4/data'
+_TWSE_STOCK_DAY_FROM = '2010-01'      # STOCK_DAY: 「查詢日期小於99年1月4日」 before this
+_TW_PUBLIC_SOURCE_ZH = '資料來源:臺灣證券交易所、證券櫃檯買賣中心(政府資料開放授權)'
+_TW_PUBLIC_SOURCE_EN = 'Source: Taiwan Stock Exchange, Taipei Exchange (Open Government Data License)'
+_TW_PUBLIC_HEADERS   = {'User-Agent': 'Mozilla/5.0 (compatible; blave-agent; +https://blave.org)'}
+_TW_PUBLIC_LIMITER   = _RateLimiter(1, 1.0)
+# twse.com.tw on its own, slower bucket: it blocks an IP at roughly one request a second (no
+# published number), and the IP it blocks is the user's home connection.
+_TWSE_LIMITER        = _RateLimiter(1, 3.0)
+_TW_PUBLIC_SESSION   = None
+_TW_DAILY_COLS       = ['Open', 'High', 'Low', 'Close', 'Volume']
+_TW_EXRIGHT_COLS     = ['stock_id', 'prev_close', 'ref_price']
+
+
+class TwPublicUnavailable(RuntimeError):
+    """The key-free path could not serve this request (site down, layout changed, blocked,
+    or the id is on neither exchange) — the caller moves on to the next source."""
+
+
+def _twstock_daily_source():
+    """'public' (exchange → FinMind free → Blave) or 'blave' (the Blave endpoint only).
+
+    The free sources run only on the user's own computer: the desktop build marks itself
+    with BLAVE_AGENT_LOCAL=1 (shell/daemon.js, runtime/agent_turn.py — the same flag
+    lib/venue.py reads), and there the chain is the default; a cloud fleet machine (flag
+    absent) stays on Blave exactly as before, so no Blave server ever hits twse.com.tw,
+    tpex.org.tw or FinMind. BLAVE_TWSTOCK_DAILY_SOURCE=public|blave overrides either way."""
+    forced = os.environ.get('BLAVE_TWSTOCK_DAILY_SOURCE', '').strip().lower()
+    if forced in ('public', 'blave'):
+        return forced
+    return 'public' if os.environ.get('BLAVE_AGENT_LOCAL') == '1' else 'blave'
+
+
+def _tw_public_session():
+    global _TW_PUBLIC_SESSION
+    if _TW_PUBLIC_SESSION is None:
+        _TW_PUBLIC_SESSION = requests.Session()
+    return _TW_PUBLIC_SESSION
+
+
+def _tw_public_get(url, params, tries=3):
+    """One throttled GET at an exchange site or FinMind. Timeouts, connection errors, 429
+    and 5xx are retried twice with a short backoff; anything else raises — there is no
+    per-user quota worth waiting on, and the caller has further sources to try."""
+    limiter = _TWSE_LIMITER if '.twse.com.tw/' in url else _TW_PUBLIC_LIMITER
+    for attempt in range(tries):
+        limiter.acquire()
+        try:
+            r = _tw_public_session().get(url, params=params, headers=_TW_PUBLIC_HEADERS, timeout=30)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt == tries - 1:
+                raise
+            time.sleep(2 ** (attempt + 1))
+            continue
+        if (r.status_code == 429 or r.status_code >= 500) and attempt < tries - 1:
+            time.sleep(2 ** (attempt + 1))
+            continue
+        r.raise_for_status()
+        return r
+
+
+def _roc_date(s):
+    """民國 date '113/01/02' or '112年03月16日' → Timestamp 2024-01-02 / 2023-03-16."""
+    parts = [p for p in s.replace('年', '/').replace('月', '/').replace('日', '').split('/') if p.strip()]
+    y, m, d = (int(p) for p in parts[:3])
+    return pd.Timestamp(year=y + 1911, month=m, day=d)
+
+
+def _tw_num(s):
+    """'27,997,826' → 27997826.0, '+3.00' → 3.0; '--' (no trade), blank or 全形空白 → NaN."""
+    try:
+        return float(str(s).replace(',', '').replace('　', '').strip())
+    except ValueError:
+        return float('nan')
+
+
+def _tw_daily_frame(rows):
+    """rows (date, open, high, low, close, shares) → the fetch_twstock_price frame: naive
+    Taipei dates, floats, zero/blank prices forward-filled exactly as the Blave path does."""
+    if not rows:
+        return pd.DataFrame(columns=_TW_DAILY_COLS)
+    df = pd.DataFrame(rows, columns=['date'] + _TW_DAILY_COLS).set_index('date').sort_index()
+    return df.astype(float).replace(0, float('nan')).ffill()
+
+
+def _twse_stock_day(stock_id, ym):
+    """One TWSE stock-month (STOCK_DAY, date=YYYYMM01). Empty when the month has no rows
+    for the id; any other non-OK answer raises so it can never be cached as an empty month."""
+    r = _tw_public_get(_TWSE_STOCK_DAY, {'response': 'json', 'date': f'{ym[:4]}{ym[5:7]}01',
+                                         'stockNo': stock_id})
+    j = r.json()
+    stat = str(j.get('stat', ''))
+    if stat != 'OK':
+        if '沒有符合條件' in stat:
+            return _tw_daily_frame([])
+        raise TwPublicUnavailable(f'TWSE STOCK_DAY {stock_id} {ym}: {stat[:60]}')
+    # 日期, 成交股數, 成交金額, 開盤價, 最高價, 最低價, 收盤價, …
+    return _tw_daily_frame([(_roc_date(x[0]), _tw_num(x[3]), _tw_num(x[4]), _tw_num(x[5]),
+                             _tw_num(x[6]), _tw_num(x[1])) for x in j.get('data', [])])
+
+
+def _tpex_trading_stock(stock_id, ym):
+    """One TPEx stock-month (tradingStock, date=YYYY/MM/01). 成交仟股 → shares (×1,000, so
+    volume is rounded to the thousand — TWSE and FinMind carry exact shares)."""
+    r = _tw_public_get(_TPEX_TRADING_STOCK, {'code': stock_id, 'date': f'{ym[:4]}/{ym[5:7]}/01',
+                                             'response': 'json'})
+    tables = r.json().get('tables') or []
+    if not tables:
+        raise TwPublicUnavailable(f'TPEx tradingStock {stock_id} {ym}: no tables in the answer')
+    # 日 期, 成交仟股, 成交仟元, 開盤, 最高, 最低, 收盤, …
+    return _tw_daily_frame([(_roc_date(x[0]), _tw_num(x[3]), _tw_num(x[4]), _tw_num(x[5]),
+                             _tw_num(x[6]), _tw_num(x[1]) * 1000) for x in tables[0].get('data', [])])
+
+
+def _tw_public_months(start, end):
+    """The 'YYYY-MM' months whose first day is in [start, end) — `end` exclusive, as
+    _extend_cache_monthly passes it — and not past the current Taipei month."""
+    last = datetime.now(_TPE).strftime('%Y-%m')
+    return [ym for ym in _iter_months(start, end) if f'{ym}-01' < end and ym <= last]
+
+
+def _fetch_twstock_daily_public_raw(stock_id, market, start, end):
+    fetch = _twse_stock_day if market == 'twse' else _tpex_trading_stock
+    frames = [f for f in (fetch(stock_id, ym) for ym in _tw_public_months(start, end)) if not f.empty]
+    return pd.concat(frames) if frames else _tw_daily_frame([])
+
+
+def _tw_market_file():
+    return _CACHE_DIR / 'twstock_public_market.json'
+
+
+def _twse_all_codes():
+    r = _tw_public_get(_TWSE_STOCK_DAY_ALL, {'response': 'open_data'})
+    rows = list(csv.reader(io.StringIO(r.content.decode('utf-8-sig'))))
+    if not rows or '證券代號' not in rows[0]:
+        raise TwPublicUnavailable('TWSE STOCK_DAY_ALL: unexpected layout')
+    col = rows[0].index('證券代號')
+    return sorted({row[col].strip() for row in rows[1:] if len(row) > col})
+
+
+def _tpex_all_codes():
+    r = _tw_public_get(_TPEX_MAINBOARD, {})
+    codes = {str(x.get('SecuritiesCompanyCode', '')).strip() for x in r.json()} - {''}
+    if not codes:
+        raise TwPublicUnavailable('TPEx mainboard quotes: no rows')
+    return sorted(codes)
+
+
+def _tw_public_market(stock_id):
+    """'twse' / 'tpex' from the exchanges' latest full-market files (TWSE STOCK_DAY_ALL open
+    data, TPEx mainboard quotes — the two daily sets registered on data.gov.tw), or the
+    market an earlier probe settled on; None when the id is in neither (delisted or
+    unknown). A hit in a stale file still counts — listing status does not flip overnight —
+    so the two files are re-fetched only on a miss, at most once a day."""
+    path = _tw_market_file()
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        data = {}
+
+    def _lookup():
+        for m in ('twse', 'tpex'):
+            if stock_id in data.get(m, ()):
+                return m
+        return data.get('resolved', {}).get(stock_id)
+
+    market = _lookup()
+    day_ago = (datetime.utcnow() - timedelta(days=1)).strftime(_META_TS_FMT)
+    if market is None and data.get('fetched_at', '') < day_ago:
+        data.update(twse=_twse_all_codes(), tpex=_tpex_all_codes(),
+                    fetched_at=datetime.utcnow().strftime(_META_TS_FMT))
+        _write_market_file(data)
+        market = _lookup()
+    return market
+
+
+def _write_market_file(data):
+    path = _tw_market_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    tmp.write_text(json.dumps(data, ensure_ascii=False))
+    os.replace(tmp, path)
+
+
+def _tw_public_probe_market(stock_id, ym):
+    """Neither exchange lists the id today (delisted?): ask each for the first requested
+    month, and the one with rows is the market — remembered so this runs once per id."""
+    for market, fetch in (('twse', _twse_stock_day), ('tpex', _tpex_trading_stock)):
+        if market == 'twse' and ym < _TWSE_STOCK_DAY_FROM:
+            continue
+        if not fetch(stock_id, ym).empty:
+            try:
+                data = json.loads(_tw_market_file().read_text())
+            except Exception:
+                data = {}
+            data.setdefault('resolved', {})[stock_id] = market
+            _write_market_file(data)
+            return market
+    raise TwPublicUnavailable(f'{stock_id}: no rows on TWSE or TPEx for {ym}')
+
+
+def _twse_exright_rows(year, end_day):
+    r = _tw_public_get(_TWSE_EXRIGHT, {'response': 'json', 'startDate': f'{year}0101',
+                                       'endDate': end_day.replace('-', '')})
+    j = r.json()
+    stat = str(j.get('stat', ''))
+    if stat != 'OK':
+        if '沒有符合條件' in stat:
+            return []
+        raise TwPublicUnavailable(f'TWSE TWT49U {year}: {stat[:60]}')
+    # 資料日期, 股票代號, 股票名稱, 除權息前收盤價, 除權息參考價, …
+    return [(_roc_date(x[0]), x[1].strip(), _tw_num(x[3]), _tw_num(x[4])) for x in j.get('data', [])]
+
+
+def _tpex_exright_rows(year, end_day):
+    r = _tw_public_get(_TPEX_EXRIGHT, {'startDate': f'{year}/01/01', 'endDate': end_day.replace('-', '/'),
+                                       'response': 'json'})
+    tables = r.json().get('tables') or []
+    if not tables:
+        raise TwPublicUnavailable(f'TPEx exDailyQ {year}: no tables in the answer')
+    # 除權息日期, 代號, 名稱, 除權息前收盤價, 除權息參考價, …
+    return [(_roc_date(x[0]), x[1].strip(), _tw_num(x[3]), _tw_num(x[4])) for x in tables[0].get('data', [])]
+
+
+def _tw_exright_events(market, start, end):
+    """The exchange's whole-market 除權息計算結果表 (TWSE TWT49U / TPEx exDailyQ) rows with
+    ex-dates in [start, end]: index = ex-date, columns stock_id / prev_close / ref_price.
+    One parquet per month under cache/twstock_exright_{market}/: a past month is fetched
+    once (completed once if written before the month ended, like every monthly cache), the
+    current month re-fetched when older than an hour. Both sites answer a whole year per
+    request, so a missing month costs one request and fills the year's other months too."""
+    cache_dir = _CACHE_DIR / f'twstock_exright_{market}'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(_TPE)
+    current_ym = today.strftime('%Y-%m')
+    end_str = end or today.strftime('%Y-%m-%d')
+    months = [ym for ym in _iter_months(start, end_str) if ym <= current_ym]
+
+    def _needs(ym):
+        path = cache_dir / f'{ym}.parquet'
+        if not path.exists():
+            return True
+        if ym < current_ym:
+            return _written_before_month_end(path, ym)
+        return time.time() - path.stat().st_mtime > 3600
+
+    rows_of = _twse_exright_rows if market == 'twse' else _tpex_exright_rows
+    for year in sorted({ym[:4] for ym in months if _needs(ym)}):
+        rows = rows_of(year, min(f'{year}-12-31', today.strftime('%Y-%m-%d')))
+        df = pd.DataFrame(rows, columns=['date'] + _TW_EXRIGHT_COLS)
+        df = df.astype({'stock_id': str, 'prev_close': float, 'ref_price': float})
+        df.index = pd.DatetimeIndex(df.pop('date'), name='date')
+        for ym in _iter_months(f'{year}-01', min(f'{year}-12', current_ym)):
+            _atomic_to_parquet(df[df.index.strftime('%Y-%m') == ym], cache_dir / f'{ym}.parquet')
+    frames = [pd.read_parquet(cache_dir / f'{ym}.parquet') for ym in months]
+    out = pd.concat(frames) if frames else pd.DataFrame(columns=_TW_EXRIGHT_COLS)
+    return out[(out.index >= pd.Timestamp(start)) & (out.index <= pd.Timestamp(end_str))]
+
+
+def _tw_exright_for(stock_id, market, start, end):
+    markets = (market,) if market else ('twse', 'tpex')
+    events = pd.concat([_tw_exright_events(m, start, end) for m in markets])
+    return events[events['stock_id'] == stock_id]
+
+
+def _tw_forward_adjust(df, events):
+    """後復權 by the api's forward_adjust rule (api/tw/twstock/adjuster.py): rows before an
+    ex-date keep their price, rows from the ex-date on are multiplied by 除權息前收盤價 ÷
+    除權息參考價. For cash and stock dividends that is prev_close × (1 + stock_ratio) ÷
+    (prev_close − cash), the Blave factor; the exchange tables also carry other ex-rights
+    events (現金增資 and the like) that Blave's adjustment leaves out, so from such a date
+    the two series differ by that event's factor. An event with no bar before it in the
+    frame is skipped and OHLC is rounded to 2, both as there."""
+    factor = pd.Series(1.0, index=df.index)
+    for ex_date, prev_close, ref in events[['prev_close', 'ref_price']].sort_index().itertuples():
+        if not (prev_close > 0 and ref > 0) or ex_date <= df.index[0]:
+            continue
+        factor[df.index >= ex_date] *= prev_close / ref
+    out = df.copy()
+    cols = [c for c in ('Open', 'High', 'Low', 'Close') if c in out.columns]
+    out[cols] = out[cols].mul(factor, axis=0).round(2)
+    return out
+
+
+def _fetch_twstock_daily_public(stock_id, start, end, adjust=False):
+    """Daily OHLCV for one stock from its own exchange — TWSE STOCK_DAY (listed, 2010-01-04
+    on) or TPEx tradingStock (OTC) — month by month through the monthly cache: a past month
+    is fetched once, the current month re-fetched per call. adjust=True forward-adjusts with
+    the exchange's 除權息計算結果表 (_tw_forward_adjust). Raises TwPublicUnavailable / a
+    requests error when the exchange cannot serve it; the caller falls back."""
+    # A window that has not happened yet (end left to us, start past Taipei tomorrow) is an
+    # empty answer, not a request — the same rule as _extend_cache_single.
+    if end is None and (datetime.now(_TPE) + timedelta(days=1)).strftime('%Y-%m-%d') < start:
+        df = _tw_daily_frame([])
+        df.attrs['source'] = 'TWSE/TPEx'
+        return df
+    market = _tw_public_market(stock_id) or _tw_public_probe_market(stock_id, start[:7])
+    if market == 'twse' and start[:7] < _TWSE_STOCK_DAY_FROM:
+        raise TwPublicUnavailable(f'TWSE STOCK_DAY has no data before 2010-01-04 (asked from {start})')
+    df = _extend_cache_monthly(
+        'twstock_daily', {'id': stock_id, 'src': market},
+        lambda s, e: _fetch_twstock_daily_public_raw(stock_id, market, s, e), start, end,
+        # TWSE says 「沒有符合條件」 for a month the id had no rows — and, unverified, maybe
+        # when it throttles too; an empty month is re-asked once a day, never cached for good
+        empty_marker_ttl_hours=24)
+    if adjust and not df.empty:
+        df = _tw_forward_adjust(df, _tw_exright_for(stock_id, market, start, end))
+    df.attrs['source'] = 'TWSE' if market == 'twse' else 'TPEx'
+    return df
+
+
+def _fetch_twstock_daily_finmind_raw(stock_id, start, end):
+    """FinMind free tier, raw TaiwanStockPrice: no token, 300 requests/hour, the whole range
+    in one answer, numbers identical to the exchanges'. It has no adjusted series (that is
+    the Sponsor tier), so factors still come from the exchanges' tables."""
+    r = _tw_public_get(_FINMIND_DATA, {'dataset': 'TaiwanStockPrice', 'data_id': stock_id,
+                                       'start_date': start, 'end_date': end})
+    j = r.json()
+    if j.get('status') != 200:
+        raise TwPublicUnavailable(f"FinMind TaiwanStockPrice {stock_id}: {str(j.get('msg'))[:80]}")
+    return _tw_daily_frame([(pd.Timestamp(x['date']), x['open'], x['max'], x['min'], x['close'],
+                             x['Trading_Volume']) for x in j.get('data', [])])
+
+
+def _fetch_twstock_daily_free(stock_id, start, end, adjust=False):
+    """The two key-free sources in order (exchange, then FinMind free); → frame with
+    attrs['source'], or raises when both fail so the caller can try Blave."""
+    try:
+        return _fetch_twstock_daily_public(stock_id, start, end, adjust)
+    except Exception as e:
+        print(f"  ⚠️  {stock_id} daily bars: exchange path failed ({type(e).__name__}: "
+              f"{str(e)[:120]}) — trying FinMind free")
+    df = _extend_cache_monthly(
+        'twstock_daily', {'id': stock_id, 'src': 'finmind'},
+        lambda s, e: _fetch_twstock_daily_finmind_raw(stock_id, s, e), start, end)
+    if adjust and not df.empty:
+        df = _tw_forward_adjust(df, _tw_exright_for(stock_id, _tw_public_market(stock_id), start, end))
+    df.attrs['source'] = 'FinMind'
+    return df
+
+
+def _twstock_daily(stock_id, start, end, headers, adjust, blave_fn):
+    """Source chain for the two daily entries: exchange → FinMind free → Blave (`blave_fn`),
+    logging which one served; BLAVE_TWSTOCK_DAILY_SOURCE=blave skips the free ones, and so
+    does a malformed `start` — the Blave 400 names the expected format."""
+    try:
+        datetime.strptime(start, '%Y-%m-%d')
+        well_formed = True
+    except (TypeError, ValueError):
+        well_formed = False
+    free_err = None
+    if well_formed and _twstock_daily_source() != 'blave':
+        try:
+            df = _fetch_twstock_daily_free(stock_id, start, end, adjust)
+            logging.info('%s daily bars served by %s', stock_id, df.attrs['source'])
+            return df
+        except Exception as e:
+            free_err = e
+            print(f"  ⚠️  {stock_id} daily bars: free sources failed ({type(e).__name__}: "
+                  f"{str(e)[:120]}) — trying Blave")
+    try:
+        df = blave_fn()
+    except DataAccessError as e:
+        # Keep the free chain's failure on the gate error: without it a caller reads "no Blave
+        # access" where the true cause is the exchange / FinMind being down.
+        if free_err is not None:
+            raise e from free_err
+        raise
+    df.attrs['source'] = 'Blave'
+    logging.info('%s daily bars served by Blave', stock_id)
+    return df
+
+
 def _fetch_twstock_price_raw(stock_id, start, end, headers):
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     r = _retry_get(f'{BASE}/studio/market/twstock/price_adj/{stock_id}',
@@ -1421,12 +2102,19 @@ def _fetch_twstock_price_raw(stock_id, start, end, headers):
 
 def fetch_twstock_price_adj(stock_id, start, end, headers):
     """台股向後調整日K（除權息還原價）. Returns DataFrame with Open/Close columns.
-    Use for backtesting — prices are dividend-adjusted so returns are comparable across time."""
-    return _extend_cache_monthly(
-        'twstock_price', {'id': stock_id},
-        lambda s, e: _fetch_twstock_price_raw(stock_id, s, e, headers),
-        start, end,
-    )
+    Use for backtesting — prices are dividend-adjusted so returns are comparable across time.
+
+    Served without a key from the stock's own exchange (TWSE / TPEx, adjusted with their
+    除權息計算結果表), then FinMind's free tier, then the Blave endpoint — see
+    _fetch_twstock_daily_public; df.attrs['source'] names the one that answered."""
+    def _blave():
+        return _extend_cache_monthly(
+            'twstock_price', {'id': stock_id},
+            lambda s, e: _fetch_twstock_price_raw(stock_id, s, e, headers),
+            start, end,
+        )
+    df = _twstock_daily(stock_id, start, end, headers, True, _blave)
+    return df[['Open', 'Close']] if {'Open', 'Close'} <= set(df.columns) else df
 
 
 def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers):
@@ -1447,12 +2135,19 @@ def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers):
 def fetch_twstock_price(stock_id, start, end, headers):
     """台股原始日K（未除權息）. Returns DataFrame with Open/High/Low/Close/Volume columns.
     Use for visualization/charting — matches prices users see on broker apps.
-    Do NOT use for backtesting (dividends cause artificial price drops that distort signals)."""
-    df = _extend_cache_monthly(
-        'twstock_price_nonadj', {'id': stock_id},
-        lambda s, e: _fetch_twstock_price_nonadj_raw(stock_id, s, e, headers),
-        start, end,
-    )
+    Do NOT use for backtesting (dividends cause artificial price drops that distort signals).
+
+    Served without a key from the stock's own exchange (TWSE STOCK_DAY / TPEx tradingStock;
+    Volume in shares, TPEx rounded to the thousand), then FinMind's free tier, then the Blave
+    endpoint — see _fetch_twstock_daily_public; df.attrs['source'] names the one that
+    answered."""
+    def _blave():
+        return _extend_cache_monthly(
+            'twstock_price_nonadj', {'id': stock_id},
+            lambda s, e: _fetch_twstock_price_nonadj_raw(stock_id, s, e, headers),
+            start, end,
+        )
+    df = _twstock_daily(stock_id, start, end, headers, False, _blave)
     return _sanity_check_ohlc(df, f'{stock_id} twstock price')
 
 
@@ -1777,6 +2472,7 @@ def _populate_broker_day_cache(stock_id, weekdays, headers,
     missing = [d for d in weekdays if not _broker_day_cache_path(stock_id, d.isoformat()).exists()]
     if not missing:
         return
+    _check_data_access(headers)  # before the loop: its except Exception would swallow the raise
 
     chunks  = _make_date_chunks(missing, chunk_days)
     limiter = _RateLimiter(rate_limit, period)
@@ -1833,6 +2529,7 @@ def _populate_trader_day_cache(trader_id, weekdays, headers,
     missing = [d for d in weekdays if not _trader_day_cache_path(trader_id, d.isoformat()).exists()]
     if not missing:
         return
+    _check_data_access(headers)  # before the loop: its except Exception would swallow the raise
 
     chunks  = _make_date_chunks(missing, chunk_days)
     limiter = _RateLimiter(rate_limit, period)
@@ -2005,12 +2702,31 @@ def _fundamental_cache_path(prefix, stock_id):
     return _CACHE_DIR / f'{prefix}_{stock_id}.parquet'
 
 
-def _load_fundamental_cache(path, max_age_days=30):
+def _load_fundamental_cache(path, max_age_days=30, prefix=None):
     if not path.exists():
         return None
     if (time.time() - path.stat().st_mtime) / 86400 > max_age_days:
         return None
+    if prefix and _filing_due_since(prefix, path.stat().st_mtime):
+        return None
     return pd.read_parquet(path)
+
+
+def _filing_due_since(prefix, written_epoch):
+    """Has a filing become servable (FEED_TIMING's time for it) since this cache file was
+    written? Then the 30-day cache would hide it — a live tick would keep trading on the
+    previous quarter / month for weeks."""
+    rules = {'twstock_rev':  ('MS', (_revenue_available, _revenue_available_insurance)),
+             'twstock_fin':  ('QS', (_quarterly_report_available, _quarterly_report_available_finance)),
+             'twstock_bs':   ('QS', (_quarterly_report_available, _quarterly_report_available_finance))}
+    if prefix not in rules:
+        return False
+    freq, fns = rules[prefix]
+    now = pd.Timestamp.now(tz='Asia/Taipei')
+    written = pd.Timestamp(written_epoch, unit='s', tz='UTC').tz_convert('Asia/Taipei')
+    stamps = pd.date_range((written - pd.Timedelta(days=400)).normalize().tz_localize(None),
+                           now.normalize().tz_localize(None), freq=freq).tz_localize('Asia/Taipei')
+    return any(((fn(stamps) > written) & (fn(stamps) <= now)).any() for fn in fns)
 
 
 def _save_fundamental_cache(path, df):
@@ -2031,7 +2747,7 @@ def _fetch_twstock_fundamental_raw(endpoint, stock_id, headers):
 
 def _fetch_fundamental(prefix, endpoint, stock_id, headers):
     path = _fundamental_cache_path(prefix, stock_id)
-    df = _load_fundamental_cache(path)
+    df = _load_fundamental_cache(path, prefix=prefix)
     if df is not None:
         return df
     df = _fetch_twstock_fundamental_raw(endpoint, stock_id, headers)
@@ -2204,7 +2920,7 @@ def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers):
 
     for sid in stock_ids:
         path = _fundamental_cache_path(prefix, sid)
-        df = _load_fundamental_cache(path)
+        df = _load_fundamental_cache(path, prefix=prefix)
         if df is not None:
             results[sid] = df
         else:
@@ -2795,6 +3511,7 @@ _TW_FUTURES_CHUNK_DAYS = {'1d': 3650, '1m': 28, '5m': 28, '15m': 28, '30m': 28, 
 
 
 def _fetch_twfutures_raw(symbol, schema, start, end, headers):
+    _check_data_access(headers)
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
     chunk_days = _TW_FUTURES_CHUNK_DAYS.get(schema, 28)
@@ -2985,6 +3702,7 @@ def fetch_twfutures_ohlcv_batch(symbols, schema, start, end, headers, max_worker
 
 def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
     """Fetch raw bid/ask vol for a date range (≤31 days per chunk)."""
+    _check_data_access(headers)
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d') + timedelta(days=1)
     chunk_days = 28
@@ -3091,6 +3809,220 @@ def fetch_twfutures_institutional(futures_id, start, end, headers):
         lambda s, e: _fetch_twfutures_institutional_raw(futures_id, s, e, headers),
         start, end,
     )
+
+
+# ── Market-wide series straight from TWSE / TAIFEX (free, no key) ────────────
+# The key-free twin of fetch_twmarket_* and fetch_twfutures_institutional, for the two TAIEX
+# report templates when this turn has no Blave data access. Same columns and units as the
+# Blave series. Runs only on the user's own computer (BLAVE_AGENT_LOCAL=1, the flag
+# _twstock_daily_source reads): a cloud machine never calls twse.com.tw / taifex.com.tw.
+_TWSE_INDEX_HIST = 'https://www.twse.com.tw/indicesReport/MI_5MINS_HIST'
+_TWSE_FMTQIK     = 'https://www.twse.com.tw/exchangeReport/FMTQIK'
+_TWSE_BFI82U     = 'https://www.twse.com.tw/fund/BFI82U'
+_TWSE_MI_MARGN   = 'https://www.twse.com.tw/exchangeReport/MI_MARGN'
+_TAIFEX_FUT_INST = 'https://www.taifex.com.tw/cht/3/futContractsDateDown'
+# Not "開放授權": BFI82U (三大法人) is not in the TWSE open-data set, so the line names the site
+# the four series are read from and claims no licence.
+_TWSE_SOURCE_ZH   = '資料來源:臺灣證券交易所網站'
+_TWSE_SOURCE_EN   = 'Source: Taiwan Stock Exchange website'
+_TAIFEX_SOURCE_ZH = '資料來源:臺灣期貨交易所(政府資料開放授權)'
+_TAIFEX_SOURCE_EN = 'Source: Taiwan Futures Exchange (Open Government Data License)'
+# zh attribution line → its en twin, for a report published with lang="en".
+PUBLIC_SOURCE_EN = {_TW_PUBLIC_SOURCE_ZH: _TW_PUBLIC_SOURCE_EN, _TWSE_SOURCE_ZH: _TWSE_SOURCE_EN,
+                    _TAIFEX_SOURCE_ZH: _TAIFEX_SOURCE_EN}
+# TWSE answers 200 + stat for everything: these mean "no rows for that date", anything
+# else non-OK (throttle, layout change) raises and is never cached as an empty day.
+_TWSE_NO_DATA = ('很抱歉', '沒有符合條件', '查詢日期大於', '查詢日期小於')
+_BFI82U_BUCKET = {'外資及陸資(不含外資自營商)': 'foreign', '外資自營商': 'dealer', '投信': 'investment_trust',
+                  '自營商(自行買賣)': 'dealer', '自營商(避險)': 'dealer', '合計': 'total'}
+_TAIFEX_INST_COMMODITY = {'TX': 'TXF', 'MTX': 'MXF', 'TMF': 'TMF'}
+_TAIFEX_INVESTOR = {'外資及陸資': 'foreign', '外資': 'foreign', '投信': 'investment_trust', '自營商': 'dealer'}
+
+
+def tw_market_public_allowed():
+    """True only on the desktop build (BLAVE_AGENT_LOCAL=1) — canon: key-free sources are
+    fetched on the user's own computer, never from a Blave-hosted machine."""
+    return os.environ.get('BLAVE_AGENT_LOCAL') == '1'
+
+
+def _tw_market_public_gate():
+    if not tw_market_public_allowed():
+        raise TwPublicUnavailable('key-free market data runs only on the desktop build (BLAVE_AGENT_LOCAL=1)')
+
+
+def _twse_json(url, params, label):
+    """TWSE JSON with stat OK → payload; a no-data stat → None; anything else raises."""
+    j = _tw_public_get(url, dict(params, response='json')).json()
+    stat = str(j.get('stat', ''))
+    if stat == 'OK':
+        return j
+    if any(m in stat for m in _TWSE_NO_DATA):
+        return None
+    raise TwPublicUnavailable(f'TWSE {label}: {stat[:60]}')
+
+
+def _in_window(df, s, e):
+    return df[(df.index >= pd.Timestamp(s)) & (df.index < pd.Timestamp(e))] if len(df) else df
+
+
+def _twse_monthly_raw(url, label, cols, parse, s, e):
+    rows = []
+    for ym in _tw_public_months(s, e):
+        j = _twse_json(url, {'date': f'{ym[:4]}{ym[5:7]}01'}, f'{label} {ym}')
+        for x in (j or {}).get('data') or []:
+            d = _roc_date(x[0])
+            if d.strftime('%Y-%m') == ym:   # TWSE sometimes pads a month with a neighbour's rows
+                rows.append((d, *parse(x)))
+    df = pd.DataFrame(rows, columns=['date'] + cols).set_index('date').sort_index()
+    return _in_window(df.astype(float), s, e)
+
+
+def _twse_daily_raw(url, label, params, cols, parse, s, e):
+    """One request per TWSE trading day in [s, e) — the days come from the public index
+    series, so holidays cost nothing. A no-data answer for an older trading day raises (it
+    would otherwise be cached as a hole for good); for today it means not published yet, and
+    so it does for yesterday within this month (MI_MARGN comes out in the evening and runs
+    past midnight on heavy days — the frame then ends a day earlier instead of failing)."""
+    now = datetime.now(_TPE)
+    today = now.strftime('%Y-%m-%d')
+    yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+    days = fetch_twmarket_index_public(s, (pd.Timestamp(e) - timedelta(days=1)).strftime('%Y-%m-%d')).index
+    rows = []
+    for d in days:
+        day = d.strftime('%Y-%m-%d')
+        j = _twse_json(url, params(day.replace('-', '')), f'{label} {day}')
+        if j is None:
+            if day < today and not (day >= yesterday and day[:7] == today[:7]):
+                raise TwPublicUnavailable(f'TWSE {label} {day}: no data for a trading day')
+            continue
+        rows.append((d, *parse(j)))
+    return pd.DataFrame(rows, columns=['date'] + cols).set_index('date').sort_index().astype(float)
+
+
+def _bfi82u_row(j):
+    net = {}
+    for x in j.get('data') or []:
+        bucket = _BFI82U_BUCKET.get(str(x[0]).strip())
+        if bucket:
+            net[bucket] = net.get(bucket, 0.0) + _tw_num(x[3])
+    if 'total' not in net:
+        raise TwPublicUnavailable('TWSE BFI82U: no 合計 row')
+    return tuple(net.get(c, float('nan')) for c in _TWMARKET_INST_COLUMNS)
+
+
+def _mi_margn_row(j):
+    # 信用交易統計: 項目, 買進, 賣出, 現金(券)償還, 前日餘額, 今日餘額 — 交易單位 = 張, 金額 仟元
+    tables = [t for t in j.get('tables') or [] if '信用交易統計' in str(t.get('title', ''))]
+    rows = {str(x[0]).strip(): x for x in (tables[0].get('data') if tables else [])}
+    try:
+        m, s, v = rows['融資(交易單位)'], rows['融券(交易單位)'], rows['融資金額(仟元)']
+    except KeyError:
+        raise TwPublicUnavailable('TWSE MI_MARGN: 信用交易統計 layout changed') from None
+    return _tw_num(m[5]), _tw_num(m[4]), _tw_num(v[5]) * 1000, _tw_num(s[5]), _tw_num(s[4])
+
+
+def _public_series(kind, raw, start, end, source):
+    _tw_market_public_gate()
+    df = _extend_cache_monthly('twmarket_public', {'kind': kind}, raw, start, end)
+    df.attrs['source'] = source
+    return df
+
+
+def fetch_twmarket_index_public(start, end):
+    """fetch_twmarket_index('TAIEX') from TWSE MI_5MINS_HIST, one month per request.
+    Desktop only (tw_market_public_allowed); attrs['source'] = 'TWSE'."""
+    raw = lambda s, e: _twse_monthly_raw(_TWSE_INDEX_HIST, 'MI_5MINS_HIST', ['Open', 'High', 'Low', 'Close'],
+                                         lambda x: tuple(_tw_num(v) for v in x[1:5]), s, e)
+    return _sanity_check_ohlc(_public_series('index', raw, start, end, 'TWSE'), 'TAIEX twse index')
+
+
+def fetch_twmarket_turnover_public(start, end):
+    """fetch_twmarket_turnover from TWSE FMTQIK (成交股數 / 成交金額 元 / 成交筆數)."""
+    raw = lambda s, e: _twse_monthly_raw(_TWSE_FMTQIK, 'FMTQIK', _TWMARKET_TURNOVER_COLUMNS,
+                                         lambda x: tuple(_tw_num(v) for v in x[1:4]), s, e)
+    return _public_series('turnover', raw, start, end, 'TWSE')
+
+
+def fetch_twmarket_institutional_public(start, end):
+    """fetch_twmarket_institutional from TWSE BFI82U, one trading day per request (net 元;
+    外資自營商 counted in dealer, as the Blave series)."""
+    raw = lambda s, e: _twse_daily_raw(_TWSE_BFI82U, 'BFI82U', lambda d: {'type': 'day', 'dayDate': d},
+                                       _TWMARKET_INST_COLUMNS, _bfi82u_row, s, e)
+    return _public_series('institutional', raw, start, end, 'TWSE')
+
+
+def fetch_twmarket_margin_public(start, end):
+    """fetch_twmarket_margin from TWSE MI_MARGN 信用交易統計, one trading day per request
+    (balances in 張, margin_balance_value 元 = 融資金額仟元 × 1,000)."""
+    raw = lambda s, e: _twse_daily_raw(_TWSE_MI_MARGN, 'MI_MARGN', lambda d: {'date': d, 'selectType': 'MS'},
+                                       _TWMARKET_MARGIN_COLUMNS, _mi_margn_row, s, e)
+    return _public_series('margin', raw, start, end, 'TWSE')
+
+
+def _tw_public_post(url, data, tries=3):
+    for attempt in range(tries):
+        _TW_PUBLIC_LIMITER.acquire()
+        try:
+            r = _tw_public_session().post(url, data=data, headers=_TW_PUBLIC_HEADERS, timeout=30)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt == tries - 1:
+                raise
+            time.sleep(2 ** (attempt + 1))
+            continue
+        if (r.status_code == 429 or r.status_code >= 500) and attempt < tries - 1:
+            time.sleep(2 ** (attempt + 1))
+            continue
+        r.raise_for_status()
+        return r
+
+
+def _taifex_inst_raw(commodity, s, e):
+    """TAIFEX 三大法人-區分各期貨契約 CSV (cp950) for [s, e). TAIFEX answers an HTML page when
+    queryEndDate is past its last published day, so near today the end steps back a day at a
+    time (12 days covers the Lunar New Year closure); an HTML answer for a window that ended
+    longer ago than that is an error, not 'no data'."""
+    today = datetime.now(_TPE).date()
+    first = pd.Timestamp(s).date()
+    last = min(pd.Timestamp(e).date() - timedelta(days=1), today)
+    while last >= first:
+        r = _tw_public_post(_TAIFEX_FUT_INST, {'commodityId': commodity,
+                                               'queryStartDate': first.strftime('%Y/%m/%d'),
+                                               'queryEndDate': last.strftime('%Y/%m/%d')})
+        lines = [ln for ln in r.content.decode('cp950', errors='replace').splitlines() if ln.strip()]
+        if lines and '身份別' in lines[0]:
+            break
+        if (today - last).days >= 12:
+            raise TwPublicUnavailable(f'TAIFEX futContractsDateDown {commodity} {first}–{last}: not a CSV answer')
+        last -= timedelta(days=1)
+    else:
+        return pd.DataFrame(columns=_TWFUT_INST_COLUMNS)
+    rows = list(csv.reader(lines))
+    col = {name.strip(): i for i, name in enumerate(rows[0])}
+    need = ('日期', '身份別', '多方交易口數', '空方交易口數', '多方未平倉口數', '空方未平倉口數')
+    if any(n not in col for n in need):
+        raise TwPublicUnavailable(f'TAIFEX futContractsDateDown: unexpected header {sorted(col)[:6]}')
+    out = {}
+    for x in rows[1:]:
+        who = _TAIFEX_INVESTOR.get(x[col['身份別']].strip())
+        if who is None:
+            continue
+        rec = out.setdefault(pd.Timestamp(x[col['日期']].strip().replace('/', '-')), {})
+        lo, so = _tw_num(x[col['多方未平倉口數']]), _tw_num(x[col['空方未平倉口數']])
+        rec[f'{who}_net_oi'], rec[f'{who}_long_oi'], rec[f'{who}_short_oi'] = lo - so, lo, so
+        rec[f'{who}_net_deal'] = _tw_num(x[col['多方交易口數']]) - _tw_num(x[col['空方交易口數']])
+    df = pd.DataFrame.from_dict(out, orient='index').reindex(columns=_TWFUT_INST_COLUMNS).sort_index()
+    df.index.name = 'date'
+    return df.astype(float)
+
+
+def fetch_twfutures_institutional_public(futures_id, start, end):
+    """fetch_twfutures_institutional from TAIFEX futContractsDateDown (same 12 columns, 口數).
+    'TX'/'TXF', 'MTX'/'MXF', 'TMF' only; attrs['source'] = 'TAIFEX'."""
+    fid = _TWFUT_INST_ALIASES.get(futures_id.upper(), futures_id.upper())
+    commodity = _TAIFEX_INST_COMMODITY.get(fid)
+    if commodity is None:
+        raise TwPublicUnavailable(f'TAIFEX institutional: {futures_id} not supported on the key-free path')
+    return _public_series(f'futinst_{fid}', lambda s, e: _taifex_inst_raw(commodity, s, e), start, end, 'TAIFEX')
 
 
 def fetch_twfutures_bid_ask_vol(start, end, headers):
@@ -3226,6 +4158,13 @@ def txf_settlement_mask(index):
     mask  = pd.Series(False, index=index)
     start = index.min()
     end   = index.max()
+    # Reach one bar past the last label: on a live tick the pre-settlement bar IS the last
+    # bar, and bounding the loop at index.max() never considered the settlement it precedes,
+    # so live held through settlement while the backtest (which sees the next bar) was flat.
+    # One bar, not one day — a day would mark the 12:00 tick and flatten hours early.
+    bar = index.to_series().diff().median() if len(index) > 1 else pd.NaT
+    if pd.notna(bar):
+        end = end + bar
 
     year, month = start.year, start.month
     while True:
@@ -3373,3 +4312,512 @@ def fetch_economic_calendar(headers, start=None, end=None, countries=None,
             'subject', 'predict', 'last', 'real', 'unit', 'priority']
     df = df[[c for c in cols if c in df.columns]].sort_values('datetime').reset_index(drop=True)
     return df.head(limit) if limit else df
+
+
+# ── Crypto Fear & Greed index (alternative.me, free, no key) ──────────────────
+# 資料來源:alternative.me — their API rules (https://alternative.me/crypto/fear-and-greed-index/,
+# read 2026-09-24): "You must properly acknowledge the source of the data and prominently
+# reference it accordingly. Commercial use is allowed as long as the attribution is given
+# right next to the display of the data." A report or reply that shows the number carries
+# the line; the frame carries it in attrs['source'].
+_FNG_URL   = 'https://api.alternative.me/fng/'
+_FNG_START = '2018-02-01'     # first row of the history (timestamp 1517443200)
+_FNG_SOURCE = '資料來源:alternative.me (Crypto Fear & Greed Index)'
+
+
+def _fetch_fear_greed_raw(start, end):
+    """Rows from `start` on, in one request: `limit` = the days from start to today (0 = the
+    whole history, when start is at or before the first row). Same throttle as the other
+    key-free daily sources."""
+    days = (datetime.utcnow().date() - datetime.strptime(start, '%Y-%m-%d').date()).days + 2
+    limit = 0 if start <= _FNG_START else max(days, 1)
+    r = _tw_public_get(_FNG_URL, {'limit': limit, 'format': 'json'})
+    j = r.json()
+    if (j.get('metadata') or {}).get('error'):
+        raise RuntimeError(f"alternative.me fng: {j['metadata']['error']}")
+    rows = j.get('data', [])
+    if not rows:
+        return pd.DataFrame(columns=['value', 'classification'])
+    df = pd.DataFrame({
+        'value': [float(x['value']) for x in rows],
+        'classification': [str(x['value_classification']) for x in rows],
+    }, index=pd.to_datetime([int(x['timestamp']) for x in rows], unit='s'))
+    df.index.name = 'date'
+    return df.sort_index()
+
+
+def fetch_fear_greed(start=None, end=None):
+    """Crypto Fear & Greed index, one row per UTC day (naive UTC midnight index, like
+    fetch_kline '1d'): `value` 0–100 (0 = extreme fear) and `classification` (Extreme
+    Fear / Fear / Neutral / Greed / Extreme Greed). History from 2018-02-01; start defaults
+    to it. No key; monthly cache (past months once, the current month re-fetched).
+
+    The row for day D is the index computed at D 00:00 UTC — the API's own countdown
+    (time_until_update) points at the next 00:00 UTC — so it is a snapshot taken at the
+    day's open, and align_feed / FEED_TIMING['fear_greed'] make it visible from D 01:00.
+    attrs['source'] is the attribution line alternative.me's rules require next to the
+    number; keep it in any report or reply that shows the value."""
+    start = start or _FNG_START
+    df = _extend_cache_monthly('fear_greed', {'src': 'alternative.me'}, _fetch_fear_greed_raw, start, end)
+    df.attrs['source'] = _FNG_SOURCE
+    return df
+
+
+# ── Publication-time alignment for non-price feeds ────────────────────────────
+# A feed row is stamped with the period it DESCRIBES (三大法人 for trading day D is stamped
+# D 00:00; a Blave alpha row is stamped with its bucket's open). What a bar may use is what
+# had been PUBLISHED by that bar's close. align_feed() re-stamps each row with its
+# availability time from FEED_TIMING and attaches to every bar the latest row available by
+# the bar's close (label + interval). Live (inside live_feeds()), a bar whose due row has
+# not landed raises FeedNotPublished instead of quietly using the previous value; in a
+# backtest those trailing bars are trimmed.
+#
+# Each time is the LATER of the official publication and the moment Blave serves it: the
+# api caches most TW daily endpoints for 5 minutes (REDIS_TTL = 300), and the FinMind
+# fundamental endpoints (_get_fundamental: 月營收, 財報, 外資持股) per UTC day — a copy
+# fetched before the evening publish is served until the api's UTC date rolls over, 08:00
+# Taipei the next day. The one remaining 待確認 per entry is named in its basis; those keep
+# a conservative (late) time — never tighten one without a source.
+
+_FINMIND_CHIP = 'https://finmind.github.io/tutor/TaiwanMarket/Chip/'
+_FINMIND_FUND = 'https://finmind.github.io/tutor/TaiwanMarket/Fundamental/'
+_FINMIND_TECH = 'https://finmind.github.io/tutor/TaiwanMarket/Technical/'
+_FINMIND_DERIV = 'https://finmind.github.io/tutor/TaiwanMarket/Derivative/'
+_TWSE_ESHOP = 'https://eshop.twse.com.tw/zh/product/detail/'
+_FSC_FIN_RULES = 'https://law.fsc.gov.tw/LawContent.aspx?id=GL000593'
+_API_CACHE = pd.Timedelta(minutes=5)          # api REDIS_TTL = 300 on the TW daily endpoints
+
+
+def _same_day_at(hour, minute=0):
+    """Daily row stamped with its trading date → that date at HH:MM (feed tz)."""
+    return lambda stamps: stamps.normalize() + pd.Timedelta(hours=hour, minutes=minute)
+
+
+def _next_day_at(hour, minute=0):
+    return lambda stamps: stamps.normalize() + pd.Timedelta(days=1, hours=hour, minutes=minute)
+
+
+def _next_day_start(stamps):
+    return stamps.normalize() + pd.Timedelta(days=1)
+
+
+def _after_own_period(stamps, period):
+    return stamps + period
+
+
+def _weekday_on_or_after(days):
+    """Saturday / Sunday → the following Monday (FinMind's fundamental refresh is weekdays)."""
+    return days + pd.to_timedelta(np.where(days.dayofweek == 5, 2, np.where(days.dayofweek == 6, 1, 0)),
+                                  unit='D')
+
+
+def _revenue_available(stamps, due_day=10):
+    """FinMind TaiwanStockMonthRevenue stamps March revenue 2019-04-01 (the month it is filed
+    in). Filed by the `due_day` (證券交易法 §36: the 10th; 保險業 the 15th from FY2026, see
+    _revenue_available_insurance) → FinMind refreshes weekdays 18:00 → the api's UTC-day
+    cache serves it from 08:00 Taipei the next day."""
+    due = stamps.normalize() - pd.to_timedelta(stamps.day - due_day, unit='D')
+    return _weekday_on_or_after(due) + pd.Timedelta(days=1, hours=8)
+
+
+def _revenue_available_insurance(stamps):
+    """公開發行公司財務報告及營運情形公告申報特殊適用範圍辦法 §3(5): 保險業 may file monthly
+    revenue by the 15th from FY 115 (2026) on — January 2026 revenue is stamped 2026-02-01."""
+    from_2026 = stamps.tz_localize(None) >= pd.Timestamp('2026-02-01') if stamps.tz is not None \
+        else stamps >= pd.Timestamp('2026-02-01')
+    return _revenue_available(stamps, 15).where(from_2026, _revenue_available(stamps, 10))
+
+
+def _quarterly_report_available(stamps, q2_deadline=(8, 14)):
+    """Filing deadlines (證券交易法 §36): Q1/Q3 45 days after quarter end (5/15, 11/14), Q2
+    8/14 (金融控股·銀行·證券·期貨·保險 listed issuers: 8/31, see
+    _quarterly_report_available_finance), annual 3/31. FinMind then serves it; the api's
+    UTC-day cache → 08:00 Taipei the day after the deadline. Keyed on the stamp's quarter,
+    so it holds whether the row is stamped at quarter start or end."""
+    q, y = stamps.quarter, stamps.year
+    month = np.select([q == 1, q == 2, q == 3], [5, q2_deadline[0], 11], 3)
+    day = np.select([q == 1, q == 2, q == 3], [15, q2_deadline[1], 14], 31)
+    year = np.where(q == 4, y + 1, y)
+    deadline = pd.DatetimeIndex(pd.to_datetime({'year': year, 'month': month, 'day': day}))
+    return deadline.tz_localize(stamps.tz) + pd.Timedelta(days=1, hours=8)
+
+
+def _quarterly_report_available_finance(stamps):
+    return _quarterly_report_available(stamps, q2_deadline=(8, 31))
+
+
+def _weekly_shareholding_available(stamps):
+    return stamps.normalize() + pd.Timedelta(days=3, hours=8)
+
+
+def _econ_available(stamps, frame):
+    """Event rows: `real` is known at the release time plus the api's 5-minute cache of the
+    upstream calendar. An event with no published time (time None, stamped 00:00) is taken
+    as known only from the next day."""
+    no_time = frame['time'].isna().to_numpy() if 'time' in frame.columns else np.zeros(len(stamps), bool)
+    return (stamps + _API_CACHE).where(~no_time, _next_day_start(stamps))
+
+
+def _alpha():
+    return {'tz': 'UTC', 'period': 'infer', 'available': 'after_period', 'calendar': 'bars',
+            'fresh': 'raise',
+            'basis': "api enterprise/crypto/routes.py passes only_finalized_data=True and "
+                     "crypto/basic.py resamples label-left: a bucket's row exists only once its "
+                     "last base bar is collected, so it is final at the bucket's close. Arrival lag "
+                     "after that is unconfirmed (local cache files: present 5–57 min after close, "
+                     "upper bounds only); the live gate waits for the row."}
+
+
+def _tw_daily(available, basis, fresh='raise'):
+    return {'tz': 'Asia/Taipei', 'period': pd.Timedelta(days=1), 'available': available,
+            'calendar': 'tw_trading_days', 'fresh': fresh, 'basis': basis}
+
+
+FEED_TIMING = {
+    **{name: _alpha() for name in (
+        'holder_concentration', 'funding_rate', 'taker_intensity', 'whale_hunter',
+        'unusual_movement', 'squeeze_momentum', 'liquidation', 'market_direction',
+        'capital_shortage', 'market_sentiment', 'top_trader_exposure')},
+    'twstock_price': _tw_daily(
+        _same_day_at(17, 35), f"TWSE 每日收盤行情 is produced 14:00 / 15:30 / 17:30 ({_TWSE_ESHOP}"
+        "cfec9a1470e448ec91bfde006db361e8); the STOCK_DAY page, TPEx tradingStock and FinMind all "
+        "showed the day's bar at 15:33 (2026-09-24), but whether the 14:00 version is already "
+        "final is unconfirmed (盤後定價 trades 14:00–14:30), so the third version + 5 min is kept. "
+        "The openapi.twse.com.tw / TPEx OpenAPI mirrors lag the sites (still the previous day at "
+        "15:51) and are not a time basis"),
+    'twstock_institutional': _tw_daily(
+        _same_day_at(20, 5), f"TWSE 三大法人買賣超 final (incl. 鉅額) 20:00 ({_TWSE_ESHOP}"
+        f"c4c87ac184e44896a05fcab5a9d544ec); FinMind 20:00 ({_FINMIND_CHIP}); + api cache 5 min"),
+    'twstock_per': _tw_daily(
+        _same_day_at(18, 5), f"TWSE 個股日本益比 18:00 ({_TWSE_ESHOP}8a82e9e697fc5f620198abeec9830097); "
+        f"FinMind TaiwanStockPER 18:00 ({_FINMIND_TECH}); + api cache 5 min. TPEx publishes later — "
+        "an OTC stock's row can land after this, which the live gate waits for"),
+    'twstock_foreign_shareholding': _tw_daily(
+        _next_day_at(8), f"TWSE 外資投資持股統計 final 21:30 ({_TWSE_ESHOP}fc2ca33908244644b066e0f12cb8efe5), "
+        f"FinMind 21:00 ({_FINMIND_CHIP}), but the api serves it from the UTC-day cache "
+        "(tw/twstock/services.py _get_fundamental) → next day 08:00"),
+    'twstock_broker': _tw_daily(
+        _next_day_start, f"TWSE 買賣日報表 16:00 ({_TWSE_ESHOP}c862b8472d7d46ccafbecca13c0336b0), FinMind "
+        f"21:00 ({_FINMIND_CHIP}); Blave's store is written only by apijob@tw.twstock.broker_daily_update "
+        "(21:30, retry 23:30 Taipei; one run observed: 2026-09-23 wrote the day at 21:31) → next "
+        "day 00:00 covers the retry"),
+    'twstock_broker_sparse': _tw_daily(_next_day_start, "as twstock_broker; one broker has no row "
+                                       "on a day it did not trade, so freshness cannot be checked",
+                                       fresh=None),
+    'twmarket_institutional': _tw_daily(
+        _same_day_at(19, 45), f"TWSE 三大法人買賣金額統計表 14:50 without, 約19:40 with 綜合帳戶/鉅額 "
+        f"({_TWSE_ESHOP}d31c1b9570ae47058ec83a0bb1ffa419); FinMind 15:00 ({_FINMIND_CHIP}); + api "
+        "cache 5 min. Assumes the stored history is the 19:40 version (unconfirmed) — if it is the "
+        "14:50 one this is late, never early"),
+    'twmarket_margin': _tw_daily(
+        _same_day_at(21, 5), f"TWSE 融資融券餘額 約21:00 ({_TWSE_ESHOP}388dd3a09824427d8c01a9d2b21e820b); "
+        f"FinMind 21:00 ({_FINMIND_CHIP}); + api cache 5 min"),
+    'twmarket_turnover': _tw_daily(
+        _next_day_start, "TWSE FMTQIK, fetched on request (+ api cache 5 min). TWSE publishes no time "
+        f"for FMTQIK itself (its 每日收盤行情 product runs 14:00 / 15:30 / 17:30, {_TWSE_ESHOP}"
+        "cfec9a1470e448ec91bfde006db361e8) — unconfirmed, next day 00:00 kept"),
+    'twfutures_institutional': _tw_daily(
+        _same_day_at(18, 5), f"FinMind TaiwanFuturesInstitutionalInvestors 18:00 ({_FINMIND_DERIV}); "
+        "TAIFEX itself ~15:00 (api tw/twfutures/services.py _DAILY_PUBLISH_HOUR_TWN); + api cache 5 min"),
+    'twfutures_pcr': _tw_daily(
+        _next_day_start, "TAIFEX pcRatio page, fetched on request (+ api cache 5 min); TAIFEX publishes "
+        "no time for it — unconfirmed, next day 00:00 kept"),
+    'twstock_shareholding': {'tz': 'Asia/Taipei', 'period': pd.Timedelta(days=7),
+                             'available': _weekly_shareholding_available, 'calendar': None,
+                             'fresh': 'warn', 'basis': "TDCC weekly 集保戶股權分散表 (data = the week's "
+                             "last business day, https://www.tdcc.com.tw/portal/zh/smWeb/qryStock) via "
+                             "FinMind TaiwanStockHoldingSharesPer; neither publishes a time — "
+                             "unconfirmed, data date + 3 days 08:00 kept"},
+    'twstock_monthly_revenue': {'tz': 'Asia/Taipei', 'period': 'month',
+                                'available': _revenue_available, 'calendar': None, 'fresh': 'warn',
+                                'basis': f"證券交易法 §36 deadline the 10th; FinMind weekdays 18:00 "
+                                         f"({_FINMIND_FUND}; stamp 2019-04-01 = March revenue); api "
+                                         "UTC-day cache → next day 08:00. FSC may extend a holiday "
+                                         f"month ({_FSC_FIN_RULES} §4-1)"},
+    'twstock_monthly_revenue_insurance': {
+        'tz': 'Asia/Taipei', 'period': 'month', 'available': _revenue_available_insurance,
+        'calendar': None, 'fresh': 'warn',
+        'basis': f"保險業: the 15th from FY2026 ({_FSC_FIN_RULES} §3(5)), else as twstock_monthly_revenue"},
+    'twstock_financials': {'tz': 'Asia/Taipei', 'period': 'quarter',
+                           'available': _quarterly_report_available, 'calendar': None,
+                           'fresh': 'warn', 'basis': "證券交易法 §36 deadlines (5/15, 8/14, 11/14, 3/31); "
+                           "api UTC-day cache → the next day 08:00. FinMind's own ingest time is "
+                           "undocumented (待確認) — the live warning surfaces a late one"},
+    'twstock_financials_finance': {
+        'tz': 'Asia/Taipei', 'period': 'quarter', 'available': _quarterly_report_available_finance,
+        'calendar': None, 'fresh': 'warn',
+        'basis': f"金融控股·銀行·證券·期貨·保險 listed issuers: Q2 within two months (8/31, "
+                 f"{_FSC_FIN_RULES} §3(3)); Q1/Q3/annual as twstock_financials"},
+    'twfutures_bid_ask_vol': {'tz': 'UTC', 'period': 'infer', 'available': 'after_period',
+                              'delay': pd.Timedelta(seconds=30), 'calendar': 'bars', 'fresh': 'raise',
+                              'basis': "api snapshot/run_sinopac_backfill.py _aggregate_ticks floors "
+                                       "ticks to the minute (row = minute open); today's minutes are "
+                                       "fetched on request and cached 30 s (tw/sinopac/services.py), "
+                                       "so a row is final 30 s after its minute closes"},
+    'fear_greed': {'tz': 'UTC', 'period': pd.Timedelta(days=1), 'available': _same_day_at(1),
+                   'calendar': 'days', 'fresh': 'raise',
+                   'basis': "alternative.me publishes one row a day at 00:00 UTC: on 2026-09-24 "
+                            "08:16 UTC the API's time_until_update was 56,644 s = exactly 00:00 "
+                            "UTC, and the row stamped that day was the one it had just published. "
+                            "How long the API takes to actually serve the new row after 00:00 is "
+                            "unconfirmed — +1 h kept; the live gate waits for it"},
+    'economic_calendar': {'tz': 'Asia/Taipei', 'period': None, 'available': 'econ',
+                          'calendar': 'self', 'fresh': 'raise', 'columns': ['real'],
+                          'basis': "`real` at the release time + api cache 5 min (market/anue/"
+                                   "services.py _CACHE_TTL); how long the upstream (鉅亨) takes to "
+                                   "fill `real` is unconfirmed — the live gate waits for it"},
+}
+# fetcher-name aliases → the timing entry they share
+for _alias, _key in (('twstock_price_adj', 'twstock_price'),
+                     ('twstock_price_batch', 'twstock_price'),
+                     ('twstock_price_adj_batch', 'twstock_price'),
+                     ('twstock_institutional_batch', 'twstock_institutional'),
+                     ('twstock_per_batch', 'twstock_per'),
+                     ('twstock_foreign_shareholding_batch', 'twstock_foreign_shareholding'),
+                     ('twstock_all_broker_net', 'twstock_broker'),
+                     ('twstock_branch_daily_net', 'twstock_broker'),
+                     ('twstock_trader_flows', 'twstock_broker'),
+                     ('twstock_broker_net', 'twstock_broker_sparse'),
+                     ('twstock_shareholding_batch', 'twstock_shareholding'),
+                     ('twstock_monthly_revenue_batch', 'twstock_monthly_revenue'),
+                     ('twstock_balance_sheet', 'twstock_financials'),
+                     ('twstock_financials_batch', 'twstock_financials'),
+                     ('twstock_balance_sheet_batch', 'twstock_financials')):
+    FEED_TIMING[_alias] = FEED_TIMING[_key]
+
+
+class FeedNotPublished(RuntimeError):
+    """Live: the feed row this bar needs was due by `due_at` and is not in the data."""
+
+    def __init__(self, source, need, due_at, last_bar):
+        self.source, self.need, self.due_at, self.last_bar = source, need, due_at, last_bar
+        super().__init__(
+            f"❌ {source}: the row for {need} was due by {due_at} and is not in the data yet — "
+            f"refusing to compute the signal for bar {last_bar} on the previous value. "
+            f"wait_for_bar keeps retrying; if it never lands, the source is late.")
+
+
+_live_feeds = 0   # >0 while a LIVE tick's fetch_data runs (runner / wait_for_bar)
+
+
+class live_feeds:
+    """Scope marking a live tick: align_feed raises FeedNotPublished instead of trimming."""
+    def __enter__(self):
+        global _live_feeds
+        _live_feeds += 1
+        return self
+
+    def __exit__(self, *exc):
+        global _live_feeds
+        _live_feeds -= 1
+        return False
+
+
+def _utc_ns(idx):
+    return idx.tz_convert('UTC').as_unit('ns').asi8
+
+
+def _latest_by(avail_ns, stamp_ns, at_ns):
+    """For each `at`: position (into the inputs) of the row with the greatest stamp among rows
+    with avail <= at, or -1."""
+    order = np.argsort(avail_ns, kind='stable')
+    a, s = avail_ns[order], stamp_ns[order]
+    run_max = np.maximum.accumulate(s) if len(s) else s
+    best = np.maximum.accumulate(np.where(s == run_max, np.arange(len(s)), 0)) if len(s) else s
+    k = np.searchsorted(a, at_ns, side='right') - 1
+    out = np.full(len(at_ns), -1)
+    has = k >= 0
+    out[has] = order[best[k[has]]]
+    return out
+
+
+def _feed_times(frame, source, default_period=None):
+    """→ (stamps, available_at, period) for a FEED_TIMING feed frame, both indexes tz-aware
+    (naive stamps are read in the entry's tz). Raises ValueError on a frame without a time
+    axis (long formats: pivot / unstack first)."""
+    spec = FEED_TIMING[source]
+    if len(frame) == 0:
+        raise ValueError(f"{source}: the feed has no rows at all — the fetch returned nothing, so "
+                         f"there is no way to tell which bars it covers")
+    if spec['available'] == 'econ':
+        stamps = pd.DatetimeIndex(frame['datetime'])
+    else:
+        stamps = frame.index
+    if not isinstance(stamps, pd.DatetimeIndex):
+        raise ValueError(f"{source}: needs a DatetimeIndex (long formats: pivot / unstack first)")
+    if stamps.tz is None:
+        stamps = stamps.tz_localize(spec['tz'])
+    period = spec['period']
+    if period == 'infer':
+        d = pd.Series(stamps.sort_values()).diff().dropna()
+        d = d[d > pd.Timedelta(0)]
+        period = d.mode().iloc[0] if len(d) else default_period
+        if period is None:
+            raise ValueError(f"{source}: cannot infer the row period from a single row")
+    if spec['available'] == 'after_period':
+        avail = _after_own_period(stamps, period) + spec.get('delay', pd.Timedelta(0))
+    elif spec['available'] == 'econ':
+        avail = _econ_available(stamps, frame)
+    else:
+        avail = spec['available'](stamps)
+    return stamps, avail, period
+
+
+def feed_available_at(frame, source):
+    """Per-row availability time (tz-aware) of a FEED_TIMING feed frame — what align_feed
+    attaches by, and what the runner's look-ahead replay truncates a recorded feed by."""
+    return _feed_times(frame.to_frame() if isinstance(frame, pd.Series) else frame, source)[1]
+
+
+def align_feed(bars, feed, source, interval, bar_tz=None, columns=None):
+    """Attach `feed` to `bars` by publication time. → DataFrame on the bars' index (trailing
+    not-yet-published bars trimmed in a backtest) with the feed's value columns.
+
+    bars:     DataFrame / Series / DatetimeIndex of the strategy's bars (label = bar open).
+    feed:     the fetcher's frame, wide (one row per stamp; pivot long formats first). The
+              economic calendar goes in as fetch_economic_calendar returned it, filtered to
+              ONE indicator (`real` is the value).
+    source:   FEED_TIMING key = the fetcher name without `fetch_` ('twstock_institutional').
+    interval: the bars' interval ('1h', '60m', '1d', …); a bar may use a row only if the row
+              was available by label + interval.
+    bar_tz:   required when the bars' index is naive: 'UTC' for fetch_kline / intraday
+              fetch_twfutures_ohlcv, 'Asia/Taipei' for fetch_twstock_price* daily bars.
+
+    A bar whose due row is missing while an older one exists (a late source, a hole) gets
+    NaN, not the older value. Live (live_feeds()) the LAST bar being in that state raises
+    FeedNotPublished. Monthly / quarterly / weekly filings only warn: a late or delinquent
+    filer must not halt a strategy, and the previous filing is what was actually known.
+    """
+    if source not in FEED_TIMING:
+        raise ValueError(f"align_feed: unknown source {source!r} — one of {sorted(FEED_TIMING)}")
+    spec = FEED_TIMING[source]
+    index = bars if isinstance(bars, pd.DatetimeIndex) else bars.index
+    if index.tz is None:
+        if not bar_tz:
+            raise ValueError("align_feed: the bars' index is naive — pass bar_tz ('UTC' for "
+                             "fetch_kline and intraday fetch_twfutures_ohlcv, 'Asia/Taipei' for "
+                             "fetch_twstock_price* daily bars)")
+        index = index.tz_localize(bar_tz)
+    bar_close = index + pd.Timedelta(interval)
+
+    frame = feed.to_frame() if isinstance(feed, pd.Series) else feed
+    stamps, avail, period = _feed_times(frame, source, default_period=pd.Timedelta(interval))
+    if stamps.has_duplicates:
+        raise ValueError(f"align_feed: {source} feed has repeated stamps — pivot it to one row per stamp first")
+    cols = columns or spec.get('columns') or list(frame.columns)
+    values = frame[cols].reset_index(drop=True)
+
+    present = values.notna().any(axis=1).to_numpy()
+    close_ns = _utc_ns(bar_close)
+    s_ns, a_ns = _utc_ns(stamps), _utc_ns(avail)
+    live_rows = np.flatnonzero(present)
+    row = _latest_by(a_ns[present], s_ns[present], close_ns)
+    row = np.where(row >= 0, live_rows[np.maximum(row, 0)] if len(live_rows) else -1, -1)
+    out_index = bars if isinstance(bars, pd.DatetimeIndex) else bars.index
+    if len(values):
+        out = values.iloc[np.maximum(row, 0)].set_axis(out_index)
+    else:
+        out = pd.DataFrame(np.nan, index=out_index, columns=cols)
+    out.loc[row < 0] = np.nan
+
+    stale = np.zeros(len(index), dtype=bool)
+    need_ns = np.full(len(index), -1, dtype=np.int64)
+    if spec['fresh'] == 'raise' and spec['calendar']:
+        local = index.tz_convert(stamps.tz)
+        if spec['calendar'] == 'self':
+            cand = stamps
+        elif spec['calendar'] == 'tw_trading_days':
+            # the dates a TW daily feed can have a row for: weekdays with a DAY-session bar.
+            # TXF's night session labels Friday-night bars Saturday 00:00–05:00 (and the night
+            # before a holiday, the holiday) — those dates never get a row.
+            if pd.Timedelta(interval) < pd.Timedelta(days=1):
+                local = local[(local.hour >= 8) & (local.hour < 14)]
+            days = pd.DatetimeIndex(local.floor('D').unique())
+            cand = days[days.dayofweek < 5]
+        else:
+            cand = pd.DatetimeIndex(local.floor(period).unique())
+        if spec['available'] == 'after_period':
+            c_avail = _after_own_period(cand, period) + spec.get('delay', pd.Timedelta(0))
+        elif spec['available'] == 'econ':
+            c_avail = avail
+        else:
+            c_avail = spec['available'](cand)
+        c_s = _utc_ns(cand)
+        req = _latest_by(_utc_ns(c_avail), c_s, close_ns)
+        need_ns = np.where(req >= 0, c_s[np.maximum(req, 0)], -1)
+        used_ns = np.where(row >= 0, s_ns[np.maximum(row, 0)], -1)
+        stale = (need_ns >= 0) & (used_ns < need_ns)
+        out.loc[stale] = np.nan
+        if len(stale) and stale[-1]:
+            k = int(np.flatnonzero(c_s == need_ns[-1])[0])
+            need, due = cand[k], c_avail[k]
+            if _live_feeds:
+                raise FeedNotPublished(source, need, due, index[-1])
+            tail = len(stale) - (np.flatnonzero(~stale)[-1] + 1 if (~stale).any() else 0)
+            print(f"  ⚠️  {source}: the last {tail} bar(s) are cut — the row for {need} was due by "
+                  f"{due} and is not in the data yet (live refuses these bars until it lands)")
+            out = out.iloc[:len(out) - tail]
+    elif spec['fresh'] == 'warn' and len(stamps) and present.any():
+        last = stamps[present].max()
+        nxt = (last + pd.DateOffset(months=1) if period == 'month' else
+               last + pd.DateOffset(months=3) if period == 'quarter' else last + period)
+        nxt_idx = pd.DatetimeIndex([nxt])
+        due = spec['available'](nxt_idx)[0]
+        if bar_close[-1] >= due:
+            msg = (f"{source}: the next filing after {last.date()} was due by {due} and is not in "
+                   f"the data — using the {last.date()} one (late filer, or a cached copy)")
+            logging.warning(msg)
+            print(f"  ⚠️  {msg}")
+    return out
+
+
+# kind → (fetcher name, FEED_TIMING source, needs an id, default column prefix)
+TW_FLOWS = {
+    'futures_institutional': ('fetch_twfutures_institutional', 'twfutures_institutional', True, 'fut_'),
+    'stock_institutional':   ('fetch_twstock_institutional',   'twstock_institutional',   True, 'inst_'),
+    'market_institutional':  ('fetch_twmarket_institutional',  'twmarket_institutional',  False, 'mkt_'),
+    'margin':                ('fetch_twmarket_margin',         'twmarket_margin',         False, ''),
+    'pcr':                   ('fetch_twfutures_pcr',           'twfutures_pcr',           False, ''),
+    'per':                   ('fetch_twstock_per',             'twstock_per',             True, ''),
+    'broker_total':          ('fetch_twstock_all_broker_net',  'twstock_all_broker_net',  True, 'broker_'),
+    'broker_branch':         ('fetch_twstock_branch_daily_net', 'twstock_branch_daily_net', True, 'br_'),
+}
+
+
+def join_tw_flow(df, kind, interval, start, end, headers, id=None, prefix=None):
+    """The common case in one call: fetch a Taiwan daily flow feed and attach it to `df`'s
+    bars by publication time (align_feed). → `df` cut to the bars whose flow row is
+    published, with the flow columns joined (named `prefix + column`).
+
+    kind   id                    columns (before the prefix)
+    futures_institutional  'TX' / 'MTX' / 'TMF' (TXF/MXF accepted)   {foreign|investment_trust|dealer}_{net_oi|long_oi|short_oi|net_deal}
+    stock_institutional    stock id        foreign_net + the raw buy/sell columns
+    market_institutional   —               foreign, investment_trust, dealer, total (元)
+    margin                 —               margin_balance(_prev), margin_balance_value, short_balance(_prev)
+    pcr                    —               pcr
+    per                    stock id        dividend_yield, PER, PBR
+    broker_total           stock id        net (all branches summed)
+    broker_branch          stock id        one column per branch id
+
+    Bars from any TW price fetcher work as they come: a naive intraday index is UTC
+    (fetch_twfutures_ohlcv / fetch_twstock_ohlcv minute bars), a naive daily index is the
+    Taipei date (fetch_twstock_price*), an aware index is used as is. Not for crypto bars:
+    fetch_kline '1d' is naive UTC and would be read as Taipei dates — use align_feed. A row missing on a
+    day it should exist is NaN on the bars it covers — never the previous day's value — and
+    live, the tick refuses (FeedNotPublished) until it lands."""
+    if kind not in TW_FLOWS:
+        raise ValueError(f"join_tw_flow: kind must be one of {sorted(TW_FLOWS)}")
+    fetcher, source, needs_id, default_prefix = TW_FLOWS[kind]
+    if needs_id and not id:
+        raise ValueError(f"join_tw_flow: kind {kind!r} needs id= (see the docstring table)")
+    fetch = globals()[fetcher]              # looked up per call so the backtest recorder sees it
+    args = (id, start, end, headers) if needs_id else (start, end, headers)
+    flow = fetch(*args)
+    if isinstance(flow, pd.Series):
+        flow = flow.to_frame(flow.name or 'net')
+    bar_tz = None
+    if df.index.tz is None:
+        bar_tz = 'UTC' if pd.Timedelta(interval) < pd.Timedelta(days=1) else 'Asia/Taipei'
+    aligned = align_feed(df, flow, source, interval, bar_tz=bar_tz)
+    pre = default_prefix if prefix is None else prefix
+    return df.loc[aligned.index].join(aligned.add_prefix(pre))

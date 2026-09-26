@@ -1,0 +1,500 @@
+/* =========================================================================
+   自動下單頁 + 設定 › 連線 + 常駐狀態帶(trade.js 畫的東西)。
+   骨架逐項照雲端 web/app/static/css/agent/workspace.css(class 名沿用:main-head / main-tabs /
+   pf-* / bt-stats / ov-*),雲端直引的 --color-dark* 換成 shell 的語意角色變數(dark 下同值)。
+   視覺基準:.claude/output/designer/mockup-desktop-trading-2026-09.html。
+   不寫 hex、不寫裸 ms:顏色/間距/動效一律引 tokens.css。
+   ========================================================================= */
+
+/* ---- 帳戶種類記號:分辨靠「實心 vs 虛線框」+ 字,不引入第二個強調色。這一版只有模擬 ---- */
+.mode {
+  flex: none; display: inline-flex; align-items: center; height: 20px; padding: 0 var(--space-6);
+  border-radius: var(--radius-micro); font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap;
+}
+.mode.paper { border: 1px dashed var(--ink-3); color: var(--ink-2); }
+.mode.real { background: var(--control-fill); color: var(--control-fill-text); }
+.mode[hidden] { display: none; }
+
+/* ---- 側欄入口(策略清單上方)---- */
+.side-nav { margin-top: var(--space-12); padding-bottom: var(--space-8); }   /* 不畫分隔線(Wei):靠間距與「策略」小標分開 */
+/* 入口的圖示:同雲端工作頁那一顆(lucide chart-pie、16px、線寬 1.75)——有圖示才讀得出這是一顆按鈕,不是清單的標題(Wei) */
+.side-nav .strat-row { display: flex; align-items: center; gap: var(--space-8); }
+.side-nav-ic { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+html.ws-sc .side-nav { display: none; }
+
+/* ---- 常駐狀態帶:佔用中欄上方本來就在的 52px 拖曳區(.pane-main 的 padding-top)。
+   整條仍可拖視窗,只有那顆鈕 no-drag。只顯示、不放控制鈕。 ---- */
+.pane-main > .tb {
+  flex: none; height: 52px; margin-top: -52px;
+  display: flex; align-items: center; padding: 0 var(--space-16) 0 var(--space-24);
+}
+html.ws-sc .pane-main > .tb { padding-left: var(--space-48); }   /* 側欄收起時中欄貼到紅綠燈旁邊,讓開 */
+.pane-main > .tb { gap: var(--space-8); }
+.tb .mode { height: 18px; }
+.tb-txt .up { color: var(--ink); font-weight: 600; }
+.tb-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--ink-3); }
+
+/* ---- 小圓點 / 出事短劃(同方案頁 .plan-st .dot 的語言;這裡給切換器用)---- */
+.envsw .dot { flex: none; display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--ink-3); }
+.envsw .dot.on { background: var(--color-green); }
+.envsw .dot.busy { animation: trRunPulse calc(var(--motion-blink) * 1.2) ease-in-out infinite; }
+.envsw .dot.bad { width: 8px; height: 2px; border-radius: 0; background: var(--color-red); }
+
+/* ---- 「這台電腦｜雲端」切換器:視覺高 28、熱區 44(::before 上下各補 8,寬 = 視覺寬,兩格不重疊)。
+   格寬固定 40、格內只有圖示與至多一個記號;兩格永遠可按,沒有 disabled 態;按下不縮放 ---- */
+.envsw {
+  -webkit-app-region: no-drag; position: relative; z-index: 21;   /* 壓過 .ws-bar(z 20) */
+  flex: none; display: inline-flex; border: 1px solid var(--border-frame); border-radius: var(--radius-xs); background: var(--bg-body);
+}
+.envsw button {
+  position: relative; display: flex; align-items: center; justify-content: center; width: 40px; height: 28px; color: var(--ink-3);
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.envsw button::before { content: ""; position: absolute; inset: -8px 0; }
+.envsw button + button { border-left: 1px solid var(--border-frame); }
+.envsw button:first-child { border-radius: 5px 0 0 5px; }
+.envsw button:last-child { border-radius: 0 5px 5px 0; }
+.envsw button:hover { color: var(--ink); }
+.envsw button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; z-index: 1; }
+/* 安靜分段(canon segment):選中 = 墊一階底色 + 圖示變深,不反白——「現在在哪一邊」已經有灰頂列、側欄、視窗標題三個通道 */
+.envsw button[aria-pressed="true"] { background: var(--surface-control-on); color: var(--ink); box-shadow: var(--shadow-sm); }
+/* 格內唯一的記號:掛在圖示右上角,不佔寬;底下墊一圈格子的底色,跟圖示線條分開 */
+.envsw .run-dot, .envsw .dot { position: absolute; top: 5px; right: 7px; margin: 0; box-shadow: 0 0 0 2px var(--bg-body); }
+.envsw button[aria-pressed="true"] .run-dot, .envsw button[aria-pressed="true"] .dot { box-shadow: 0 0 0 2px var(--surface-control-on); }
+.envsw .dot.bad { top: 7px; }
+.envsw-ic { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---- 雲端視角:三段 52px 頂列同時上灰底(整塊表面變化,不加第二個強調色)。
+   側欄是 overflow: hidden,蓋不到自己右邊那條線;由中欄的 .tb 左右各伸出 1px 蓋掉兩條分隔線的頂端,三段才連成一條 ---- */
+.pane-strategies { position: relative; }
+.pane-strategies::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 52px; background: transparent; transition: background var(--motion-fast) var(--ease-standard); }
+.pane-main > .tb, .chat-head { transition: background var(--motion-fast) var(--ease-standard); }
+html[data-env="cloud"] .pane-strategies::before { background: var(--surface-muted); }
+html[data-env="cloud"] .pane-main > .tb {
+  position: relative; z-index: 1; margin-left: -1px; margin-right: -1px;
+  padding-left: calc(var(--space-24) + 1px); padding-right: calc(var(--space-16) + 1px);
+  background: var(--surface-muted);
+}
+html[data-env="cloud"].ws-sc .pane-main > .tb { padding-left: calc(var(--space-48) + 1px); }
+html[data-env="cloud"] .tb-txt { color: var(--ink-2); }   /* --ink-3 壓在灰底上只有 3.6:1 */
+html[data-env="cloud"] .chat-head { background: var(--surface-muted); }
+html[data-env="cloud"].ws-cc .chat-strip { background: linear-gradient(var(--surface-muted) 52px, var(--surface-card) 52px); }
+/* 切視角:側欄與中欄內容淡入,無位移、無滑動 */
+.env-fade > :not(.tb) { animation: envFade var(--motion-fast) var(--ease-standard); }
+@keyframes envFade { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---- 側欄(雲端視角):沒有主機可看時入口與清單整段收起 ---- */
+.strat-head[hidden], .strat-list[hidden], .side-nav[hidden] { display: none; }
+.side-nav .strat-name { flex: 1; min-width: 0; }
+/* 雲端列尾只有一顆 ✕(按下開框,不在列內武裝成「刪除?」),名字讓出 ✕ 的位置就夠,不必留本機那 72 */
+#strat-list-cloud .strat-wrap:is(:hover, :has(:focus-visible)) .strat-row { padding-right: calc(var(--space-32) + var(--space-8)); }
+#strat-list-cloud .pf-state { padding: var(--space-8) var(--space-12); }   /* 同 #strat-empty */
+.strat-row .stx { flex: none; font-size: 11px; color: var(--ink-3); font-weight: 400; }
+
+/* ---- 雲端視角的開通頁(沒有主機可看;規格 §3 .cv-open)---- */
+.cv-open { max-width: 48ch; margin-top: var(--space-24); }
+.cv-open h4 { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.4; color: var(--ink); text-wrap: balance; }
+.cv-list { margin: var(--space-16) 0 0; padding: 0; list-style: none; }
+.cv-list li { position: relative; padding-left: var(--space-12); font-size: 13px; line-height: 1.7; color: var(--ink-2); }
+.cv-list li + li { margin-top: var(--space-4); }
+.cv-list li::before { content: ""; position: absolute; left: 0; top: 11px; width: 6px; height: 1px; background: var(--ink-3); }
+.cv-open .plan-price { margin-top: var(--space-24); }
+.cv-rule { margin: var(--space-4) 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.cv-p { margin: 0; font-size: 14px; line-height: 1.7; color: var(--ink-2); }
+.cv-above, .cv-open .plan-err { margin: var(--space-24) 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.cv-above.up { color: var(--ink-2); }
+.cv-act { display: flex; align-items: center; gap: var(--space-16); margin-top: var(--space-12); }
+.cv-act .btn-fill, .cv-act .btn-out { height: 32px; }
+.cv-act .wait { font-size: 12px; color: var(--ink-3); }
+.cv-act .btn-quiet { font-size: 12px; }
+#cv-desc .dot { display: inline-block; width: 7px; height: 7px; margin-right: var(--space-8); border-radius: var(--radius-pill); background: var(--ink-3); vertical-align: .09em; }
+#cv-desc .dot.busy { animation: trRunPulse calc(var(--motion-blink) * 1.2) ease-in-out infinite; }
+.side-gate { margin: var(--space-12) 0 0; }
+.side-gate[hidden] { display: none; }
+html.ws-sc .side-gate { display: none; }
+@media (prefers-reduced-motion: reduce) { #cv-desc .dot.busy { animation: none; } }
+/* 雲端連接之後「已存到、等回報」那一句(S5 §4.1):同 #cv-desc 的呼吸點 */
+.cx-saved { margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink-2); }
+.cx-wait { display: flex; align-items: center; gap: var(--space-8); margin-top: var(--space-4); }
+/* 圓環 spinner(canon › Components › Loader,最小 16/2):缺口 1/4、currentColor、1s linear。
+   **不設 reduced-motion 例外**——轉動即語意,停下來只剩一個沒意義的圓環(canon 明文) */
+.spin16 { flex: none; display: inline-block; width: 16px; height: 16px; box-sizing: border-box; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: trSpin 1s linear infinite; }
+@keyframes trSpin { to { transform: rotate(360deg); } }
+
+/* ---- 雲端第一刀唯讀:說明行、不能按的鈕(aria-disabled,不是 disabled:鍵盤停得上去、讀屏唸得到原因)、停機那一段 ---- */
+.tr-ro-note { margin: var(--space-4) 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.tr-ro-note[hidden] { display: none; }
+.tr-ro-note .btn-quiet { font-size: inherit; }
+.btn-fill.is-ro, .btn-fill.is-ro:hover { background: var(--surface-muted); color: var(--ink-3); cursor: default; }
+.pf-act.is-ro, .pf-act.is-ro:hover { color: var(--ink-3); background: transparent; cursor: default; }
+#tr-verdict[hidden] { display: none; }
+.verdict { display: flex; align-items: flex-start; gap: var(--space-8); margin: var(--space-12) 0 0; font-size: 13px; line-height: 1.6; color: var(--ink-2); max-width: 64ch; }
+.verdict .fault-mark { margin-top: 10px; }
+.verdict.is-calm .fault-mark { background: var(--ink-3); }   /* 灰記號(提醒,不是錯):紅只給出事 */
+/* 雲端視角的輸入框跟這台電腦長得一樣(spec-desktop-005 §2,Wei 同意):灰底上的 --ink-3 過不了 AA、--ink-2 又讀成已經填好了,
+   所以不鋪灰底;「對誰講」由灰色頂列、聊天標頭與 placeholder 的字承擔 */
+
+/* ---- 頁面骨架 ---- */
+.trv { flex: 1; min-height: 0; display: flex; flex-direction: column; container-type: inline-size; }
+.trv[hidden] { display: none; }
+/* 標頭三列(spec v2 §12-4 的 V2b):列 1 = 標題 | 動作槽,列 2 = 狀態句,列 3 = 原因行,兩句都跨滿寬。
+   舊版是 flex + `.act { flex: none }`:1024 最小視窗、三欄全開時中欄只有 336,兩顆英文鈕吃掉固定寬度,
+   文字欄只剩 60 px(約八個英文字母一行)→ 最長的狀態 36 行。`.txt` 走 display: contents,
+   讓標題、狀態句、原因行直接變成 grid item;`.act` 缺席時(#cv-empty 那個標頭)收掉第二欄與欄距 */
+.main-head { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-16); align-items: start; padding: var(--space-16) var(--space-24) var(--space-12); }
+.main-head:not(:has(.act)) { grid-template-columns: minmax(0, 1fr); column-gap: 0; }
+.main-head > .txt { display: contents; }
+.main-head-name { grid-column: 1; grid-row: 1; }
+/* 啟動在途時主鈕右邊多一顆「暫停下單」文字鈕(#tr-go-stop),間距 8 */
+.main-head .act { grid-column: 2; grid-row: 1; justify-self: end; display: flex; align-items: center; gap: var(--space-8); }
+/* `.txt` 底下其餘的孩子(狀態句、原因行、更新入口、唯讀說明、停機區塊、紅字)一律跨滿寬,自己一列 */
+.main-head-desc, .main-head .tr-noamt, .main-head .tr-go-upd, .main-head .tr-ro-note, .main-head #tr-verdict, .main-head .pf-alert { grid-column: 1 / -1; }
+/* 「暫停下單」要在恐慌時看得到:比一般文字鈕亮一階,熱區跟主鈕等高(視覺仍是一行字);hover 照 .btn-quiet:hover 轉 --ink */
+.main-head .tr-go-stop { color: var(--ink-2); min-height: 32px; padding: 0 var(--space-8); }
+.main-head .tr-go-stop:hover { color: var(--ink); }
+.main-head-name { margin: 0; font-size: 17px; font-weight: 600; color: var(--ink); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.main-head-desc { margin-top: var(--space-4); font-size: 12px; color: var(--ink-2); line-height: 1.5; min-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.main-head-desc.wrap { white-space: normal; overflow: visible; }
+.main-head-desc .up { color: var(--ink); font-weight: 600; }
+.main-head-desc .ink { color: var(--ink); }   /* 已暫停的「重開過」原因行:正文墨色,不用紅、不加粗 */
+.main-head-desc .danger { color: var(--color-redText); }   /* 「可能仍在下單」的原因行:紅字只給錢還在外面暴露的時刻;不加粗、不鋪底 */
+.run-dot { display: inline-block; vertical-align: .09em; width: 7px; height: 7px; border-radius: var(--radius-pill); margin-right: var(--space-8); }
+.run-dot[hidden] { display: none; }
+.run-dot.live { background: var(--color-green); animation: trRunPulse calc(var(--motion-blink) * 3) ease-in-out infinite; }
+@keyframes trRunPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+/* 全頁唯一的紅字槽:指令沒送到 */
+.pf-alert { margin: var(--space-8) 0 0; font-size: 12px; line-height: 1.6; color: var(--color-redText); white-space: normal; overflow-wrap: anywhere; }
+.pf-alert[hidden] { display: none; }
+
+.main-tabs { display: flex; align-items: center; gap: var(--space-24); flex: 0 0 auto; padding: 0 var(--space-24); border-bottom: 1px solid var(--border-hairline); overflow-x: auto; scrollbar-width: none; }
+.main-tabs[hidden] { display: none; }
+.main-tabs::-webkit-scrollbar { display: none; }
+.main-tab {
+  height: 44px; padding: 0; white-space: nowrap; flex: 0 0 auto; color: var(--ink-3); font-size: 13px; font-weight: 500;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+.main-tab:hover { color: var(--ink); }
+.main-tab[aria-selected="true"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--ink); }
+.main-tab:focus-visible { outline-offset: -2px; }
+
+.pf { padding: var(--space-24); flex: 1; min-height: 0; overflow-y: auto; }
+/* 自動下單五個分頁的內容上限 760、靠左(spec-desktop-005 §3;canon › 流體欄裡的固定寬子項):寬視窗多出來的寬度不再變成欄距。
+   上限加在 .pf 的子元素——.pf 自己是捲動容器,要維持整欄寬,捲軸才在欄的右緣。頁首跟著收到同一條右緣,〔啟動下單〕對齊表格右緣;
+   分頁列不收(底線是整欄的分隔線)。還沒連交易所的引導畫面(#tr-onboard)本來就是整欄置中的 46ch,不套 */
+#tr > .pf:not(#tr-onboard) > * { max-width: 760px; }
+#tr > .main-head { max-width: calc(760px + 2 * var(--space-24)); }
+.pf[hidden] { display: none; }
+.pf:focus-visible { outline-offset: -2px; }
+.pf-sec { position: relative; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-12); margin: var(--space-32) 0 var(--space-8); }   /* 288 寬放不下時整組區間 chips 掉到第二行,鈕本身不折(設計師稽核 09-25 必修 5) */
+.pf-sec:first-child { margin-top: 0; }
+.pf-sec .label { font-size: 12px; color: var(--ink-3); }
+.pf-acts { margin-left: auto; display: flex; align-items: baseline; gap: var(--space-16); }
+.pf-act {
+  padding: 3px 10px; font-size: 12px; color: var(--ink-3); border: 1px solid var(--border-hairline); border-radius: var(--radius-xs);
+  transition: color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+.pf-act:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-3); }
+/* 停用:真 disabled、灰階、不用 opacity(canon › Components › Disabled);hover 由上面的 :not(:disabled) 擋掉 */
+.pf-act:disabled { color: var(--color-greyDark); border-color: var(--border-hairline); cursor: not-allowed; }
+/* 區段標籤上的 tooltip:觸發點是一顆鈕(鍵盤到得了),氣泡沿用 app.css 的 .tip;
+   這一頁的標籤都在捲動容器頂端,往上彈會被裁掉,所以改往下 */
+.tr-tipb { padding: 0; font-size: 12px; color: var(--ink-3); cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+.tr-tipb:hover, .tr-tipb:focus-visible { color: var(--ink-2); }
+.trv .tip { left: 0; bottom: auto; top: calc(100% + 6px); max-width: min(320px, 100%); }
+.tr-tipb:hover + .tip, .tr-tipb:focus-visible + .tip { display: block; }
+.trv .pf-state { padding: var(--space-24) 0; }
+
+/* ---- 表格 ---- */
+.pf-scroll { overflow-x: auto; }
+.pf-tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.pf-tbl th { font-weight: 600; font-size: 11px; color: var(--ink-3); text-align: left; white-space: nowrap; padding: 0 var(--space-12) var(--space-8); border-bottom: 1px solid var(--color-greyDark); }
+.pf-tbl td { padding: var(--space-8) var(--space-12); color: var(--ink-2); border-bottom: 1px solid var(--border-hairline); vertical-align: middle; white-space: nowrap; }
+.pf-tbl tr:last-child td { border-bottom: none; }
+.pf-tbl tr.has-note td { border-bottom: none; }
+.pf-tbl td.note { padding-top: 0; white-space: normal; }
+.pf-tbl th:first-child, .pf-tbl td:first-child { padding-left: 0; }
+.pf-tbl th:last-child, .pf-tbl td:last-child { padding-right: 0; }
+.pf-tbl .n { text-align: right; }
+.pf-tbl td.n, .pf-tbl td.sym, .trv .mono { font-family: "Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.pf-tbl td.key { color: var(--ink); white-space: normal; min-width: 120px; }
+.trv .buy { color: var(--color-greenText); }
+.trv .sell { color: var(--color-redText); }
+.pf-tbl td.na { color: var(--color-greyDark); }
+.pf-tbl td.hold { color: var(--ink-3); }
+.pf-tbl td.unmanaged { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; font-size: 12px; }   /* 「不歸 Blave 管」是字不是數:Han 不進 mono */
+.trv .ccy, .del-body .ccy { margin-left: var(--space-4); font-size: 11px; color: var(--ink-3); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+.mkt-tag { margin-left: var(--space-8); white-space: nowrap; font-size: 11px; color: var(--ink-3); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+.pf-note { display: block; font-size: 12px; color: var(--ink-3); }
+.amt-inw { display: inline-flex; align-items: center; gap: var(--space-6); }
+.amt-in {
+  width: 96px; height: 30px; padding: 0 var(--space-8); border: 1px solid var(--color-greyDark); border-radius: var(--radius-xs);
+  background: transparent; color: var(--ink); font: 13px "Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; text-align: right;
+}
+.amt-in:focus { border-color: var(--ink); outline: none; }
+.amt-in[aria-invalid="true"] { border-color: var(--color-redText); }
+.pf-note.err { color: var(--color-redText); }
+.amt-in:disabled { color: var(--ink-3); border-color: var(--border-hairline); }
+.amt-unit { font-size: 11px; color: var(--ink-3); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+/* 雲端存完、報告還沒對上(.pend,spec-desktop-cloud-writable §1.2):數字灰一階 + 右邊 6×1 短線,不閃不轉;
+   記號一定配儲存列那句字。短線那格在改過的列上留位不畫,欄不跳。目標部位欄整欄降灰 */
+.amt-in.pend { color: var(--ink-2); }
+.amt-dash { display: inline-block; width: 6px; height: 1px; background: var(--ink-3); }
+.amt-dash.off { visibility: hidden; }
+.pf-tbl .pend-col, .pf-tbl .pend-col .ccy, .trv .pf-tbl .pend-col.buy, .trv .pf-tbl .pend-col.sell { color: var(--ink-3); }
+.pf-total { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-8); margin-top: var(--space-8); font-size: 12px; color: var(--ink-3); }
+.pf-total .n { font-family: "Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; color: var(--ink); }
+.pf-total .over { color: var(--color-redText); }
+.pf-foot { margin-top: var(--space-8); font-size: 12px; line-height: 1.5; color: var(--ink-3); overflow-wrap: anywhere; }
+.pf-foot.err { color: var(--color-redText); }
+.pf-foot.past .ts { margin-right: var(--space-8); }   /* 對帳器沒在跑時的「上次下單失敗」:色階留 .pf-foot 的 greyMedium,只多一個時間 */
+.pf-savebar { display: flex; align-items: center; gap: var(--space-12); margin-top: var(--space-12); }
+.pf-savebar[hidden] { display: none; }
+.pf-savebar .txt { margin-right: auto; min-width: 0; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
+.pf-savebar .txt.ok { color: var(--color-greenText); }
+.pf-savebar .txt.err { color: var(--color-redText); }
+.pf-cancel { flex: none; font-size: 12px; color: var(--ink-3); }
+.pf-cancel:hover { color: var(--ink); }
+
+/* ---- 沒帳戶:置中一段說明 + 一顆鈕(此時標題列不放鈕)---- */
+.pf-onboard { max-width: 46ch; margin: var(--space-64) auto 0; }
+.pf-onboard p { margin: 0 0 var(--space-24); font-size: 14px; line-height: 1.7; color: var(--ink-2); }
+
+/* ---- 資產 / 交易歷史 ---- */
+.pf-acct { display: flex; align-items: baseline; gap: var(--space-12); padding-bottom: var(--space-8); border-bottom: 1px solid var(--border-hairline); }
+.pf-acct .who { font-size: 14px; font-weight: 600; color: var(--ink); }
+.pf-acct .mode { align-self: center; }
+.pf-acct .amt { margin-left: auto; font-family: "Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink); white-space: nowrap; }
+.pf-acct .amt .lbl { margin-right: var(--space-8); font-size: 12px; color: var(--ink-3); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+/* 錢包分佈(同雲端 workspace.css 的 .pf-wallets-cap / .pf-wallet-row):列跟表格同一級字,不是腳注 */
+.pf-wallets-cap { margin-top: var(--space-8); font-size: 12px; color: var(--ink-3); }
+.pf-wallets { margin-top: var(--space-8); }
+.pf-wallet-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-12); padding: var(--space-4) 0; font-size: 13px; color: var(--ink-2); }
+.pf-wallet-row .w-amt { font-family: "Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pf-log { overflow-x: auto; }
+.pf-log-row { display: flex; gap: var(--space-16); padding: var(--space-4) 0; border-bottom: 1px solid var(--border-hairline); color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+.pf-log-row:last-child { border-bottom: none; }
+.pf-log-row .ts { flex: none; width: 92px; color: var(--ink-3); }
+.pf-log-row .act { flex: none; min-width: 32px; }
+.pf-log-row .amt { margin-left: auto; }
+.pf-log-row .px, .pf-log-row .ex { color: var(--ink-3); }
+
+/* ---- 總覽:PnL 條三格 / 曲線 / 事件 ---- */
+.bt-stats.ov-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border-hairline); border: 1px solid var(--border-hairline); border-radius: var(--radius-lg); }
+.ov-stats .stat { position: relative; background: var(--bg-body); padding: var(--space-12) var(--space-16); min-width: 0; }
+.ov-stats .stat:first-child { border-radius: var(--radius-lg) 0 0 var(--radius-lg); }
+.ov-stats .stat:last-child { border-radius: 0 var(--radius-lg) var(--radius-lg) 0; }
+.ov-stats .stat.hero, .ov-stats .stat.wide { grid-column: span 2; }   /* 本機沒有「未實現」這個數字:兩格各佔一半 */
+/* 雲端第一刀只有權益一格:佔滿,不留半邊空灰塊(選擇器多一階:要贏過窄欄那組 first/last-child 的圓角) */
+.bt-stats.ov-stats > .stat:only-child { grid-column: 1 / -1; border-radius: var(--radius-lg); }
+.ov-stats .sl { font-weight: 600; font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-stats .sl .tr-tipb { font-size: 11px; font-weight: 600; }
+.ov-stats .sl.sl-tip { overflow: visible; }
+.ov-stats .sv { margin-top: var(--space-6); font: 600 18px "Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; color: var(--ink); line-height: 1.1; white-space: nowrap; }
+.ov-stats .stat.hero .sv { font-size: 28px; }
+.ov-stats .sv.pos { color: var(--color-greenText); }
+.ov-stats .sv.neg { color: var(--color-redText); }
+.ov-stats .sv.na { color: var(--color-greyDark); }
+.ov-stats .sv .unit { margin-left: var(--space-6); font-size: 11px; font-weight: 400; color: var(--ink-3); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+.ov-stats .sub { margin-top: var(--space-4); font-size: 11px; color: var(--ink-3); }
+/* 組合績效六格(照網頁 .perf-stats):3 欄兩列,角落由 cell 自己收;gating = 小一號 muted sans「資料累積中」(不是壞值),
+   est = 真數字、只降到 muted(排在 .pos/.neg 之後,同特異度靠順序蓋掉漲跌色;不用 .na 的 greyDark,深色底上不到 AA) */
+.bt-stats.ov-stats.perf-stats { grid-template-columns: repeat(3, 1fr); }
+.perf-stats .stat, .perf-stats .stat:first-child, .perf-stats .stat:last-child { border-radius: 0; }
+.perf-stats .stat:nth-child(1) { border-top-left-radius: var(--radius-lg); }
+.perf-stats .stat:nth-child(3) { border-top-right-radius: var(--radius-lg); }
+.perf-stats .stat:nth-child(4) { border-bottom-left-radius: var(--radius-lg); }
+.perf-stats .stat:nth-child(6) { border-bottom-right-radius: var(--radius-lg); }
+.ov-stats .sv.gating { font-size: 13px; font-weight: 500; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: var(--color-greyMedium); }
+.ov-stats .sv.est { color: var(--color-greyMedium); }
+.ov-modes, .ov-ranges { display: inline-flex; align-items: baseline; gap: var(--space-4); }
+.rng {
+  padding: 3px var(--space-8); border: 1px solid transparent; border-radius: var(--radius-xs);
+  font: 12px "Roboto Mono", ui-monospace, monospace; color: var(--ink-3); white-space: nowrap;
+  transition: color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+.ov-modes .rng { font-family: inherit; }
+.rng:hover { color: var(--ink); }
+.rng[aria-pressed="true"] { color: var(--ink); font-weight: 600; border-color: var(--border-frame); }
+.ov-frame { position: relative; }
+.ov-canvas { display: block; width: 100%; height: 240px; }
+/* 曲線 hover 小卡(設計師 spec-desktop-ov-curve-hover-2026-09-25,同網頁 .cv-tip):材質同 app .tip(canon › Tooltip;dark 靠比卡片亮一階的底分層),
+   垂直釘在圖框頂、水平由 trade.js 依繪圖區定位;日期次要色、數值主色、不加粗 */
+.cv-tip { position: absolute; top: 0; z-index: 5; pointer-events: none; padding: 6px 10px; max-width: 260px; border-radius: var(--radius-sm);
+  background: var(--surface-muted); box-shadow: var(--shadow-overlay); font: 12px/1.45 "Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums;
+  text-align: left; white-space: nowrap; animation: mp-in var(--motion-fast) var(--ease-standard); }
+.cv-tip[hidden], .cv-tip span[hidden] { display: none; }
+.cv-tip span { display: block; }
+.cv-tip .d { color: var(--ink-2); }
+.cv-tip .v { color: var(--ink); }
+.cv-tip .d:last-child { white-space: normal; word-break: keep-all; }   /* 288 寬:卡寬釘在繪圖區(trade.js 設 maxWidth),第三行「相對區間起點」可以換行、數字不斷 */
+@media (prefers-reduced-motion: reduce) { .cv-tip { animation: none; } }
+.ev-day { margin: var(--space-12) 0 var(--space-4); font-size: 11px; color: var(--ink-3); }
+.ev-row { display: flex; gap: var(--space-16); padding: var(--space-4) 0; font-size: 12px; line-height: 1.6; color: var(--ink-2); border-bottom: 1px solid var(--border-hairline); }
+.ev-row:last-child { border-bottom: none; }
+.ev-row .ts { flex: none; width: 44px; color: var(--ink-3); }
+.ev-row .body { min-width: 0; overflow-wrap: anywhere; }
+.ev-row .hl { color: var(--ink); }
+.ev-row .dim { color: var(--ink-3); }
+
+/* ---- 中欄可窄到 288(視窗 1024):同一張表收欄,不改骨架。<520 標的併到策略名下;<400 單位收到表下一行 ---- */
+.sub-sym { display: none; font-size: 11px; color: var(--ink-3); }
+.unit-note { display: none; }
+@container (max-width: 520px) {
+  .bt-stats.ov-stats { grid-template-columns: repeat(2, 1fr); }
+  .ov-stats .stat:first-child { border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+  .ov-stats .stat:last-child { border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+  .bt-stats.ov-stats.perf-stats { grid-template-columns: repeat(2, 1fr); }
+  .perf-stats .stat:first-child, .perf-stats .stat:last-child, .perf-stats .stat:nth-child(3), .perf-stats .stat:nth-child(4) { border-radius: 0; }
+  .perf-stats .stat:nth-child(1) { border-top-left-radius: var(--radius-lg); }
+  .perf-stats .stat:nth-child(2) { border-top-right-radius: var(--radius-lg); }
+  .perf-stats .stat:nth-child(5) { border-bottom-left-radius: var(--radius-lg); }
+  .perf-stats .stat:nth-child(6) { border-bottom-right-radius: var(--radius-lg); }
+  .main-head { padding-left: var(--space-16); padding-right: var(--space-16); }
+  /* V2b:中欄窄到這一階、而且動作槽有**兩顆**鈕時,鈕自己一列、各佔一半——不然標題會被截成「Auto …」。
+     只有一顆鈕時留在標題那一列、靠右、自然寬:無條件換行會讓最常見的 running(只有「暫停下單」)憑空多一列,
+     那顆鈕還會浮在標題與狀態句之間的空白裡(spec §12-4 第 3、4 條) */
+  .main-head:has(.act button + button) .act { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; margin-top: var(--space-12); margin-bottom: var(--space-4); }
+  .main-head:has(.act button + button) .act > button { flex: 1; }
+  .main-tabs { padding: 0 var(--space-16); gap: var(--space-16); }
+  .pf { padding: var(--space-16); }
+  .pf-tbl .c-sym { display: none; }
+  /* mockup 是 <400 才收單位。單位現在只寫「USDT」(設計 v4),但這一階收單位的行為刻意不動(保守:
+     480 寬、視窗 1024 時差額欄不能被擠到要橫捲才看得到) */
+  .pf-tbl .ccy, .pf-tbl .amt-unit { display: none; }
+  .unit-note { display: block; }
+  .sub-sym { display: block; }
+  .pf-tbl td.key { min-width: 0; }
+  .pf-log-row { gap: var(--space-8); }
+  .pf-log-row .ts { width: 84px; }
+  /* 一次只能連一個交易所,狀態帶已經寫了是哪一家:窄欄時這一欄是多餘的;單位同部位表收到表下一行 */
+  .pf-log-row .ex, .pf-log-row .ccy { display: none; }
+}
+/* app.js 的 MAIN_MIN = 480:現行設定下這一段不會觸發,留著當保險(哪天中欄下限調低才用得到) */
+@container (max-width: 400px) {
+  .amt-in { width: 72px; }
+  .pf-tbl th { white-space: normal; vertical-align: bottom; }
+  .pf-tbl th, .pf-tbl td { padding-left: var(--space-6); padding-right: var(--space-6); }
+  .mkt-tag { margin-left: var(--space-4); }
+  .pf-tbl th:first-child, .pf-tbl td:first-child { padding-left: 0; }
+  .pf-tbl th:last-child, .pf-tbl td:last-child { padding-right: 0; }
+  .ov-stats .stat.hero .sv { font-size: 22px; }
+}
+
+/* ---- 確認框:第二動作(雲端 .cf-alt 的紅字;shell 的框是 .btn-out 底)、「在這台電腦上跑,代表:」那一塊 ---- */
+#del-alt[hidden] { display: none; }
+.btn-out.cf-alt-danger { color: var(--color-redText); }
+.del-modal .modal-foot { flex-wrap: wrap; }
+/* 三顆鈕的框(啟動 / 暫停)放寬到 520:英文版 440 會折成兩列、主要鈕自己一列 */
+.del-modal.has-alt { width: min(520px, 92vw); }
+.means { margin: var(--space-12) 0 0; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--surface-field); }
+.means .lbl { display: block; margin-bottom: var(--space-4); color: var(--ink-2); font-weight: 600; }
+.means ul { margin: 0; padding: 0; list-style: none; }
+.means li { position: relative; padding-left: var(--space-16); font-size: 12px; line-height: 1.7; color: var(--ink-2); }
+.means li::before { content: ""; position: absolute; left: 2px; top: 10px; width: 6px; height: 1px; background: var(--ink-3); }
+
+/* ---- 連接交易所的框(#cx-modal,寬 480)+ 設定分頁的帳戶列 ---- */
+.cx-modal { width: min(480px, 92vw); }
+.cx-body { padding: var(--space-4) var(--space-16) var(--space-16); }   /* 左右同 .del-body */
+.cx-body .plan-err, #tr-set .plan-err { margin: var(--space-12) 0 0; }
+.cx-row .cn-st .fault-mark { margin-top: 0; }
+.fld { display: block; margin-top: var(--space-12); }
+.fld-l { display: block; margin-bottom: var(--space-6); font-size: 12px; color: var(--ink-3); }
+.f-selw { position: relative; display: block; }
+.f-selw::after {
+  content: ""; position: absolute; right: 12px; top: 50%; width: 6px; height: 6px; margin-top: -5px; pointer-events: none;
+  border-right: 1px solid var(--ink-3); border-bottom: 1px solid var(--ink-3); transform: rotate(45deg);
+}
+.f-input {
+  display: block; width: 100%; height: 34px; padding: 0 var(--space-24) 0 var(--space-8);
+  border: 1px solid var(--border-frame); border-radius: var(--radius-xs);
+  background: var(--surface-field); color: var(--ink); font: inherit; font-size: 13px; color-scheme: dark;
+  -webkit-appearance: none; appearance: none;
+}
+.f-input:focus { outline: none; border-color: var(--ink); }
+.cx-manual-note { margin: var(--space-12) 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.cx-row { display: flex; align-items: center; gap: var(--space-12); margin-top: var(--space-12); }
+.cx-row .n { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+.cx-row .cn-st { color: var(--ink-2); }
+.cx-row .cn-st.cx-wait { margin-top: 0; color: var(--ink-3); }   /* 串接中…:圓環 + 灰字;.cx-wait 自帶的 margin-top 在列裡會把它壓低 */
+
+/* ---- 選擇下單策略的框(#ps-modal,寬 440 同 .del-modal;spec-desktop-strategy-picker §3、§10)。
+   殼沿用 .scrim / .set-modal / .modal-head / .modal-foot;新的只有 checkbox(shell 之前沒有這個元件)與 .ps-row 列。
+   head 與 foot 釘住,名單可能三四十列,只有 .ps-body 自己捲 ---- */
+.ps-modal { width: min(440px, 92vw); }
+.ps-modal .modal-foot { flex-wrap: wrap; }   /* 雲端視角鈕上方那一行目的地(.del-where)要獨占一列,同 cx / del 框 */
+.ps-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--space-4) var(--space-16) var(--space-16); }
+.ps-hint { margin: var(--space-8) 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.ps-list { margin-top: var(--space-8); }
+.ps-body .pf-state { padding: var(--space-16) 0; }   /* modal 內 24 太空 */
+/* 列:整列是 label,點哪裡都切換;列與列之間不畫線(44 高的列靠間距分得開) */
+.ps-row { display: flex; align-items: center; gap: var(--space-8); min-height: 44px; cursor: pointer; }
+.ps-row.is-locked { cursor: not-allowed; }
+/* translateY(-1px):CJK 字墨中心比 checkbox 低 1px 的光學校正(照雲端抄,落地後截圖再看要不要留) */
+.ps-name { min-width: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; transform: translateY(-1px); }
+.ps-cb:disabled ~ .ps-name { color: var(--color-greyDark); cursor: not-allowed; }
+/* 「已不存在」是資訊不是錯誤(用戶沒做錯事):--ink-2,不用 11px 紅字(darkCard 上 4.0:1 過不了小字 AA;§13-2) */
+/* inline-block:長名填滿一行時整段註記一起換行,不會第一個字掛在名字尾(設計稽核 should-fix) */
+.ps-gone { display: inline-block; margin-left: var(--space-8); font-size: 11px; color: var(--ink-2); }
+.ps-note { display: inline-block; margin-left: var(--space-8); font-size: 11px; color: var(--ink-3); }
+/* checkbox(canon › Components › Checkbox):18 方、--radius-micro;off = 透明底 + frame 框;checked = 橘底白勾(表單選取指示,不是 CTA);
+   disabled 未勾 = card 底 + hairline 框、已勾 = muted 底 + greyDark 勾(勾號兩個變數在 tokens.css) */
+.ps-cb {
+  width: 18px; height: 18px; flex: none; margin: 0; appearance: none; -webkit-appearance: none;
+  border-radius: var(--radius-micro); cursor: pointer; background: transparent; border: 1px solid var(--border-frame);
+  background-position: center; background-size: contain; background-repeat: no-repeat;
+}
+.ps-cb:checked { background-color: var(--color-primary); border-color: var(--color-primary); background-image: var(--check-indicator); }
+.ps-cb:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ps-cb:disabled { cursor: not-allowed; background-color: var(--surface-card); border-color: var(--border-hairline); }
+.ps-cb:disabled:checked { background-color: var(--surface-muted); border-color: var(--surface-muted); background-image: var(--check-indicator-disabled); }
+
+@media (prefers-reduced-motion: reduce) {
+  .run-dot.live { animation: none; }
+  .main-tab, .pf-act, .rng, .envsw button, .pane-strategies::before, .pane-main > .tb, .chat-head { transition: none; }
+  .envsw .dot.busy, .env-fade > :not(.tb) { animation: none; }
+}
+/* 確認框標題列多了記號之後:標題貼著記號靠左(.modal-head 是 space-between,三個子元素會把標題擠到中間) */
+#del-mark:not([hidden]) + h6 { margin-right: auto; }
+.modal-head .mode { margin-right: calc(-1 * var(--space-4)); }
+.btn-fill.is-busy { background: var(--surface-muted); color: var(--ink-3); cursor: default; opacity: 1; }
+#cx-go .spin16 { vertical-align: -3px; }   /* 串接中那顆鈕裡的圓環(同 #set-up-btn) */
+.cx-manual-note .btn-quiet { font-size: inherit; }
+/* 連接 Binance:欄位下面那塊說明(spec §5.2):上邊線,權限句 / 白名單+IP+複製 / 這個 IP 是什麼 */
+.cx-note { margin: var(--space-16) 0 0; padding-top: var(--space-12); border-top: 1px solid var(--border-hairline); font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.cx-note p { margin: 0; }
+.cx-note p + p { margin-top: var(--space-4); }
+/* IP chip + icon 複製鈕、「金鑰存在哪?」展開列(設計師規格 v2 方案 C) */
+.cx-chipw { display: flex; align-items: center; gap: var(--space-8); margin-top: var(--space-8); }
+.cx-chip { display: inline-flex; align-items: center; gap: var(--space-4); height: 28px; padding: 0 var(--space-2) 0 var(--space-8); border-radius: var(--radius-xs); background: var(--surface-muted); }
+.cx-chip .v { font-family: "Roboto Mono", ui-monospace, monospace; font-size: 13px; color: var(--ink); user-select: all; -webkit-user-select: all; }
+.cx-chip.is-empty { padding-right: var(--space-8); }
+.cx-chip.is-empty .v { font-family: inherit; font-size: 12px; color: var(--ink-3); user-select: none; -webkit-user-select: none; }
+.cx-icb { position: relative; flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-micro); color: var(--ink-2); transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
+.cx-icb::before { content: ""; position: absolute; inset: -2px; }   /* 視覺 24×24,熱區 28×28 */
+.cx-icb:hover { background: var(--surface-card); color: var(--ink); }
+.cx-icb .ic-check, .cx-icb.is-done .ic-copy { display: none; }
+.cx-icb.is-done .ic-check { display: block; }
+.cx-said { font-size: 12px; color: var(--ink-2); }
+.cx-note .btn-quiet { font-size: 12px; }   /* 「再查一次」:熱區靠 app.css 的 .btn-quiet::before,不用 min-height 撐行高 */
+.cx-hint { margin: var(--space-6) 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.cx-note p.cx-hint { margin-top: var(--space-6); }
+.cx-disc { position: relative; display: inline-flex; align-items: center; gap: var(--space-6); margin-top: var(--space-12); padding: 0; font-size: 12px; color: var(--ink-2); }
+.cx-disc::before { content: ""; position: absolute; inset: -6px -4px; }   /* 視覺高 17,熱區高約 30 */
+.cx-disc:hover { color: var(--ink); }
+.cx-disc::after { content: ""; width: 6px; height: 6px; margin-top: -3px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg); }
+.cx-disc[aria-expanded="true"]::after { margin-top: 3px; transform: rotate(-135deg); }
+.cx-note p.cx-disc-p { margin: var(--space-6) 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+.cx-disc-p[hidden] { display: none; }
+.cx-re-ip { margin: 0 0 0 var(--space-16); }   /* 16 = 短劃 8 + gap 8,跟錯誤句的字對齊;上方間距由 .cx-chipw 自己的 margin-top 給 */
+@media (prefers-reduced-motion: reduce) { .cx-icb { transition: none; } }
+.f-input[readonly] { color: var(--ink-3); }
+/* 沒有策略設金額時鈕旁的原因行(§8):狀態行下面自己一行,--ink-3 12px;「部位」是切分頁的文字連結 */
+.main-head .tr-noamt { margin: var(--space-4) 0 0; font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+.main-head .tr-noamt-link { font-size: inherit; vertical-align: baseline; }
+/* 等回報那一句:spinner 在句首(§2-3c)。.cx-wait 本身是 flex + gap,這裡只補「句子會換行」那一點——
+   原因行是整段話,不像連接框那兩行只有一行高 */
+.main-head .tr-noamt.cx-wait { display: flex; align-items: flex-start; gap: var(--space-8); }
+.main-head .tr-noamt.cx-wait .spin16 { margin-top: 2px; }
+/* 側欄雲端列尾的「可能仍在下單」紅短劃(同切換器 .envsw .dot.bad) */
+.strat-row .dot.bad { flex: none; display: inline-block; width: 8px; height: 2px; background: var(--color-red); }

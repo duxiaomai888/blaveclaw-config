@@ -1,22 +1,27 @@
 {
   "name": "blave-desktop",
-  "version": "0.0.1",
+  "version": "0.1.6",
   "private": true,
   "description": "Blave 電腦版外殼(v1:連結畫面 → 空三欄 → 第一句話)",
   "license": "Apache-2.0",
   "main": "main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "electron .",
     "fetch-python": "sh tools/fetch-python.sh",
-    "pack": "npm run fetch-python && electron-builder --config electron-builder.config.js --mac dir",
-    "dist": "npm run fetch-python && electron-builder --config electron-builder.config.js --mac dmg",
-    "release": "npm run fetch-python && BLAVE_RELEASE=1 electron-builder --config electron-builder.config.js --mac dmg --publish never"
+    "pack": "npm run fetch-python && electron-builder --config electron-builder.config.js --mac dir --universal && BLAVE_CHECK_PACK=1 node ../tests/check_shell_paths.js",
+    "dist": "npm run fetch-python && electron-builder --config electron-builder.config.js --mac dmg --universal && BLAVE_CHECK_PACK=1 node ../tests/check_shell_paths.js",
+    "pack:win": "npm run fetch-python && electron-builder --config electron-builder.config.js --win nsis --x64",
+    "release": "npm run fetch-python && BLAVE_RELEASE=1 electron-builder --config electron-builder.config.js --mac --publish never"
   },
   "devDependencies": {
-    "electron": "38.2.1",
-    "electron-builder": "26.15.3"
+    "electron": "44.4.3",
+    "electron-builder": "26.16.1"
   },
   "dependencies": {
+    "electron-updater": "6.8.9",
     "lightweight-charts": "5.2.1"
   },
   "author": "Blave"
