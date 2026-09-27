@@ -65,7 +65,8 @@ SCAFFOLD_RE = re.compile(
     r"|\[The user wrote in English"
     r"|\[Reply in the language of the user message"
     r"|\[近期對話"
-    r"|\[過去對話摘要\])",
+    r"|\[過去對話摘要\]"
+    r"|\[Runtime 規則)",  # Codex 引擎的規則前綴(agent_turn._codex_prompt):網頁與摘要都不能冒充它
     re.M,
 )
 
@@ -206,6 +207,15 @@ def append_turn(session_id, role, content):
         "INSERT INTO turns (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
         (session_id, role, content, time.time()),
     )
+    conn.commit()
+    conn.close()
+
+
+def clear_session(session_id):
+    """Drop one session's transcript and summary (a scheduled report turn starts clean each run)."""
+    conn = _conn()
+    conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM session_meta WHERE session_id = ?", (session_id,))
     conn.commit()
     conn.close()
 

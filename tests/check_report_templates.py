@@ -7,16 +7,27 @@ Run: cd blave-agent && .venv/bin/python tests/check_report_templates.py
 """
 import json, math, os, re, sys, tempfile
 os.environ["BLAVE_AGENT_WORKSPACE"] = tempfile.mkdtemp(prefix="rpt-")
+os.environ["BLAVE_REPORT_PACKS"] = "off"   # 每格自己的假資料:不重用上一格留下的 pack(重用另有一格驗)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np, pandas as pd
 from lib import data as d
 import lib.report_templates as T
+
+
+def tpub(pack, nar=None, **kw):
+    """publish() with the two fields every narrated report needs (title, summary) filled in, for the
+    checks that are about something else."""
+    if nar:
+        nar = dict(nar)
+        nar.setdefault("summary", "合起來看方向一致,接下來看量能能否延續。")
+        kw.setdefault("title", "測試結論:方向一致")
+    return T.publish(pack, nar, **kw)
 _REAL_NOW_TPE = T._now_tpe
 # 夜盤是否已收看「現在」;釘住時鐘,不讓結果跟著跑測試的時刻變。預設在合成資料的夜盤收完之後。
 T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
 
 KNOWN = {"meta", "kpi_row", "line_chart", "candlestick", "drawdown", "heatmap", "bar_chart", "histogram", "box",
-         "scatter", "metric_table", "table", "text", "quote", "footnote", "code", "divider", "callout", "image"}
+         "scatter", "metric_table", "table", "text", "quote", "footnote", "code", "divider", "callout", "image", "news"}
 days = pd.bdate_range("2026-06-01", "2026-09-01"); n = len(days); rng = np.random.default_rng(1)
 walk = lambda base, vol: pd.Series(base * np.cumprod(1 + rng.normal(0, vol, n)), index=days)
 def ohlc(close):
@@ -42,6 +53,30 @@ for fn in ("fetch_funding_rate", "fetch_market_direction", "fetch_capital_shorta
 tw = ohlc(walk(900, .02)).assign(Volume=walk(30000, .3)); tw.index = tw.index.tz_localize("Asia/Taipei")
 d.fetch_twstock_ohlcv = lambda sid, sch, h, start=None, end=None, adjust=False: tw
 d.fetch_twstock_institutional = lambda sid, s, e, h: pd.DataFrame({"foreign_net": rng.normal(0, 5e6, n)}, index=days)
+# 晨報 v2 的新積木(衍生品、爆倉、異動、重訊、新聞、除權息)
+COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "TRX"]
+d.fetch_open_interest_table = lambda h: {"coins": [{"token": c, "market_cap": 1e12 / (i + 1), "chg_24h": 0.01 * (i - 3)} for i, c in enumerate(COINS)]}
+d.fetch_long_short_ratio_table = lambda h: {"sources": [{"exchange": "okx", "type": "account", "key": "okx_account"}, {"exchange": "binance", "type": "account", "key": "binance_account"}],
+                                            "coins": [{"token": c, "binance_account": 1.5 + i / 10, "okx_account": 9.9} for i, c in enumerate(COINS)]}
+d.fetch_liquidation_exchanges = lambda h, hours=24, top_n=10: {"total": {"total_liq_usd": 4.12e8, "long_liq_usd": 2.9e8},
+    "exchanges": [{"exchange": "binance", "total_liq_usd": 2.0e8}, {"exchange": "bybit", "total_liq_usd": 1.5e8}, {"exchange": "okx", "total_liq_usd": 0.62e8}, {"exchange": "htx", "total_liq_usd": 0}]}
+TICK = pd.DataFrame({"last": 1.0, "change_pct": np.linspace(-20, 25, 130), "quote_volume": np.linspace(1e9, 1e6, 130)},
+                    index=[f"C{i}USDT" for i in range(129)] + ["龙虾USDT"])
+d.fetch_binance_ticker_24h = lambda: TICK.copy()
+d.fetch_unusual_movement = alpha(1.0)
+NEWS_T0 = int(pd.Timestamp("2026-09-01 20:00", tz="Asia/Taipei").timestamp())
+d.fetch_news = lambda h, q=None, since=None, limit=None: pd.DataFrame([{"id": str(i), "title": f"鉅亨標題 {i}", "published_at": NEWS_T0 + 600 * i,
+                                                                       "source": "Anue鉅亨", "tags": [], "stocks": []} for i in range(8)])
+ANN = pd.DataFrame([{"time": pd.Timestamp("2026-09-01 17:00", tz="Asia/Taipei") + pd.Timedelta(minutes=i), "stock_id": sid, "name": nm,
+                     "subject": f"公告 {nm} 事項", "clause": "第51款", "fact_date": "2026-09-01"} for i, (sid, nm) in enumerate([("2330", "台積電"), ("9999", "小公司"), ("2454", "聯發科")])])
+d.fetch_tw_announcements_public = lambda: ANN.copy()
+DAY_ALL = pd.DataFrame({"name": ["台積電", "聯發科", "小公司"] + [f"股{i}" for i in range(12)], "value": [4e10, 3e10, 1e6] + [1e9 - i for i in range(12)],
+                        "volume": 1.0, "close": 100.0, "change": 1.0, "trades": 1.0}, index=pd.Index(["2330", "2454", "9999"] + [f"{1100 + i}" for i in range(12)], name="stock_id"))
+DAY_ALL.attrs = {"date": "2026-09-01", "source": d._TWSE_OPENDATA_SOURCE_ZH}
+d.fetch_twse_day_all_public = lambda: DAY_ALL.copy()
+d.fetch_twstock_market_value_all = lambda h, top=None: pd.DataFrame({"stock_id": ["2330", "2454"], "market_value": [1e13, 5e12]})
+d.fetch_twmarket_dividend_points = lambda s, e, h: pd.DataFrame({"points": [12.3], "estimated": [True]}, index=pd.to_datetime([s]))
+d.fetch_twstock_dividend_batch = lambda ids, s, e, h: {"2330": pd.DataFrame([{"cash_ex_date": s, "stock_ex_date": "", "cash": 5.0, "stock": 0.0}])}
 HOL = pd.DataFrame({"date": pd.to_datetime(["2026-09-02"]), "name": ["測試休市"], "type": ["holiday"], "note": [None]})
 HOL_SRC = "臺灣證券交易所 2026 年有價證券集中交易市場開（休）市日期（測試出處全文）；https://data.gov.tw/license"
 HOL.attrs = {"source_zh": HOL_SRC, "source": "Taiwan Stock Exchange, 2026 (test)"}
@@ -52,11 +87,13 @@ NAR = {"lead": "一句可證偽的主張。",
        "read": "- 外資買超 267 億,20 日均為 −40 億。\n- 投信買超 131 億,連三日。\n- 自營買超 163 億。",
        "watch": [("外資期貨淨多單", "回落到 1 萬口以下", "+12,300 口"),
                  ("外資現貨買超", "轉為連兩日淨賣超", "+267.0 億")],
-       "risk": "外資連兩日淨賣超逾 150 億,這份解讀作廢。"}
-# name → (title of the one price chart, or None; line_chart titles that must stay line charts)
-PRICE = {"tw": ("加權指數", {"融資餘額", "外資期貨淨多單"}), "close": ("加權指數", {"融資餘額", "外資期貨淨多單"}),
-         "crypto": (None, {"BTC 資金費率", "Blave 市場指標(z-score)"}),
-         "2330": ("2330 日 K", set()), "btc": ("BTC 日 K", {"資金費率", "Blave 指標(z-score)"})}
+       "risk": "外資連兩日淨賣超逾 150 億,這份解讀作廢。",
+       "few_sources": "測試資料,不上網"}
+# name → (title of the one price chart, or None; title prefixes of charts that must stay line charts;
+# bars drawn: 60, tw v2 = the last 45 calendar days only)
+PRICE = {"tw": ("加權指數", {"外資期貨淨部位"}), "close": ("加權指數", {"融資", "外資期貨淨部位"}),
+         "crypto": (None, {"市場方向"}),
+         "2330": ("2330 日 K", set()), "btc": ("BTC 日 K", {"資金費率", "爆倉指標"})}
 fails = 0
 def check(cond, msg):
     global fails
@@ -77,7 +114,7 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("close", T.tw_cl
                    ("crypto", T.crypto_market_brief("2026-09-02", H)),
                    ("2330", T.symbol_brief("2330", "2026-09-02", H)), ("btc", T.symbol_brief("BTC", "2026-09-02", H))):
     for nar in (NAR, None):
-        path = T.publish(pack, nar)
+        path = tpub(pack, nar)
         check(os.path.basename(path) == pack.report_id + ("" if nar else "-auto") + ".json", f"{name}: {'有判讀' if nar else '純數據包'} id = {os.path.basename(path)[:-5]}")
         doc = json.load(open(path)); b = doc["blocks"]; types = [x["type"] for x in b]
         tag = f"{name}{'+narrative' if nar else ' data-only'}"
@@ -95,25 +132,30 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("close", T.tw_cl
         vis = [x for x in b if x["type"] in ("candlestick", "line_chart", "bar_chart", "table")]
         check(vis and all(0 < len(x.get("caption", "")) <= 300 for x in vis), f"{tag}: 每個圖表/表格都有 caption(≤300)")
         kr = [x for x in b if x["type"] == "kpi_row"][0]
-        check(any(w in kr.get("title", "") for w in ("高於", "低於")), f"{tag}: kpi_row title 帶當日漲跌對基準的位置:{kr.get('title')}")
+        # 有 lead 的報告:KPI 列不帶標題(跟 lead 重複,設計稽核 B7);標題句仍在 pack 裡,純資料版照用
+        kt = [x for x in pack.blocks if x["type"] == "kpi_row"][0].get("title", "")
+        check(any(w in kt for w in ("高於", "低於")) and (("title" not in kr) if nar else kr.get("title") == kt),
+              f"{tag}: kpi_row title 帶當日漲跌對基準的位置({'有 lead 時不出' if nar else '純資料版照出'}):{kt}")
         pos = pack.context.get("收盤位置", "")
-        check(bool(pos) and pos.split(",")[0] in kr.get("title", ""), f"{tag}: describe() 的收盤位置與 kpi_row title 同一句(agent 引用得到,不會自己再算一次)")
+        check(bool(pos) and pos.split("，")[0] in kt, f"{tag}: describe() 的收盤位置與 kpi_row title 同一句(agent 引用得到,不會自己再算一次)")
         price, lines = PRICE[name]
         ks = [x for x in b if x["type"] == "candlestick"]
         if price:
             n_k = len(ks[0]["candles"]) if ks else 0
+            want_k = 60 if name != "tw" else sum(1 for t in days if t >= days[-1] - pd.Timedelta(days=45))
             # title 帶當日結論(「{圖名}:收盤高於 60 日均 X%」),所以認前綴不認全等。
-            check(len(ks) == 1 and ks[0]["title"].startswith(price) and n_k == 60, f"{tag}: 價格圖「{price}」是 K 線,{n_k} 根(範本統一 60 根,日 K 建議 40–65)")
+            check(len(ks) == 1 and ks[0]["title"].startswith(price) and n_k == want_k, f"{tag}: 價格圖「{price}」是 K 線,{n_k} 根(60 根;台股晨報 v2 只畫最後 45 天 = {want_k})")
             check(any(w in ks[0]["title"] for w in ("高於", "低於")) and "60 日均" in ks[0]["caption"],
                   f"{tag}: 價格圖 title 帶收盤對 60 日均的位置,caption 留口徑與基準值:{ks[0]['title']}")
             ma = re.search(r"60 日均 ([\d,.]+)", ks[0]["caption"])
-            check(pos.split(",")[-1] in ks[0]["title"] and ma is not None and ma.group(1) in pack.describe(),
+            check(pos.split("，")[-1] in ks[0]["title"] and ma is not None and ma.group(1) in pack.describe(),
                   f"{tag}: 價格圖 title / caption 的 60 日均與 describe() 同一句同一個值")
             check(all(sound(k) and {"y_unit", "reflines"} <= set(k) for k in ks), f"{tag}: K 線高低包住開收、t 嚴格遞增,帶單位與 20 日參考線")
             check(all(not r["emphasis"] for k in ks for r in k.get("reflines", [])), f"{tag}: 參考線都不強調(強調低點讀起來像標支撐)")
-            check(doc["schema_version"] == "1.2", f"{tag}: 含 K 線 → schema_version 1.2")
+            want_v = "1.4" if any(x["type"] == "news" for x in b) else "1.2"
+            check(doc["schema_version"] == want_v, f"{tag}: 含 K 線 → schema_version 1.2(帶 news block 則 1.4)")
             ref = {r["label"]: r["y"] for r in (ks[0].get("reflines", []) if ks else [])}
-            prior = ks[0]["candles"][-21:-1] if ks else []   # 倒數第 2–21 根,不含當日
+            prior = ks[0]["candles"][-21:-1] if ks else []   # 倒數第 2–21 根,不含當日(v2 畫 45 天仍 ≥ 21 根)
             want = {"前 20 日高": max(k[2] for k in prior), "前 20 日低": min(k[3] for k in prior)} if prior else {}
             if name in ("tw", "close"):
                 want.pop("前 20 日低", None)   # 大盤晨報、收盤報告只畫前 20 日高
@@ -124,7 +166,8 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("close", T.tw_cl
                   and (name in ("tw", "close") or all(levels.get(k) == f"{v:,.2f}" for k, v in want.items())),
                   f"{tag}: 參考線、近期高低與均線表、describe() 的前 20 日高/低同名同值")
         else:
-            check(not ks and doc["schema_version"] == "1.1", f"{tag}: 沒有 K 線 → 維持 1.1")
+            check(not ks and doc["schema_version"] == ("1.4" if any(x["type"] == "news" for x in b) else "1.1"),
+                  f"{tag}: 沒有 K 線 → 維持 1.1(帶 news block 則 1.4)")
         check(not re.search(r"(?<!前 )20 日[高低]", json.dumps(doc, ensure_ascii=False) + pack.describe()),
               f"{tag}: 沒有不帶「前」的 20 日高/低標籤(同名不同口徑)")
         body = json.dumps(doc, ensure_ascii=False) + pack.describe()
@@ -140,7 +183,8 @@ for name, pack in (("tw", T.tw_market_brief("2026-09-02", H)), ("close", T.tw_cl
               and all(set(r) == {"cond", "threshold", "now"} for r in wt[0]["rows"]))),
               f"{tag}: watch 是「觀察重點」表格(條件/門檻/現在值 2–3 列),不是散文段")
         titles = {x.get("title") for x in b if x["type"] == "line_chart"}
-        check(lines <= titles and not any("收盤" in (t or "") for t in titles), f"{tag}: 非價格圖仍是 line_chart,沒有收盤折線")
+        check(all(any((t or "").startswith(w) for t in titles) for w in lines) and not any("收盤" in (t or "") for t in titles),
+              f"{tag}: 非價格圖仍是 line_chart,沒有收盤折線")
     check(pack.context and "narrative slots" in pack.describe(), f"{name}: describe() 列出數字與槽位")
 
 d.fetch_twstock_ohlcv = lambda sid, sch, h, start=None, end=None, adjust=False: tw.tail(15)
@@ -166,11 +210,11 @@ try:
     T.kpi_row([T.kpi(str(i), "1") for i in range(7)]); check(False, "kpi_row 超過 6 格要 raise,不靜默砍")
 except ValueError:
     check(True, "kpi_row 超過 6 格要 raise,不靜默砍")
-check(len([b for b in json.load(open(T.publish(T.tw_market_brief("2026-09-02", H), None, report_id="tw-k")))["blocks"] if b["type"] == "kpi_row"][0]["items"]) == 6
+check(len([b for b in json.load(open(tpub(T.tw_market_brief("2026-09-02", H), None, report_id="tw-k")))["blocks"] if b["type"] == "kpi_row"][0]["items"]) == 6
       and any(i["label"] == "台指期夜盤" for i in json.load(open(os.path.join(os.environ["BLAVE_AGENT_WORKSPACE"], "reports", "tw-k.json")))["blocks"][1]["items"]),
       "台股晨報六格 KPI 含台指期夜盤")
 p = T.tw_market_brief("2026-09-02", H)
-check(p.context["台指期夜盤"].split("(")[1].startswith("收盤;") and "最新價" not in json.dumps(p.blocks, ensure_ascii=False),
+check(p.context["台指期夜盤"].split("（")[1].startswith("收盤；") and "最新價" not in json.dumps(p.blocks, ensure_ascii=False),
       "夜盤已收(05:00 後、最後一根在):describe 寫收盤,footnote 不帶盤中說明")
 full_night = d.fetch_twfutures_ohlcv
 
@@ -183,12 +227,12 @@ def night_case(last_bar, now, label, why):
     items = [x for x in p.blocks if x["type"] == "kpi_row"][0]["items"]
     state = label[len("台指期夜盤("):-1]
     foot = json.dumps([x for x in p.blocks if x["type"] == "footnote"], ensure_ascii=False)
-    check(any(i["label"] == label for i in items) and p.context["台指期夜盤"].split("(")[1].startswith(state + ";")
+    check(any(i["label"] == label for i in items) and p.context["台指期夜盤"].split("（")[1].startswith(state + "；")
           and "尚未收盤" not in foot and "不是收盤價" in foot, why)
 
-night_case("2026-09-01 21:00", "2026-09-01 22:30", "台指期夜盤(盤中,截至 22:00)", "夜盤盤中、api 已丟未收那根:標「盤中,截至 22:00」")
-night_case("2026-09-01 22:00", "2026-09-01 22:30", "台指期夜盤(盤中,截至 22:30)", "夜盤盤中、export 留著未收那根:時點取現在「截至 22:30」")
-night_case("2026-09-02 02:00", "2026-09-02 09:00", "台指期夜盤(截至 03:00,資料未含收盤)", "05:00 後資料缺尾:不標收盤,label 與 footnote 不自相矛盾")
+night_case("2026-09-01 21:00", "2026-09-01 22:30", "台指期夜盤（盤中，截至 22:00）", "夜盤盤中、api 已丟未收那根:標「盤中,截至 22:00」")
+night_case("2026-09-01 22:00", "2026-09-01 22:30", "台指期夜盤（盤中，截至 22:30）", "夜盤盤中、export 留著未收那根:時點取現在「截至 22:30」")
+night_case("2026-09-02 02:00", "2026-09-02 09:00", "台指期夜盤（截至 03:00，資料未含收盤）", "05:00 後資料缺尾:不標收盤,label 與 footnote 不自相矛盾")
 d.fetch_twfutures_ohlcv = full_night
 T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
 
@@ -198,23 +242,53 @@ def unwritten(rid):
     return not any(os.path.exists(os.path.join(REPORTS, rid + s + ".json")) for s in ("", "-auto"))
 def skipped(p, why, *must):
     ok = bool(p.skip) and not p.blocks and all(m in p.skip for m in must) and p.skip in p.notes and "不發佈" in p.describe()
-    check(ok and T.publish(p, NAR) is None and T.publish(p) is None and unwritten(p.report_id), why)
+    check(ok and tpub(p, NAR) is None and tpub(p) is None and unwritten(p.report_id), why)
 
 p = T.tw_close_brief("2026-09-01", H)
 check(p.report_id == "tw-close-20260901" and p.title == "台股收盤報告" and p.type == "morning" and p.skip is None,
       "收盤報告:id tw-close-YYYYMMDD、標題台股收盤報告、type morning")
 check("夜盤" not in json.dumps(p.blocks, ensure_ascii=False) + p.describe(), "收盤報告不含夜盤")
+os.environ["BLAVE_SCHEDULED_JOB"] = "tw-close"     # 排程:休市日照舊跳過,不重發舊資料
 p = T.tw_close_brief("2026-09-02", H)
 skipped(p, "休市表列為休市:不發佈,notes 講休市名稱、上一交易日,並附休市表出處全文", "測試休市", "上一交易日 2026-09-01", HOL_SRC)
 check(p.context.get("休市表出處") == HOL_SRC and HOL_SRC in p.describe(), "休市表出處全文進 context 與 describe()(授權條件)")
 d.fetch_twstock_holidays = lambda h, year=None: (_ for _ in ()).throw(AssertionError("週末不該查休市表"))
-skipped(T.tw_close_brief("2026-09-05", H), "週六:不查休市表就不發佈,指名上一交易日", "週末", "2026-09-01")
+skipped(T.tw_close_brief("2026-09-05", H), "排程週六:不查休市表就不發佈,指名上一交易日", "週末", "2026-09-01")
+os.environ.pop("BLAVE_SCHEDULED_JOB")
+# Wei:對話裡週末／休市日要收盤報告 → 直接落到最近交易日,不先問
+import re as _re
+ASK = _re.compile(r"先問|問用戶|問使用者|要不要|是否要|ask the user|confirm with")
+for day, why in (("2026-09-05", "週六"), ("2026-09-02", "休市表列為休市")):
+    d.fetch_twstock_holidays = lambda h, year=None: HOL
+    p = T.tw_close_brief(day, H)
+    desc = p.describe()
+    check(p.skip is None and p.report_id == "tw-close-20260901" and p.report_day == "2026-09-01" and p.closed["asked"] == day
+          and "用 9/1 的資料" in desc and "直接照這份做" in desc and not ASK.search(desc),
+          f"對話{why}要收盤報告:自動用最近交易日 2026-09-01,describe 叫 agent 第一句講「今天休市,用 9/1 的資料」,沒有先問用戶的字樣")
+# 雲端排程 run.py 的真實環境(report_runner._subprocess_env,沒有 BLAVE_SCHEDULED_JOB):週六照樣跳過,不發舊資料
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runtime"))
+import report_runner as _RR
+_local = os.environ.pop("BLAVE_AGENT_LOCAL", None)
+_cloud = {k: v for k, v in _RR._subprocess_env().items() if k.startswith("BLAVE_")}
+_saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("BLAVE_") and k not in ("BLAVE_REPORT_PACKS",)}
+os.environ.update(_cloud)
+d.fetch_twstock_holidays = lambda h, year=None: HOL
+_p = T.tw_close_brief("2026-09-05", H)
+check("BLAVE_SCHEDULED_JOB" not in _cloud and bool(_p.skip) and _p.closed is None and tpub(_p) is None,
+      f"雲端 run.py 的真實環境({sorted(_cloud)})週六:skip,不落到最近交易日")
+for k in _cloud:
+    os.environ.pop(k, None)
+os.environ.update(_saved)
+if _local is not None:
+    os.environ["BLAVE_AGENT_LOCAL"] = _local
+os.environ["BLAVE_SCHEDULED_JOB"] = "tw-close"
 d.fetch_twstock_holidays = lambda h, year=None: HOL
 skipped(T.tw_close_brief("2026-09-03", H), "交易日但指數還沒有當日收盤(未入庫或臨時停市):不拿舊收盤充當今日", "尚未入庫", "2026-09-01")
 d.fetch_twstock_holidays = lambda h, year=None: None
 skipped(T.tw_close_brief("2026-09-02", H), "休市表拿不到、當日無收盤:不發佈", "尚未入庫")
+os.environ.pop("BLAVE_SCHEDULED_JOB")
 p = T.tw_close_brief("2026-09-01", H)
-check(p.skip is None and any("休市表無法取得" in x for x in p.notes) and os.path.exists(T.publish(p, NAR)),
+check(p.skip is None and any("休市表無法取得" in x for x in p.notes) and os.path.exists(tpub(p, NAR)),
       "休市表拿不到但當日有收盤:照發,notes 說明改用收盤資料判斷")
 d.fetch_twstock_holidays = lambda h, year=None: HOL
 
@@ -227,7 +301,7 @@ labels = [i["label"] for x in p.blocks if x["type"] == "kpi_row" for i in x["ite
 body = json.dumps([x for x in p.blocks if x["type"] != "footnote"], ensure_ascii=False)   # 註腳的來源說明本來就列這些名稱
 check(p.skip is None and labels == ["加權指數", "成交值"] and "三大法人" not in body and "融資餘額" not in body
       and "外資期貨淨多單" not in body and "08/31" not in body and "08-31" not in body
-      and all(any(x.startswith(f"{k} 2026-09-01 尚未公布(資料源最新為 2026-08-31)") for x in p.notes) for k in ("三大法人", "融資餘額", "外資期貨淨多單")),
+      and all(any(x.startswith(f"{k} 2026-09-01 尚未公布（資料源最新為 2026-08-31）") for x in p.notes) for k in ("三大法人", "融資餘額", "外資期貨淨多單")),
       "法人、融資、期貨法人當日未出:notes 寫尚未公布,區塊與 KPI 都不放前一日的數字")
 for k, fn in full.items():
     setattr(d, k, fn)
@@ -254,7 +328,7 @@ class _ClockDT(_RealDT):
         return _UTC_NOW.replace(tzinfo=None)
 T.datetime, T._now_tpe = _ClockDT, _REAL_NOW_TPE
 p = T.tw_close_brief(headers=H)
-check(T._today_tpe() == "2026-09-12" and p.report_id == "tw-close-20260912",
+check(T._today_tpe() == "2026-09-12" and (p.report_id == "tw-close-20260912" or (p.closed or {}).get("asked") == "2026-09-12"),
       "預設日期取台北(UTC 9/11 17:30 → tw-close-20260912),不是機器的 UTC 日期")
 T.datetime = _RealDT
 T._now_tpe = lambda: pd.Timestamp("2026-09-02 09:00", tz="Asia/Taipei").to_pydatetime()
@@ -266,10 +340,10 @@ check("lead≤600" in desc and "read≤300" in desc and "risk≤100" in desc
       and "watch=表格 2–3 列(條件/門檻/現在值)" in desc and "2400" not in desc and "1500" not in desc,
       "describe() 的 narrative slots 那行印出新上限與 watch 的表格形式")
 ok3 = dict(NAR, read="### 外資買超集中電子權值 x\n內文一句。\n### 投信連三買 y\n內文一句。\n### 自營轉多 z\n內文一句。")
-check(os.path.exists(T.publish(pack, ok3, report_id="read-heads")), "read 寫成三個 ### 子標:接受")
+check(os.path.exists(tpub(pack, ok3, report_id="read-heads")), "read 寫成三個 ### 子標:接受")
 # 條數是範圍 3–5 不是定值:兩端都要驗,否則「放寬」只是把定值從 3 搬到別的數字。
 ok5 = dict(NAR, read="- 甲 1\n- 乙 2\n- 丙 3\n- 丁 4\n- 戊 5")
-check(os.path.exists(T.publish(pack, ok5, report_id="read-five")), "read 寫成五條:接受(上界)")
+check(os.path.exists(tpub(pack, ok5, report_id="read-five")), "read 寫成五條:接受(上界)")
 # 訊息本身也是契約:agent 看到的是這一行,不是這份文件——超了多少、該改成什麼形式都要講。
 for bad, why, must in (({"lead": "x" * 601}, "lead 超過 600", "cap 600 (over by 1)"),
                        ({"read": "- 甲 1\n- 乙 2\n- 丙 3" + "x" * 300}, "read 超過 300", "cap 300 (over by"),
@@ -284,12 +358,12 @@ for bad, why, must in (({"lead": "x" * 601}, "lead 超過 600", "cap 600 (over b
                        ({"watch": [("甲", "門檻", "值"), ("乙", "門檻")]}, "watch 某列不是三格", "must be 3 strings"),
                        ({"watch": [("甲", "門檻", ""), ("乙", "門檻", "值")]}, "watch 某格是空的", "「現在值」是空的"),
                        ({"watch": [("甲", "門檻", "x" * 41), ("乙", "門檻", "值")]}, f"watch 某格超過 {T.WATCH_CELL} 字", "上限 40(超出 1)"),
-                       ({"summary": "x"}, "未知槽位", "unknown narrative slot"),
+                       ({"verdict": "x"}, "未知槽位", "unknown narrative slot"),
                        ({"action": "x"}, "舊的 action 槽位", "renamed to 'watch'"),
                        ({"read": "- 見 [^nope]\n- 乙 2\n- 丙 3"}, "不存在的註腳引用", "footnote id(s) ['nope']"),
                        ({"watch": [("見 [^nope]", "門檻", "值"), ("乙", "門檻", "值")]}, "watch 格內不存在的註腳引用", "footnote id(s) ['nope']")):
     try:
-        T.publish(pack, dict(NAR, **bad) if set(bad) <= set(T.SLOTS) else bad); check(False, f"publish 拒絕{why}")
+        tpub(pack, dict(NAR, **bad) if set(bad) <= set(T.SLOTS) else bad); check(False, f"publish 拒絕{why}")
     except ValueError as e:
         check(must in str(e), f"publish 拒絕{why},訊息帶「{must}」")
 
@@ -297,7 +371,9 @@ for bad, why, must in (({"lead": "x" * 601}, "lead 超過 600", "cap 600 (over b
 # Wei 2026-09-26:沒綁卡、沒登入也要能用;缺 Blave 資料照樣 publish,缺的寫在尾註。
 PAID = ("fetch_twstock_price", "fetch_funding_rate", "fetch_market_direction", "fetch_capital_shortage", "fetch_top_trader_exposure",
         "fetch_liquidation", "fetch_whale_hunter", "fetch_taker_intensity", "fetch_economic_calendar",
-        "fetch_twmarket_index", "fetch_twstock_ohlcv", "fetch_twstock_institutional", "fetch_twstock_holidays")
+        "fetch_twmarket_index", "fetch_twstock_ohlcv", "fetch_twstock_institutional", "fetch_twstock_holidays",
+        "fetch_open_interest_table", "fetch_long_short_ratio_table", "fetch_liquidation_exchanges", "fetch_unusual_movement",
+        "fetch_news", "fetch_twmarket_dividend_points", "fetch_twstock_dividend_batch")
 saved = {k: getattr(d, k) for k in PAID}
 gate = lambda *a, **k: d._check_data_access()          # 真的那道閘:env=0 就 raise DataAccessError
 for k in PAID:
@@ -310,7 +386,7 @@ os.environ["BLAVE_DATA_ACCESS"] = "0"
 os.environ["BLAVE_DATA_ACCESS_WHY"] = "no_card"
 
 def no_access_case(name, pack, names, nar, lang="zh"):
-    path = T.publish(pack, nar, lang=lang)
+    path = tpub(pack, nar, lang=lang)
     doc = json.load(open(path)); b = doc["blocks"]; types = [x["type"] for x in b]
     foots = [x for x in b if x["type"] == "footnote"]
     item = [i for i in foots[0]["items"] if i["id"] == "blave"] if foots else []
@@ -324,7 +400,7 @@ def no_access_case(name, pack, names, nar, lang="zh"):
           f"{name}(access=0,{'有判讀' if nar else '純數據包'},{lang}):仍 publish、missing={list(names)}、尾註列缺的資料;describe 叫 agent 照樣發")
     return b
 
-crypto_missing = ("BTC 資金費率", "市場方向", "資金稀缺", "頂尖交易員曝險", "今日總經事件")
+crypto_missing = ("未平倉量", "BTC 資金費率", "多空比", "24 小時爆倉", "異常漲跌訊號", "市場方向", "資金稀缺", "頂尖交易員曝險", "今日總經事件")
 p = T.crypto_market_brief("2026-09-02", H)
 b = no_access_case("加密市場晨報", p, crypto_missing, NAR)
 no_access_case("加密市場晨報", p, crypto_missing, None)
@@ -347,15 +423,15 @@ b = no_access_case("2330 晨報", T.symbol_brief("2330", "2026-09-02", H), ("外
 check(any(i["text"] == d._TW_PUBLIC_SOURCE_EN for i in b[-1]["items"]) and not any(i["text"] == d._TW_PUBLIC_SOURCE_ZH for i in b[-1]["items"]),
       "lang=en:顯名換成英文常數")
 src_txt = [i["text"] for x in b if x["type"] == "footnote" for i in x["items"] if i["id"] == "src"]
-bb = json.load(open(T.publish(T.symbol_brief("BTC", "2026-09-02", H), None)))["blocks"]
+bb = json.load(open(tpub(T.symbol_brief("BTC", "2026-09-02", H), None)))["blocks"]
 src_btc = [i["text"] for i in bb[-1]["items"] if i["id"] == "src"][0]
 check("資金費率" not in src_btc and "巨鯨" not in src_btc and "Binance USDT 永續日 K" in src_btc and "前 20 日高/低" in src_btc,
       "BTC 晨報(access=0):src 尾註不描述已跳過的 Blave 系列")
 src_cr = [i["text"] for i in foots if i["id"] == "src"][0]
-check(src_cr == "價格:Binance USDT 永續日 K。", "加密市場晨報(access=0):src 尾註只剩價格那句")
+check(src_cr == "價格：Binance USDT 永續日 K。漲跌幅：Binance 公開 24 小時行情。", "加密市場晨報(access=0):src 尾註只剩兩句公開行情")
 for fn, why in ((lambda: T.tw_market_brief("2026-09-02", H), "台股大盤晨報"), (lambda: T.tw_close_brief("2026-09-01", H), "台股收盤報告")):
     p = fn()
-    check(bool(p.skip) and "加權指數" in p.skip and "no_data_access" not in p.skip and T.publish(p, NAR) is None and T.publish(p) is None
+    check(bool(p.skip) and "加權指數" in p.skip and "no_data_access" not in p.skip and tpub(p, NAR) is None and tpub(p) is None
           and "不發佈" in p.describe(), f"{why}(access=0、非電腦版):不准走免費路徑 → skip 而不是 traceback(句子不帶內部代碼),publish 回 None")
 # 電腦版(BLAVE_AGENT_LOCAL=1):兩份 TAIEX 報告改走 TWSE / TAIFEX 免費路徑,不再 skip;夜盤、休市表沒有免費路徑 → missing。
 MKT = ("fetch_twmarket_turnover", "fetch_twmarket_institutional", "fetch_twmarket_margin", "fetch_twfutures_institutional", "fetch_twfutures_ohlcv")
@@ -382,23 +458,23 @@ check(asked == {"fetch_twmarket_index_public": "2026-06-04", "fetch_twmarket_ins
       f"回看:指數固定 90 日(60 日均算得出),逐日打的法人/融資只抓 45 日 — {asked}")
 for k, fn in pub.items():
     setattr(d, k, fn)
-for why, fn, miss in (("台股大盤晨報", lambda: T.tw_market_brief("2026-09-02", H), ["台指期夜盤", "今日總經事件"]),
+for why, fn, miss in (("台股大盤晨報", lambda: T.tw_market_brief("2026-09-02", H), ["台指期夜盤", "鉅亨新聞", "今日總經事件", "除權息"]),
                       ("台股收盤報告", lambda: T.tw_close_brief("2026-09-01", H), [])):
     p = fn()
-    b = json.load(open(T.publish(p, NAR)))["blocks"]
+    b = json.load(open(tpub(p, NAR)))["blocks"]
     items = {i["id"]: i["text"] for i in b[-1]["items"]}
     labels = [i["label"] for x in b if x["type"] == "kpi_row" for i in x["items"]]
     check(p.skip is None and [m["name"] for m in p.missing] == miss
           and {"加權指數", "成交值", "外資買賣超", "融資餘額", "外資期貨淨多單"} <= set(labels)
           and items.get("src_twse") == d._TWSE_SOURCE_ZH and items.get("src_taifex") == d._TAIFEX_SOURCE_ZH
           and "本機直接取自交易所" in items["src"] and "經 Blave API" not in items["src"] and ("blave" in items) == bool(miss)
-          and (why != "台股收盤報告" or any("休市表無法取得(沒有 Blave 資料權限)" in n for n in p.notes)),
+          and (why != "台股收盤報告" or any("休市表無法取得（沒有 Blave 資料權限）" in n for n in p.notes)),
           f"{why}(access=0、電腦版):走 TWSE/TAIFEX 照樣 publish,尾註帶兩所顯名、不說經 Blave,missing={miss}(休市表只進 notes,不叫人綁卡)")
-    en = {i["id"]: i["text"] for i in json.load(open(T.publish(p, NAR, lang="en")))["blocks"][-1]["items"]}
+    en = {i["id"]: i["text"] for i in json.load(open(tpub(p, NAR, lang="en")))["blocks"][-1]["items"]}
     check(en["src_twse"] == d._TWSE_SOURCE_EN and en["src_taifex"] == d._TAIFEX_SOURCE_EN, f"{why} lang=en:兩所顯名換成英文")
 d.fetch_twmarket_margin_public = lambda s, e: (_ for _ in ()).throw(ConnectionError("twse down"))
 p = T.tw_market_brief("2026-09-02", H)
-check(p.skip is None and "融資餘額" not in [m["name"] for m in p.missing] and any("融資餘額 免費資料抓取失敗(ConnectionError" in n for n in p.notes)
+check(p.skip is None and "融資餘額" not in [m["name"] for m in p.missing] and any("融資餘額 免費資料抓取失敗（ConnectionError" in n for n in p.notes)
       and "融資餘額" not in p.context, "免費融資抓不到:進 notes、不進 missing(不是權限問題),其餘照出")
 d.fetch_twmarket_index_public = lambda s, e: (_ for _ in ()).throw(ConnectionError("twse down"))
 try:
@@ -412,7 +488,7 @@ for k, fn in {**saved_mkt, **saved_pub}.items():
 # 非權限的錯誤(網路)不是 missing:落 notes,尾註不把它算成「沒 Blave 資料」。
 d.fetch_market_direction = lambda *a, **k: (_ for _ in ()).throw(ConnectionError("boom"))
 p = T.crypto_market_brief("2026-09-02", H)
-check("市場方向" not in [m["name"] for m in p.missing] and any("市場方向 抓取失敗(ConnectionError)" in n for n in p.notes),
+check("市場方向" not in [m["name"] for m in p.missing] and any("市場方向 抓取失敗（ConnectionError）" in n for n in p.notes),
       "access=0 下付費 fetch 丟 ConnectionError:進 notes 不進 missing")
 d.fetch_market_direction = gate
 # B1(稽核):免費日線真的壞(交易所 / FinMind 連不上)時走真實鏈路 — _twstock_daily 退到 Blave、閘門丟
@@ -437,21 +513,21 @@ d._fetch_twstock_daily_free, d._CACHE_DIR = real_free, real_cache
 d.fetch_twstock_price = lambda sid, s, e, h: free_tw
 os.environ["BLAVE_DATA_ACCESS_WHY"] = "signed_out"
 p = T.crypto_market_brief("2026-09-02", H)
-doc = json.load(open(T.publish(p, NAR)))
+doc = json.load(open(tpub(p, NAR)))
 txt = [i for i in doc["blocks"][-1]["items"] if i["id"] == "blave"][0]["text"]
 check(all(m["reason"] == "signed_out" for m in p.missing) and "登入" in txt and "signed_out" in p.describe(),
       "signed_out:missing reason=signed_out,尾註才提登入")
 os.environ["BLAVE_DATA_ACCESS_WHY"] = "no_balance"
-doc = json.load(open(T.publish(T.crypto_market_brief("2026-09-02", H), NAR)))
+doc = json.load(open(tpub(T.crypto_market_brief("2026-09-02", H), NAR)))
 txt = [i for i in doc["blocks"][-1]["items"] if i["id"] == "blave"][0]["text"]
 skip = T.tw_market_brief("2026-09-02", H).skip
 check("綁卡" not in txt and "儲值" in txt and "綁卡" not in skip and "儲值" in skip, "no_balance:已綁卡的人不被叫去綁卡(尾註與 skip 同一句)")
 os.environ["BLAVE_DATA_ACCESS_WHY"] = "unknown"
-doc = json.load(open(T.publish(T.crypto_market_brief("2026-09-02", H), NAR)))
+doc = json.load(open(tpub(T.crypto_market_brief("2026-09-02", H), NAR)))
 txt = [i for i in doc["blocks"][-1]["items"] if i["id"] == "blave"][0]["text"]
 check("綁卡" not in txt and "登入" not in txt and "讀不到資料狀態" in txt, "unknown:不叫人綁卡也不叫人登入,講讀不到資料狀態")
 os.environ["BLAVE_DATA_ACCESS_WHY"] = "no_card"
-doc = json.load(open(T.publish(T.crypto_market_brief("2026-09-02", H), NAR)))
+doc = json.load(open(tpub(T.crypto_market_brief("2026-09-02", H), NAR)))
 check("綁卡送 14 天" in [i for i in doc["blocks"][-1]["items"] if i["id"] == "blave"][0]["text"], "no_card:才講綁卡")
 bare = free_tw.copy(); bare.attrs = {}
 d.fetch_twstock_price = lambda sid, s, e, h: bare
@@ -464,7 +540,7 @@ os.environ.pop("BLAVE_DATA_ACCESS_WHY"); os.environ.pop("BLAVE_DATA_ACCESS")
 for k, fn in saved.items():
     setattr(d, k, fn)
 p = T.crypto_market_brief("2026-09-02", H)
-check(not p.missing and not any(i["id"] == "blave" for i in json.load(open(T.publish(p, NAR)))["blocks"][-1]["items"]),
+check(not p.missing and not any(i["id"] == "blave" for i in json.load(open(tpub(p, NAR)))["blocks"][-1]["items"]),
       "有資料權限:missing 空、尾註沒有那行(雲端機一個位元組都不變)")
 
 print("all checks passed" if not fails else f"FAILED: {fails}"); sys.exit(1 if fails else 0)

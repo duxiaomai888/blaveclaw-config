@@ -31,6 +31,13 @@ contextBridge.exposeInMainWorld("blave", {
   cloudSend: (cmd, args, requestId) => ipcRenderer.invoke("cloud-send", cmd, args, requestId),
   // 雲端連交易所:金鑰只走這一支(cloud-send 拒收 credentials);回應只有 { ok, code, detail },沒有金鑰值
   cloudConnect: (a) => ipcRenderer.invoke("cloud-connect", { venue: a && a.venue, apiKey: a && a.apiKey, secret: a && a.secret, passphrase: a && a.passphrase }),
+  // 雲端群益開通(cloud_capital.js):憑證檔由主行程開對話框讀進記憶體,這裡只拿得到檔名與代號
+  capitalPick: () => ipcRenderer.invoke("capital-pick"),
+  capitalCreds: (id, pw) => ipcRenderer.invoke("capital-creds", { id, pw }),
+  capitalStep: (name) => ipcRenderer.invoke("capital-step", name),
+  capitalUpload: (pw) => ipcRenderer.invoke("capital-upload", pw),
+  capitalUnbind: () => ipcRenderer.invoke("capital-unbind"),
+  capitalForget: () => ipcRenderer.invoke("capital-forget"),
   // 最低版本閘:{ blocked, min, current, checked_at };被擋時 trade-send 的啟動類回 UPDATE_REQUIRED、send-message 回 { blocked: "UPDATE_REQUIRED" }
   minVersionState: () => ipcRenderer.invoke("min-version-state"),
   onMinVersionState: (fn) => ipcRenderer.on("min-version-state", (_e, st) => fn(st)),
@@ -83,7 +90,27 @@ contextBridge.exposeInMainWorld("blave", {
   signOutBlave: () => ipcRenderer.invoke("sign-out-blave"),
   ensureEngine: () => ipcRenderer.invoke("ensure-engine"),
   sendMessage: (payload) => ipcRenderer.invoke("send-message", payload),
+  stopTurn: () => ipcRenderer.invoke("stop-turn"),   // true = 停止旗標寫下了;結果照樣等 turn-end
   onEngineProgress: (fn) => ipcRenderer.on("engine-progress", (_e, t) => fn(t)),
   onTurnEvent: (fn) => ipcRenderer.on("turn-event", (_e, c) => fn(c)),
   onTurnEnd: (fn) => ipcRenderer.on("turn-end", (_e, r) => fn(r)),
+  // 內建瀏覽器(renderer/browser.js):只送分頁 id、中欄 bounds、用戶動作;網址只有用戶在網址列自己打的
+  onBrowserEvent: (fn) => ipcRenderer.on("browser-event", (_e, ev) => fn(ev)),
+  browserExpand: (id, bounds) => ipcRenderer.invoke("browser-expand", id, bounds),
+  browserBounds: (bounds) => ipcRenderer.send("browser-bounds", bounds),
+  browserCollapse: () => ipcRenderer.invoke("browser-collapse"),
+  browserTakeover: (id) => ipcRenderer.invoke("browser-takeover", id),
+  browserHandback: (id) => ipcRenderer.invoke("browser-handback", id),
+  browserUserDone: (id, choice) => ipcRenderer.invoke("browser-user-done", id, choice),
+  browserNavigate: (id, url) => ipcRenderer.invoke("browser-navigate", id, url),
+  browserReload: (id) => ipcRenderer.invoke("browser-reload", id),
+  browserOpenLive: (sessionId, snapshotId) => ipcRenderer.invoke("browser-open-live", sessionId, snapshotId),
+  browserShowLive: (url) => ipcRenderer.invoke("browser-show-live", url),   // 點瀏覽卡 / 來源卡:開即時頁(分頁還在就切過去)
+  browserSnapshot: (sessionId, snapshotId) => ipcRenderer.invoke("browser-snapshot", sessionId, snapshotId),
+  browserHistory: (sessionId) => ipcRenderer.invoke("browser-history", sessionId),
+  browserBlockVisible: (on) => ipcRenderer.send("browser-block-visible", on),
+  browserOpenExternal: (id) => ipcRenderer.invoke("browser-open-external", id),
+  browserPrefs: () => ipcRenderer.invoke("browser-prefs"),
+  browserPrefsSet: (p) => ipcRenderer.invoke("browser-prefs-set", p),
+  browserClear: () => ipcRenderer.invoke("browser-clear"),
 });

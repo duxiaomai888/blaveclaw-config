@@ -497,6 +497,7 @@ function privPaint() {
   const legal = mk("p", "set-legal"), pl = mk("button", "btn-quiet", t("legal.privacy")); pl.type = "button"; pl.id = "priv-legal";
   pl.addEventListener("click", () => window.blave.openExternal(legalUrl("privacy_policy")));
   legal.append(pl); box.append(legal);
+  if (typeof brPrivPaint === "function") brPrivPaint(box);   // 內建瀏覽器開關 + 清除瀏覽資料(renderer/browser.js)
   if (had) sw.focus();
   setFocusGuard();
 }
@@ -717,7 +718,7 @@ $("ws-update").addEventListener("click", () => { if ($("ws-update").dataset.kind
 $("set-up-btn").addEventListener("click", () => { if ($("set-up-btn").dataset.kind === "restart") upInstall(); else upCheck(); });
 $("set-terms").addEventListener("click", () => window.blave.openExternal(legalUrl("terms_of_service")));   // 服務條款:跟版本資訊同一塊(設定 › 一般 › 關於)
 $("set-privacy").addEventListener("click", () => window.blave.openExternal(legalUrl("privacy_policy")));
-$("btn-send").addEventListener("click", sendDraft);
+$("btn-send").addEventListener("click", () => (running ? stopTurn() : sendDraft()));
 // 注音/日文選字時的 Enter 是「確定候選字」,不是送出。逐字照 web 工作頁
 // (workspace.html:21913-21933)的三道守衛:Safari 會在這個 keydown 之前就發
 // compositionend,所以 composing 已經是 false —— 那顆 Enter 帶 keyCode 229
@@ -1177,6 +1178,7 @@ function csLock(on) {
   if (on) csShowList(false);
 }
 function csClearChat() {
+  if (typeof brReset === "function") brReset();   // 內建瀏覽器的區塊與展開層(renderer/browser.js)
   $("chat-scroll").innerHTML = "";
   liveBubble = null; busy = null; swLine = null;
   acctCard = null; creditCards.length = 0; dataCard = null;   // 卡片跟著聊天欄一起清掉
@@ -1188,6 +1190,58 @@ function csStartNew() {
   $("chat-eg").hidden = false;
   $("ta").focus();
 }
+/* 被停止 / 中途出錯的回合,runtime 在逐字稿那一輪回覆的尾端附一行給**下一輪 agent** 看的收據
+   (runtime/agent_turn.py `_fault_receipt_suffix`:「\n[中斷前已執行:Bash strategies/、Read lib/x.py、…另有 N 步]」)。
+   那行不是給人讀的:畫回去時拆掉,改畫成跟即時回合結束時一樣的「思考過程」收據(收起,點開看步驟)。
+   splitReceipt 是純函式,tests/check_shell_history_receipt.js 從原文切出來跑,並釘住 runtime 那邊的格式。 */
+const RECEIPT_RE = /\n?\[\u4e2d\u65b7\u524d\u5df2\u57f7\u884c:([^\n]*)\]\s*$/;   // 「[中斷前已執行:…]」,跳脫寫法:這行是資料格式不是畫面字
+function splitReceipt(content) {
+  const m = RECEIPT_RE.exec(content || "");
+  if (!m) return { text: content, steps: null };
+  const steps = m[1].split("\u3001").filter(Boolean).map((x) => {
+    if (x.charAt(0) === "…") return { more: x };
+    const i = x.indexOf(" ");
+    return i < 0 ? { tool: x, summary: "" } : { tool: x.slice(0, i), summary: x.slice(i + 1) };
+  });
+  return { text: content.slice(0, m.index), steps };
+}
+function receiptFold(steps) {
+  const el = document.createElement("div"); el.className = "think-indicator is-done";
+  const head = document.createElement("button"); head.type = "button"; head.className = "think-head has-reason";
+  head.setAttribute("aria-expanded", "false");
+  const verb = document.createElement("span"); verb.className = "think-verb"; verb.dataset.i18n = "turn.process"; verb.textContent = t("turn.process");
+  const chev = document.createElement("span"); chev.className = "think-chev"; chev.setAttribute("aria-hidden", "true");
+  head.append(verb, chev);
+  const wrap = document.createElement("div"); wrap.className = "think-reason-wrap";
+  const fold = document.createElement("div"); fold.className = "think-fold";
+  const list = document.createElement("ul"); list.className = "think-steps";
+  steps.forEach((st) => {
+    const li = document.createElement("li"); li.className = "think-step";
+    if (st.more) { li.textContent = st.more; list.appendChild(li); return; }
+    const mark = document.createElement("span"); mark.className = "think-step-mark";
+    const v = document.createElement("span"); v.className = "think-step-verb"; v.textContent = st.tool;
+    const obj = document.createElement("span"); obj.className = "think-step-obj"; obj.textContent = st.summary;
+    li.append(mark, whereTag(stepWhere({ tool: st.tool })), v, obj);
+    list.appendChild(li);
+  });
+  fold.appendChild(list); wrap.appendChild(fold); el.append(head, wrap);
+  head.addEventListener("click", () => { const open = el.classList.toggle("is-open"); head.setAttribute("aria-expanded", open ? "true" : "false"); });
+  return el;
+}
+function addHistoryAi(content) {
+  const r = splitReceipt(content);
+  if (r.steps && r.steps.length) $("chat-scroll").appendChild(receiptFold(r.steps));
+  if (!r.steps || r.text.trim()) addMsg("ai", r.text);
+}
+/* 舊的瀏覽器紀錄用的是回合開始的時間,比 runtime 寫進逐字稿的那句用戶訊息早幾秒:區塊不能排在那句上面。
+   區塊後面緊接著用戶訊息、而且只早 30 秒以內 = 同一輪 → 區塊挪到那句後面。純函式(tests/check_shell_turn_status.js) */
+function histFixOrder(out, x) {
+  const prev = out[out.length - 1];
+  if (x.turn && x.turn.role === "user" && prev && prev.br && prev.br.kind === "block" && x.ts - prev.ts >= 0 && x.ts - prev.ts < 30) {
+    out.splice(out.length - 1, 0, x); return out;
+  }
+  out.push(x); return out;
+}
 async function csOpen(id) {
   const turns = await window.blave.loadSession(id);
   if (!turns.length) { csStartNew(); return; }
@@ -1196,9 +1250,11 @@ async function csOpen(id) {
   // 舊回合只有文字(工具收據與思考過程沒有存),照角色畫回去;圖另外存在
   // state/chat-images/,照時間插回去——它落在那一輪的提問與回覆之間,跟當時看到的順序一樣
   const imgs = await window.blave.loadSessionImages(id);
-  turns.map((x) => ({ ts: x.ts, turn: x })).concat(imgs.map((x) => ({ ts: x.ts, img: x })))
+  const brs = typeof brHistoryItems === "function" ? await brHistoryItems(id) : [];   // 內建瀏覽器每一輪的摘要列與來源卡
+  turns.map((x) => ({ ts: x.ts, turn: x })).concat(imgs.map((x) => ({ ts: x.ts, img: x })), brs)
     .sort((a, b) => a.ts - b.ts)
-    .forEach((x) => (x.img ? addImage(x.img.src, x.img.caption) : addMsg(x.turn.role === "user" ? "you" : "ai", x.turn.content)));
+    .reduce(histFixOrder, [])
+    .forEach((x) => (x.br ? brRestore(x.br) : x.img ? addImage(x.img.src, x.img.caption) : x.turn.role === "user" ? addMsg("you", x.turn.content) : addHistoryAi(x.turn.content)));
   $("chat-eg").hidden = true;
   csRenderHead(); csShowList(false); scrollChat();
 }
@@ -1690,18 +1746,101 @@ function busyTick() {
     if (overflow > 0) strip.style.transform = `translateX(${-(overflow * TICK_PITCH)}px)`;
   });
 }
+/* ── 回合狀態列(canon › Components › 回合狀態列;spec-turn-status-summary 行為規則)──────────
+   runtime 在每個 tool chunk 帶 kind／kind_obj(／kind_tab),這裡照 kind 查 act.* 字串:「正在讀 investing.com」。
+   1 有工具在跑 → 最晚開始、還在跑的那個;2 silent 不進集合;3 沒工具在跑:同一段文字寫了 ≥1.5 秒且 1.5 秒內還有字 →
+   「正在寫回覆」,否則「正在思考」;4 字至少停 1.2 秒(期間只留最新的,到時直接換上);5 瀏覽器有頁在等用戶 →「等你操作」。
+   actWant 是純函式,tests/check_shell_turn_status.js 從原文切出來跑。 */
+const ACT_HOLD_MS = 1200, ACT_REPLY_MS = 1500;
+const ACT = { running: new Map(), seq: 0, shown: null, shownAt: 0, textStart: 0, lastDelta: 0, timer: null, prep: null, lastWant: null };
+const ACT_WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
+const ACT_SILENT = ["TodoWrite", "ToolSearch", "BashOutput", "KillShell", "KillBash", "ExitPlanMode"];
+/* 舊 runtime(chunk 沒有 kind)的退路:只看工具名,不從 summary 猜 Bash 在幹嘛 */
+function actKindOf(c) {
+  if (c.kind) return { kind: String(c.kind), obj: c.kind_obj ? String(c.kind_obj) : "", tab: c.kind_tab ? String(c.kind_tab) : "" };
+  const tool = String(c.tool || ""), sum = String(c.summary || "");
+  if (tool === "Read") return sum.indexOf("references/") === 0 ? { kind: "docs", obj: "" } : { kind: "file_read", obj: sum.split("/").pop() };
+  if (tool === "Write" || tool === "Edit") return { kind: "file_write", obj: "" };
+  if (tool === "Grep" || tool === "Glob") return { kind: "files", obj: "" };
+  if (tool === "WebSearch") return { kind: "search", obj: "" };
+  if (tool.indexOf("mcp__blave_browser__") === 0) return { kind: "web_read", obj: "" };
+  if (tool === "Agent" || tool.indexOf("Task") === 0) return { kind: "delegate", obj: "" };
+  if (ACT_SILENT.includes(tool)) return { kind: "silent", obj: "" };
+  return { kind: "unknown", obj: "" };
+}
+function actWant(st, now, needUser) {
+  if (needUser) return { kind: "need_user", obj: "" };
+  let top = null;
+  st.running.forEach((r) => { if (!top || r.seq > top.seq) top = r; });
+  if (top) return { kind: top.kind, obj: top.kind === "unknown" ? "" : top.obj || "" };
+  // 模型在生工具參數(tool_prep,還沒等到那個 tool):runtime 邊生邊分類(組報告的 heredoc → report、
+  // Bash／Write／Edit 還沒命中 → code_prep);舊 runtime 的 prep 沒有 kind:寫檔的算「正在寫程式」,其他維持前一個字
+  if (st.prep) {
+    if (st.prep.kind && st.prep.kind !== "silent") return { kind: st.prep.kind, obj: st.prep.kind === "unknown" ? "" : st.prep.obj || "" };
+    return ACT_WRITE_TOOLS.includes(st.prep.tool) ? { kind: "code_prep", obj: "" } : st.lastWant || { kind: "thinking", obj: "" };
+  }
+  if (st.textStart && now - st.textStart >= ACT_REPLY_MS && now - st.lastDelta <= ACT_REPLY_MS) return { kind: "reply", obj: "" };
+  return { kind: "thinking", obj: "" };
+}
+function actLabel(w) {
+  if (w.kind === "web_read_many") return t("act.web_read_many", { n: w.obj || "" });
+  const key = "act." + w.kind;
+  return t(key);
+}
+/* runtime 比外殼新、送來外殼不認得的 kind:當成 unknown(「正在處理」),而且不帶受詞(稽核 P2-7) */
+const actKnown = (w) => (w.kind === "web_read_many" || STRINGS.en["act." + w.kind] ? w : { kind: "unknown", obj: "" });
+function actReset() { ACT.running.clear(); ACT.shown = null; ACT.shownAt = 0; ACT.textStart = 0; ACT.lastDelta = 0; ACT.prep = null; ACT.lastWant = null; clearTimeout(ACT.timer); }
+function actToolPrep(c) { ACT.prep = { tool: String(c.tool || ""), kind: c.kind ? String(c.kind) : "", obj: c.kind_obj ? String(c.kind_obj) : "" }; ACT.textStart = 0; actApply(); }
+function actTabHost(tab) {
+  if (!tab || typeof BR === "undefined") return "";
+  for (const x of BR.tabs.values()) if (x.alias === tab && x.url) return brReg(brHost(x.url));
+  return "";
+}
+function actToolStart(c) {
+  const k = actKindOf(c);
+  ACT.prep = null;
+  if (k.kind === "silent") return;
+  ACT.textStart = 0;   // 一段文字接了工具 = 那段是旁白,不是回覆
+  ACT.running.set(c.id || "_" + (++ACT.seq), { kind: k.kind, obj: k.obj || actTabHost(k.tab), seq: ++ACT.seq });
+  actApply();
+}
+function actToolDone(c) { if (c.id && ACT.running.delete(c.id)) actApply(); }
+function actApply(force) {
+  if (!busy) return;
+  const now = Date.now();
+  const w = actKnown(actWant(ACT, now, typeof brNeedsUser === "function" && brNeedsUser()));
+  const key = w.kind + "|" + w.obj;
+  if (ACT.shown === key) return;
+  const wait = ACT_HOLD_MS - (now - ACT.shownAt);
+  if (!force && ACT.shown && wait > 0) {   // 最短停留:到時再看一次(那時最新的那個)
+    clearTimeout(ACT.timer); ACT.timer = setTimeout(() => actApply(), wait); return;
+  }
+  ACT.shown = key; ACT.shownAt = now; ACT.lastWant = w;
+  busySet(actLabel(w), w.kind === "web_read_many" ? "" : w.obj, w.kind);   // 幾個網頁已經在 label 裡
+}
+
+/* 時長(canon › Copy › Numbers):<60 秒 47s;<60 分 4m 57s(秒補兩位);≥60 分 1h 02m。各語言同一寫法 */
+function fmtDur(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m " + String(sec % 60).padStart(2, "0") + "s";
+  return Math.floor(sec / 3600) + "h " + String(Math.floor(sec / 60) % 60).padStart(2, "0") + "m";
+}
 function busyElapsed() {
   if (!busy) return;
-  busy.elapsed.textContent = Math.max(0, Math.floor((Date.now() - busy.start) / 1000)) + "s";
+  busy.elapsed.textContent = fmtDur((Date.now() - busy.start) / 1000);
 }
-function busySet(verb) {
+/* 狀態列只換字:label 進讀屏(只在字變了才更新,live region 才不會一直念),受詞 aria-hidden */
+function busySet(label, obj, objKind) {
   if (!busy) return;
-  busy.verb.textContent = verb;
+  if (busy.verb.textContent !== label) busy.verb.textContent = label;
+  busy.obj.textContent = obj || ""; busy.obj.hidden = !obj;
+  busy.obj.classList.toggle("mono", !!obj && objKind !== "search");   // 搜尋字是句子(無襯線),其餘受詞是網域／檔名／代號(mono)
   busy.el.hidden = false;
   busyPin(); scrollChat();
 }
 function busyStart() {
-  if (busy) { busySet(t("turn.thinking")); return; }
+  if (busy) { actReset(); actApply(true); return; }
   const el = document.createElement("div");
   el.className = "think-indicator";
   // 送出到第一個字之間唯一的回饋,所以要讓輔助科技讀到;polite 不打斷回覆
@@ -1717,14 +1856,19 @@ function busyStart() {
   const ticksIn = document.createElement("span");
   ticksIn.className = "think-ticks-in";
   ticks.appendChild(ticksIn);
+  // 摘要 = label(讀屏念這個)+ 受詞(網域／搜尋字／策略名…,可截斷;aria-hidden)。秒數與 chevron 不讓位
+  const sum = document.createElement("span"); sum.className = "think-sum";
   const verb = document.createElement("span");
-  verb.className = "think-verb";
+  verb.className = "think-verb think-label";
+  const obj = document.createElement("span");
+  obj.className = "think-obj"; obj.hidden = true; obj.setAttribute("aria-hidden", "true");
+  sum.append(verb, obj);
   const elapsed = document.createElement("span");
   // 每秒變的數字在 live region 裡會被逐秒念出來;狀態由動詞承載,秒數只給眼睛
   elapsed.className = "think-elapsed"; elapsed.setAttribute("aria-hidden", "true");
   const chev = document.createElement("span");
   chev.className = "think-chev"; chev.setAttribute("aria-hidden", "true");
-  head.append(ticks, verb, elapsed, chev);
+  head.append(ticks, sum, elapsed, chev);
   // 折疊面板:grid-rows 0fr↔1fr(動到真實高度,不用猜 max-height)
   const wrap = document.createElement("div");
   wrap.className = "think-reason-wrap";
@@ -1743,11 +1887,11 @@ function busyStart() {
     head.setAttribute("aria-expanded", open ? "true" : "false");
   });
   $("chat-scroll").appendChild(el);
-  busy = { el, head, ticksIn, verb, elapsed, stepsEl, reason, stepRows: {},
+  busy = { el, head, ticksIn, verb, obj, elapsed, stepsEl, reason, stepRows: {},
            start: Date.now(), steps: 0, timer: null };
-  busySet(t("turn.thinking"));
+  actReset(); actApply(true);
   busyElapsed(); busyTick();          // 第 0 秒:條子不會是空的
-  busy.timer = setInterval(() => { busyElapsed(); busyTick(); }, 1000);
+  busy.timer = setInterval(() => { busyElapsed(); busyTick(); actApply(); }, 1000);
 }
 function busyHasFold() {
   if (busy) busy.head.classList.remove("no-toggle"), busy.head.classList.add("has-reason");
@@ -1756,7 +1900,7 @@ function busyHasFold() {
 function busyStep(c) {
   if (!busy) return;
   busy.steps += 1;
-  busySet(t("turn.running", { n: busy.steps }));
+  actToolStart(c);
   const li = document.createElement("li");
   li.className = "think-step is-run";
   const mark = document.createElement("span"); mark.className = "think-step-mark";
@@ -1772,6 +1916,7 @@ function busyStep(c) {
 }
 /* `done` 只是回頭補那一列的耗時 / 錯誤態,不是新步驟。 */
 function busyStepDone(c) {
+  actToolDone(c);
   const li = busy && c.id && busy.stepRows[c.id];
   if (!li) return;
   li.classList.remove("is-run");
@@ -1793,7 +1938,7 @@ function busyHide() {
 function busyEnd(faulted) {
   if (!busy) return;
   const b = busy; busy = null;
-  clearInterval(b.timer);
+  clearInterval(b.timer); clearTimeout(ACT.timer);
   const hasFold = b.stepsEl.children.length > 0 || b.reason.textContent.trim() !== "";
   if (hasFold) {
     // 留下來:移到這一輪回覆的**上面**(思考在前、結論在後),動詞改成「思考過程」,
@@ -1801,7 +1946,8 @@ function busyEnd(faulted) {
     b.el.hidden = false;
     b.el.classList.add("is-done");
     b.el.removeAttribute("role"); b.el.removeAttribute("aria-live");
-    b.verb.textContent = t("turn.process");
+    b.verb.textContent = t("turn.process"); b.obj.textContent = ""; b.obj.hidden = true;
+    b.elapsed.textContent = fmtDur((Date.now() - b.start) / 1000);
     if (b.anchor && b.anchor.parentNode) b.anchor.parentNode.insertBefore(b.el, b.anchor);
     if (faulted && b.stepsEl.children.length) busyOpenReceipts(b);
     return;
@@ -1822,32 +1968,66 @@ function busyOpenReceipts(b) {
   show.addEventListener("click", () => { b.el.classList.remove("reason-held"); show.remove(); b.reason.setAttribute("tabindex", "-1"); b.reason.focus(); });   // 鈕消失,焦點接到剛出來的字
   b.reason.before(show);
 }
+/* 停止(照雲端工作頁 csSyncComposer / interruptTurn):回合進行中送出鈕換成停止鈕(同一顆中性鈕、箭頭換方塊);
+   按下 = 請主行程寫停止旗標,鈕轉「停止中」(變淡、仍可按)等 turn-end,**不先樂觀地切回送出**。
+   停下來之後用戶那句放回輸入框(雲端「取消排隊」的做法:接在用戶已打的字前面,不覆寫)——只放回用戶自己打的
+   (sendDraft 帶 typed);送上雲端 / 拉回、策略庫、報告、掃描這些畫面代組的句子不放回。 */
+let turnStopping = false, turnStopped = false, engineWait = false, lastUserTyped = false;
+function sendBtnSync() {
+  const b = $("btn-send");
+  b.classList.toggle("is-stop", running);
+  b.classList.toggle("is-stopping", running && turnStopping);
+  b.dataset.i18nAria = running ? "ws.stop" : "ws.send";
+  b.setAttribute("aria-label", t(b.dataset.i18nAria));
+  b.disabled = false;
+}
+async function stopTurn() {
+  if (!running || turnStopping) return;
+  turnStopping = true; turnStopped = true; sendBtnSync();
+  trackFeature("chat_stop");
+  let ok = false;
+  try { ok = await window.blave.stopTurn(); } catch (_) { ok = false; }
+  if (!ok && !engineWait && running) { turnStopping = false; turnStopped = false; sendBtnSync(); }   // 沒送到:讓用戶再按一次
+}
+function stopRestore(text) {
+  if (!text) return;
+  const ta = $("ta");
+  ta.value = ta.value.trim() ? text + "\n" + ta.value : text;
+  autosize(); ta.focus();
+}
 async function sendDraft() {
   const msg = $("ta").value.trim();
   if (!msg || running) return;
   $("ta").value = ""; autosize();
-  submitMessage(msg);
+  submitMessage(msg, { typed: true });
 }
 /* 真的送出一句話。回傳這一輪有沒有跑起來(「再送一次」要知道)。不碰輸入框。 */
 async function submitMessage(msg, opts) {   // opts.handoff:「送上雲端 / 拉回」確認框送的那句才有(handoff.js);重送(lastUserText)不帶
   if (!msg || running) return false;
   UPD.turnCloud = false; turnSeq++;   // 這一回合碰過雲端沒有,從零開始記(tool chunk 的 where);回合序號 +1(參數掃描的「已送出」只認這一輪)
-  running = true; $("btn-send").disabled = true; hoBusy(); upPaint(); rpRobSync(); if (typeof libSync === "function") libSync(); if (typeof rptSync === "function") rptSync(); if (typeof nsSync === "function") nsSync();   // 回合在跑:更新入口停用(更新會重開 app)
+  running = true; sendBtnSync(); hoBusy(); upPaint(); rpRobSync(); if (typeof libSync === "function") libSync(); if (typeof rptSync === "function") rptSync(); if (typeof nsSync === "function") nsSync();   // 回合在跑:更新入口停用(更新會重開 app)
   $("ws-conn").disabled = true;   // 跑到一半不給換 agent
   $("mp-trigger").disabled = true; mpClose(false); csLock(true);
   $("chat-eg").hidden = true;     // 起手範例只在第一句話之前有意義
   // 操作對象在送出當下定案:之後切視角不改這一輪。opts.viewing = 呼叫端指定(更新雲端那一句永遠帶 env:cloud)
   const viewing = opts && opts.viewing && typeof opts.viewing === "object" ? opts.viewing : chatViewing();
-  addMsg("you", msg); lastUserText = msg;
+  // 泡泡留住節點:沒送出去的路(busy / 版本閘 / 暖機中停止 / 引擎起不來)要收回泡泡+還原到輸入框,
+  // 不然那句話看起來送了兩次——留著的 ghost 泡泡跟之後真的送出的那則長一模一樣(Wei 實測截圖)
+  const bubble = addMsg("you", msg); lastUserTyped = (opts && opts.typed === true) || (msg === lastUserText && lastUserTyped); lastUserText = msg;   // 重送同一句沿用原句的來源
+  const unsend = () => { bubble.remove(); if (lastUserTyped) stopRestore(msg); };   // 自動組的固定句(轉出/範例)不塞回輸入框,跟暖機停止同一條規矩
+  if (typeof rptTurnStart === "function") rptTurnStart(viewing);   // 這一輪寫出的報告,回合結束自動打開(reports.js)
   if (!csTitle) { csTitle = msg; csRenderHead(); csRemember(); }
   liveBubble = null; faultShown = false; pendingErr = [];
-  const unlock = () => { running = false; $("btn-send").disabled = false; $("ws-conn").disabled = false; $("mp-trigger").disabled = false; csLock(false); hoBusy(); upPaint(); rpRobSync(); if (typeof libSync === "function") libSync(); if (typeof rptSync === "function") rptSync(); if (typeof nsSync === "function") nsSync(); };
+  const unlock = () => { running = false; turnStopping = false; sendBtnSync(); $("ws-conn").disabled = false; $("mp-trigger").disabled = false; csLock(false); hoBusy(); upPaint(); rpRobSync(); if (typeof libSync === "function") libSync(); if (typeof rptSync === "function") rptSync(); if (typeof nsSync === "function") nsSync(); };
   try {
     // 暖機(首次會裝 venv + SDK,約一分鐘)由 engine-progress 的系統訊息交代,
     // 指示器不在這段亮——那段還沒開始思考,掛「思考中 58s」是假的
-    await window.blave.ensureEngine();
+    engineWait = true;
+    try { await window.blave.ensureEngine(); } finally { engineWait = false; }
+    // 暖機期間按了停止:主行程還沒有回合可停,在這裡收掉,不送出
+    if (turnStopped) { turnStopped = false; unlock(); bubble.remove(); if (lastUserTyped) stopRestore(msg); return false; }
     // 沒有型錄(選擇器沒畫)時 model / effort 都是 null,runTurn 就不帶旗標
-    turnModel = MP.model; turnGotReply = false; turnErrored = false; turnFaulted = false; turnCards = [];
+    turnModel = MP.model; turnGotReply = false; turnErrored = false; turnFaulted = false; turnCards = []; turnBubble = bubble; turnHadTool = false;
     const r = await window.blave.sendMessage({
       sessionId, message: msg, handoff: opts && opts.handoff, model: MP.model, effort: mpEffort(), viewing });
     // main.js 的回覆:started / busy,以及最低版本閘擋下的 blocked(沒有 spawn、沒有花 AI)
@@ -1855,14 +2035,14 @@ async function submitMessage(msg, opts) {   // opts.handoff:「送上雲端 / �
     if (r.blocked === "UPDATE_REQUIRED") {
       // 不是「上一輪還在跑」:這個版本被停用了,要更新才能繼續。鈕帶去 設定 › 一般 最下面的「關於」(那裡有更新鈕)
       faultCard().set({ text: t("minv.chat"), label: t("minv.btn"), out: true, on: () => setOpen().then(() => { setCat("display"); $("set-up-btn").hidden ? null : $("set-up-btn").focus(); }) });
-      unlock(); return false;
+      unsend(); unlock(); return false;
     }
-    addMsg("sys", t("turn.busy")); unlock(); return false;
+    unsend(); addMsg("sys", t("turn.busy")); unlock(); return false;
   } catch (e) {
     busyEnd();
     // 失敗卡而不是灰字:灰字排在「正在準備引擎…」下面,看起來像那一行還在跑(0.0.6 Intel 實測)
     faultCard().set({ text: t("turn.engineFailed", { msg: (e && e.message) || e }) });
-    unlock(); return false;
+    unsend(); unlock(); return false;
   }
 }
 
@@ -2475,28 +2655,52 @@ function addFault(f) {
              second: f.resend ? { label: t("fault.resend"), on: () => { if (!running && lastUserText) submitMessage(lastUserText); } } : null });
 }
 
+/* 回合進行中的文字先不進回覆區。串流當下還不知道這段後面有沒有工具呼叫:有的話它是過場旁白
+   (「我來查一下…」、模型自言自語的英文半句),runtime 會在工具呼叫時把它改送成 thinking 進思考過程;
+   沒有的話它才是回覆。以前是先畫進泡泡、碰到 tool 再收回,旁白會在回覆位置閃一下(2026-09-26 實測
+   「First sentence must」單獨一行掛在回覆區)。現在:串流中的字只出現在等待指示器的草稿行(draftShow),
+   runtime 收尾送 `done`(或回合結束、出錯、中途插圖)時才把手上這段升成回覆泡泡(draftPromote)。
+   collectDraft 是純的狀態轉移,tests/check_shell_draft.js 從原文切出來跑。 */
+let draft = "";
+function collectDraft(state, c) {
+  if (c.type === "text") return { draft: state.draft + (c.text || ""), promote: false };
+  if (c.type === "text_replace") return { draft: c.text || "", promote: false };
+  if (c.type === "tool" && c.status !== "done") return { draft: "", promote: false };   // 這段是旁白:runtime 已改送 thinking
+  if (c.type === "done" || c.type === "image" || c.type === "error") return { draft: state.draft, promote: true };
+  return { draft: state.draft, promote: false };
+}
+/* 有 text delta:只告訴狀態機(同一段寫了 ≥1.5 秒、還在寫 → 「正在寫回覆」);字不上畫面,定稿才進泡泡 */
+function draftShow() {
+  const now = Date.now();
+  if (!ACT.textStart) ACT.textStart = now;
+  ACT.lastDelta = now;
+}
+function draftPromote() {
+  const text = draft; draft = "";
+  ACT.textStart = 0;
+  if (!text.trim()) return;
+  const f = classifyFault(text);
+  if (f) { faultShown = true; turnFaulted = true; addFault(f); liveBubble = null; return; }
+  busyHide();   // 回覆定稿了:指示器收起(同以前「回覆在串流了,字本身就是還在跑」)
+  if (!liveBubble) liveBubble = addMsg("ai", "");
+  paintAi(liveBubble, (liveBubble._raw || "") + text); turnGotReply = true;
+  if (liveBubble._cards.length) turnCards = liveBubble._cards.slice();
+  // 這一輪的第一個回覆泡泡 = 回合結束時「思考過程」標記要插在它上面的錨點
+  if (busy && !busy.anchor) busy.anchor = liveBubble;
+}
 window.blave.onTurnEvent((c) => {
+  // 別條對話的圖不畫進來(第一版一次只跑一條,這是保險)
+  if (c.type === "image" && c.session_id !== sessionId) return;
+  const d = collectDraft({ draft }, c);
+  draft = d.draft;
+  if (d.promote) draftPromote();
   if (c.type === "image") {
-    // 別條對話的圖不畫進來(第一版一次只跑一條,這是保險);下一段文字另起一個泡泡,
-    // 順序才會是 文字 → 圖 → 文字,不是圖被擠到整段回覆的後面
-    if (c.session_id !== sessionId) return;
+    // 下一段文字另起一個泡泡,順序才會是 文字 → 圖 → 文字,不是圖被擠到整段回覆的後面
     addImage(c.src, c.caption); liveBubble = null;
-  } else if (c.type === "text") {
-    busyHide();
-    const f = classifyFault(c.text);
-    if (f) { faultShown = true; turnFaulted = true; addFault(f); liveBubble = null; return; }
-    if (!liveBubble) liveBubble = addMsg("ai", "");
-    paintAi(liveBubble, (liveBubble._raw || "") + c.text); turnGotReply = true;
-    if (liveBubble._cards.length) turnCards = liveBubble._cards.slice();
-    // 這一輪的第一個回覆泡泡 = 回合結束時「思考過程」標記要插在它上面的錨點
-    if (busy && !busy.anchor) busy.anchor = liveBubble;
-  } else if (c.type === "text_replace") {
-    busyHide();
-    if (!liveBubble) liveBubble = addMsg("ai", "");
-    paintAi(liveBubble, c.text);
-    if (liveBubble._cards.length) turnCards = liveBubble._cards.slice();
-    if (busy && !busy.anchor) busy.anchor = liveBubble;
+  } else if (c.type === "text" || c.type === "text_replace") {
+    draftShow();
   } else if (c.type === "tool") {
+    turnHadTool = true;   // 有收據摺疊了:停止時「你的那則」要留著當收據的上下文
     // `done` 只是回頭補那一列的耗時 / 錯誤態,不是新步驟
     if (c.status === "done") { busyStepDone(c); scrollChat(); return; }
     // 這段文字後面接了工具呼叫 → 是過場旁白、不是回覆:從泡泡移除(同 web)。
@@ -2509,8 +2713,10 @@ window.blave.onTurnEvent((c) => {
     // 這一回合第一次碰雲端主機:在收到 chunk 這一層記(busyStep 在 !busy 時直接 return),更新那一行當場換成 S3
     if (!UPD.turnCloud && stepWhere(c) === "cloud") { UPD.turnCloud = true; upPaint(); }
     busyStep(c);
+    if (typeof rptTurnTool === "function") rptTurnTool(c);   // 雲端視角這一輪碰了雲端主機:回合結束去等雲端報告清單(reports.js)
+  } else if (c.type === "tool_prep") {
+    actToolPrep(c);
   } else if (c.type === "thinking") {
-    busySet(t("turn.thinking"));
     busyReason(c.text || "");
   } else if (c.type === "error") {
     turnErrored = true;
@@ -2525,29 +2731,33 @@ window.blave.onTurnEvent((c) => {
 // turnFaulted:這一輪已經畫過分類過的錯誤卡。不能用 faultShown 判——它在吞掉 not_started 那句時
 // 就被歸零了,回合結束時再看會以為沒畫過,多畫一張登入卡。
 let turnModel = null, turnGotReply = false, turnErrored = false, turnFaulted = false;
+let turnBubble = null, turnHadTool = false;   // 這一輪「你的那則」與「有沒有工具收據」:停止收泡泡用(見 onTurnEnd)
 // 這一輪的回覆帶了哪些卡片標記(paintAi 從文字裡拿出來的);回合結束才出卡,不插在串流中間
 let turnCards = [];
 let pendingErr = [];
 const holdErrors = () => (cur === "claude" || cur === "codex") && !turnGotReply && !turnFaulted;
 window.blave.onTurnEnd(async (r) => {
+  draftPromote();   // runtime 沒送到 done 就結束(被殺、崩潰):手上那段仍是這一輪最後的字
+  // 用戶按了停止:不是失敗——不問登入、不畫錯誤、不攤開收據;保險殺掉時的非 0 結束碼也不顯示
+  const stopped = turnStopped; turnStopped = false;
   // 這一輪有真的回覆、沒有分類過的錯誤 → 那個 model 是能用的
   if (r.code === 0 && turnGotReply && !faultShown && turnModel) mpMarkWorks(turnModel);
   stratRefresh(true).catch(() => {}).then(() => { if (typeof libTurnEnd === "function") libTurnEnd(); if (typeof rptTurnEnd === "function") rptTurnEnd(); });   // 策略庫的「用這支」:清單重讀完才知道有沒有多一支;重讀失敗也要收掉 pending。報告的「新增報告」接在後面(多出新報告會自動打開,要排在選中新策略之後)
   // 連的是 Codex 但這台電腦上找不到它了:主行程刻意讓這一輪失敗(不會偷偷改跑 Claude)。講人話,不要丟代碼給用戶看
-  const exitLine = r.code !== 0
+  const exitLine = r.code !== 0 && !stopped
     ? (/AGENT_BIN_MISSING/.test(r.errTail || "") ? t("AGENT_BIN_MISSING") : t("turn.exit", { code: r.code }) + (r.errTail ? ": " + r.errTail.slice(-300) : ""))
     : null;
   // 不靠錯誤字串認登入失效(兩家 CLI 的措辭會變):本機 agent 這一輪出錯或沒有任何回覆時,直接問
   // CLI 現在是不是登入狀態。沒登入 → 只出登入卡,那串給工程師看的錯誤丟掉;有登入 → 才畫通用訊息。
   // 等待指示器留到判斷完才收,中間不留空窗。
   let loggedOut = false;
-  if ((cur === "claude" || cur === "codex") && (turnErrored || !turnGotReply) && !turnFaulted) {
+  if (!stopped && (cur === "claude" || cur === "codex") && (turnErrored || !turnGotReply) && !turnFaulted) {
     try { const d = await window.blave.detectAgents(); loggedOut = !!(d[cur] && d[cur].installed && !d[cur].loggedIn); }
     // 問不到就當成一般失敗
     catch (_) { /* noop */ }
   }
   if (liveBubble && liveBubble._raw != null) paintAi(liveBubble, liveBubble._raw, false);   // 定稿:不再藏半截標記
-  const faulted = r.code !== 0 || turnFaulted || turnErrored || !turnGotReply || loggedOut;   // 同 upTurnEnded 的判準
+  const faulted = !stopped && (r.code !== 0 || turnFaulted || turnErrored || !turnGotReply || loggedOut);   // 同 upTurnEnded 的判準
   busyEnd(faulted);
   if (!loggedOut && r.code === 0) dataTurnEnd();
   if (planDonePending) planSayDone();
@@ -2556,7 +2766,13 @@ window.blave.onTurnEnd(async (r) => {
   pendingErr = [];
   const cloudTurn = UPD.turnCloud;   // upTurnEnded 會把它歸零,先記下
   upTurnEnded(faulted);
-  running = false; $("btn-send").disabled = false; $("ws-conn").disabled = false; $("mp-trigger").disabled = false; csLock(false); hoBusy(); upPaint(); rpRobSync(); if (typeof libSync === "function") libSync(); if (typeof rptSync === "function") rptSync(); if (typeof nsSync === "function") nsSync();
+  running = false; turnStopping = false; sendBtnSync(); $("ws-conn").disabled = false; $("mp-trigger").disabled = false; csLock(false); hoBusy(); upPaint(); rpRobSync(); if (typeof libSync === "function") libSync(); if (typeof rptSync === "function") rptSync(); if (typeof nsSync === "function") nsSync();
+  if (stopped && lastUserTyped) {
+    // 停止把句子放回輸入框時,聊天裡舊的那則一併收回——不然重送就同一句兩則(Wei 實測)。
+    // 只在這一輪沒有回覆、也沒有工具收據時收(有收據要留上下文);session.db 照實留,只是畫面不重複
+    if (!turnGotReply && !turnHadTool && turnBubble && turnBubble.parentNode) turnBubble.remove();
+    stopRestore(lastUserText);
+  }
   // 碰過雲端的回合:雲端那支的報告背景重抓(rpCloudSelect force = 先畫手上那份、抓到不同才換)——不然雲端掃完 scan 永遠不會出現在分頁上
   if (cloudTurn && RPC.name) rpCloudSelect(RPC.name, true);
 });
@@ -2689,6 +2905,7 @@ function applyStatic() {
   if (typeof libRepaint === "function") libRepaint();   // 策略庫的清單 / 詳情(renderer/library.js 用 t() 現組的字)
   if (typeof rptRepaint === "function") rptRepaint();   // 報告清單 / 閱讀頁 / 新增報告框(renderer/reports.js)
   if (typeof nsRepaint === "function") nsRepaint();     // 新增策略框的預覽句與閘門句(renderer/newstrategy.js)
+  if (typeof brRepaint === "function") brRepaint();     // 內建瀏覽器的區塊與展開層(renderer/browser.js)
   document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll("[data-i18n-ph]").forEach((el) => { el.placeholder = t(el.dataset.i18nPh); });
   document.querySelectorAll("[data-i18n-aria]").forEach((el) => { el.setAttribute("aria-label", t(el.dataset.i18nAria)); });

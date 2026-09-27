@@ -96,6 +96,9 @@ msgstr "跟 agent 說一句話"
 msgid "ws.send"
 msgstr "送出"
 
+msgid "ws.stop"
+msgstr "停止"
+
 msgid "ws.settings"
 msgstr "設定"
 
@@ -106,10 +109,98 @@ msgid "turn.showReason"
 msgstr "顯示思考內容"
 
 msgid "turn.thinking"
-msgstr "思考中"
+msgstr "正在思考"
 
-msgid "turn.running"
-msgstr "執行中 · 第 {n} 步"
+# 回合狀態列(runtime tool chunk 的 kind;受詞另外接在後面,不在字串裡)
+msgid "act.thinking"
+msgstr "正在思考"
+
+msgid "act.reply"
+msgstr "正在寫回覆"
+
+msgid "act.unknown"
+msgstr "正在處理"
+
+msgid "act.search"
+msgstr "正在搜尋："
+
+msgid "act.web_read"
+msgstr "正在讀"
+
+msgid "act.web_read_many"
+msgstr "正在讀 {n} 個網頁"
+
+msgid "act.web_act"
+msgstr "正在操作"
+
+msgid "act.docs"
+msgstr "正在查說明文件"
+
+msgid "act.files"
+msgstr "正在找檔案"
+
+msgid "act.file_read"
+msgstr "正在讀"
+
+msgid "act.strategy_read"
+msgstr "正在讀策略"
+
+msgid "act.strategy_write"
+msgstr "正在寫策略"
+
+msgid "act.file_write"
+msgstr "正在改"
+
+msgid "act.data"
+msgstr "正在抓資料"
+
+msgid "act.backtest"
+msgstr "正在跑回測"
+
+msgid "act.live_tick"
+msgstr "正在跑策略"
+
+msgid "act.scan"
+msgstr "正在掃參數"
+
+msgid "act.validate"
+msgstr "正在驗證策略"
+
+msgid "act.check"
+msgstr "正在檢查策略碼"
+
+msgid "act.report"
+msgstr "正在組報告"
+
+msgid "act.watch"
+msgstr "正在更新看盤板"
+
+msgid "act.schedule"
+msgstr "正在設定排程"
+
+msgid "act.order"
+msgstr "正在下單"
+
+msgid "act.account"
+msgstr "正在查帳戶"
+
+msgid "act.status"
+msgstr "正在查執行狀態"
+
+msgid "act.install"
+msgstr "正在安裝套件"
+
+msgid "act.cloud"
+msgstr "正在連雲端主機"
+
+msgid "act.delegate"
+msgstr "正在委派研究"
+
+msgid "act.code_prep"
+msgstr "正在寫程式"
+
+msgid "act.need_user"
+msgstr "等你操作"
 
 msgid "turn.busy"
 msgstr "上一輪還在跑。"
@@ -1715,9 +1806,6 @@ msgstr "主機啟動中"
 msgid "side.cloud.emptyCut1"
 msgstr "雲端還沒有策略。"
 
-msgid "side.cloud.st.trading"
-msgstr "下單中"
-
 msgid "side.cloud.st.halted"
 msgstr "已暫停"
 
@@ -2552,7 +2640,7 @@ msgid "cx.chk.backoffCloud"
 msgstr "雲端主機剛被 Binance 限制過，還在等限制解除，這一次沒有去查，沒有儲存。請等幾分鐘再連一次。"
 
 msgid "cx.chk.noWhitelistCloud"
-msgstr "這把金鑰沒有設 IP 白名單：Binance 會刪除沒有白名單、又長期閒置的金鑰。建議把雲端主機的 IP 加進白名單。"
+msgstr "這把金鑰沒有設 IP 白名單：Binance 會刪除沒有白名單、又長期閒置的金鑰。"
 
 msgid "tr.cloud.cxSavedBn"
 msgstr "金鑰已存到雲端主機，Binance 權限檢查通過。"
@@ -3054,12 +3142,6 @@ msgstr "已驗證"
 msgid "lib.installed"
 msgstr "已安裝"
 
-msgid "lib.unverified"
-msgstr "未驗證"
-
-msgid "lib.foot"
-msgstr "想上架自己的策略？在網頁版投稿。"
-
 msgid "lib.kv.total"
 msgstr "總報酬"
 
@@ -3076,7 +3158,7 @@ msgid "lib.gate.robustVal"
 msgstr "鄰域保留 {ratio}%"
 
 msgid "lib.gates.failed"
-msgstr "未驗證：{k} 道關卡未通過。回測數字是作者提供的，Blave 沒有替它把關。"
+msgstr "{k} 道關卡未通過。回測數字是作者提供的，Blave 沒有替它把關。"
 
 msgid "lib.price"
 msgstr "{price}"
@@ -3169,7 +3251,7 @@ msgid "lib.gate.na"
 msgstr "MCPT 不適用（組合策略）"
 
 msgid "lib.gates.community"
-msgstr "未驗證：這支策略尚未跑過品質關卡。社群策略由作者上架、經人工審核後公開；回測數字是作者提供的。"
+msgstr "這支策略尚未跑過品質關卡。社群策略由作者上架、經人工審核後公開；回測數字是作者提供的。"
 
 msgid "lib.how"
 msgstr "它怎麼交易"
@@ -3234,18 +3316,6 @@ msgstr "12 小時"
 msgid "lib.iv.1d"
 msgstr "日線"
 
-msgid "lib.after"
-msgstr "用了之後"
-
-msgid "lib.after1"
-msgstr "agent 把策略下載到{where}的 strategies/ 資料夾"
-
-msgid "lib.after2"
-msgstr "用最新資料重跑一次回測；完整報告（權益與回撤、月報酬、進出場）出現在左側欄"
-
-msgid "lib.after3"
-msgstr "要不要上線、用模擬還是實盤，由你決定"
-
 msgid "lib.use"
 msgstr "用這支"
 
@@ -3268,7 +3338,7 @@ msgid "lib.buy.price"
 msgstr "價格 {price}"
 
 msgid "lib.buy.lead"
-msgstr "從 Blave Agent 餘額扣款；買了就會開始下載並回測。"
+msgstr "從 Blave Agent 餘額扣款；買了就會開始下載並回測，不會自動下單。"
 
 msgid "lib.buy.ok"
 msgstr "確認購買"
@@ -3301,25 +3371,25 @@ msgid "lib.fxNote"
 msgstr "金額以 TWD 計價。"
 
 msgid "lib.note.owned"
-msgstr "已購買。agent 會把策略下載到{where}並跑一次回測，不會自動下單。"
+msgstr "已購買。"
 
 msgid "lib.gate.signedOutBuy"
 msgstr "登入 Blave 之後才能購買，並下載到這台電腦。"
 
 msgid "lib.note.free"
-msgstr "免費。agent 會把策略下載到{where}並跑一次回測，不會自動下單。"
+msgstr "免費。"
 
 msgid "lib.note.billed"
 msgstr "回測若用到 Blave 資料，按有用到的整點小時計資料費。"
 
 msgid "lib.note.paid"
-msgstr "從 Blave Agent 餘額扣款。購買後會下載到{where}並跑一次回測，不會自動下單。"
+msgstr "從 Blave Agent 餘額扣款。"
 
 msgid "lib.note.installed"
 msgstr "已在{where}的策略清單。再下載一份會整份覆蓋同名的那支，並重跑回測。"
 
 msgid "lib.note.pending"
-msgstr "進度在右邊的對話。完成後這支會出現在左側欄。"
+msgstr "進度在右邊的對話。"
 
 msgid "lib.err.noNew"
 msgstr "這一輪結束了，但沒看到新策略。看對話裡 agent 怎麼說。"
@@ -3334,7 +3404,7 @@ msgid "lib.cf.title"
 msgstr "下載「{title}」？"
 
 msgid "lib.cf.l1"
-msgstr "agent 會把策略下載到{where}的 strategies/ 資料夾，接著用最新資料跑一次回測，結果會出現在左側欄。"
+msgstr "agent 會把策略下載到 strategies/ 資料夾，用最新資料跑一次回測，結果出現在左側欄。"
 
 msgid "lib.cf.l2"
 msgstr "不會自動下單，要不要上線由你決定。"
@@ -3364,9 +3434,6 @@ msgstr "已購買"
 msgid "rpt.nav"
 msgstr "報告"
 
-msgid "rpt.desc"
-msgstr "agent 把回測、晨報、研究整理成可以回頭讀的文件，寫好會出現在這裡。"
-
 msgid "rpt.count.one"
 msgstr "{n} 份報告"
 
@@ -3389,7 +3456,7 @@ msgid "rpt.empty"
 msgstr "還沒有報告。"
 
 msgid "rpt.emptyHint"
-msgstr "按右上角「新增報告」描述你要的內容，或直接在右邊對話裡跟 agent 說。"
+msgstr "按「新增報告」，或直接跟右邊的 agent 說。"
 
 msgid "rpt.error"
 msgstr "讀不到雲端的報告清單。"
@@ -3401,7 +3468,7 @@ msgid "rpt.readErr"
 msgstr "讀不到這份報告。"
 
 msgid "rpt.note.pending"
-msgstr "進度在右邊的對話；寫好會出現在這裡。"
+msgstr "進度在右邊的對話。"
 
 msgid "rpt.err.noNew"
 msgstr "這一輪沒有產出新報告，原因在右邊的對話。"
@@ -3463,7 +3530,7 @@ msgid "rpt.new.tpl.research"
 msgstr "研究報告：探討一個市場問題——<例：「Sell in May」在台股成立嗎／除息後平均幾天填息／外資連賣 5 天後，加權指數接下來 10 天過去怎麼走>。給我可被反駁的結論、支持與反對的數據、穩健性檢驗，以及什麼情況會推翻它。"
 
 msgid "rpt.new.honest"
-msgstr "報告由{where}的 agent 產出。首份報告非即時，完成後才會出現在左側欄的「報告」。"
+msgstr "首份報告非即時，寫好會出現在「報告」清單。"
 
 msgid "rpt.new.send"
 msgstr "請 agent 建立"
@@ -3476,9 +3543,6 @@ msgstr "幫我建立報告"
 
 msgid "rpt.new.msgOnce"
 msgstr "這份只要產出一次，不用建立排程。"
-
-msgid "rpt.queued"
-msgstr "已送出。首份報告非即時，完成後會出現在左側欄的「報告」。"
 
 # 兩個表單 modal 共用:submitMessage 回 false(引擎失敗 / 被擋)時腳的那一句;原因由對話講
 msgid "modal.sendFailed"
@@ -3520,6 +3584,19 @@ msgstr "圖片載入失敗"
 
 msgid "rb.segOther"
 msgstr "其他"
+
+# news block 的 Mini tag(契約 1.4;spec-report-blocks-recipes §4.3):意思由文字承載,顏色只是輔助
+msgid "rb.newsPos"
+msgstr "正面消息"
+
+msgid "rb.newsNeg"
+msgstr "負面消息"
+
+msgid "rb.newsNeutral"
+msgstr "中性"
+
+msgid "rb.estModel"
+msgstr "預估清算量（模型）"
 
 # ── 新增策略 modal(spec-desktop-0.1.6 §4;renderer/newstrategy.js;字逐字抄 web 的 workspace_ns_*)──
 msgid "ns.title"
@@ -3565,7 +3642,7 @@ msgid "ns.previewLabel"
 msgstr "將送出到對話的訊息"
 
 msgid "ns.previewEmpty"
-msgstr "（至少填寫一項）"
+msgstr "—"
 
 msgid "ns.libHint"
 msgstr "不知道從哪開始？"
@@ -3612,3 +3689,570 @@ msgstr "這一小時付不出資料費，agent 拿不到策略庫。儲值後馬
 
 msgid "lib.gate.unknown"
 msgstr "現在查不到帳號的資料狀態，agent 可能拿不到策略庫。到「資料與雲端方案」重新查看。"
+
+msgid "br.h"
+msgstr "瀏覽器"
+
+msgid "br.browsing"
+msgstr "agent 瀏覽中"
+
+msgid "br.readWord"
+msgstr "已讀"
+
+msgid "br.waiting"
+msgstr "等你操作"
+
+msgid "br.queued"
+msgstr "排隊 {n}"
+
+msgid "br.queuedOne"
+msgstr "排隊中"
+
+msgid "br.inMain"
+msgstr "{n} 頁在中欄"
+
+msgid "br.summaryPre"
+msgstr "讀了 "
+
+msgid "br.summaryUsedPre"
+msgstr "用了 "
+
+msgid "br.summaryPost"
+msgstr " 頁"
+
+msgid "br.loading"
+msgstr "載入中"
+
+msgid "br.reading"
+msgstr "讀取中"
+
+msgid "br.search"
+msgstr "搜尋結果"
+
+msgid "br.failed"
+msgstr "打不開，{why}"
+
+msgid "br.fail.timeout"
+msgstr "連線逾時。"
+
+msgid "br.fail.dns"
+msgstr "找不到這個網站。"
+
+msgid "br.fail.network"
+msgstr "連線失敗。"
+
+msgid "br.fail.http_4xx"
+msgstr "網站回應錯誤。"
+
+msgid "br.fail.http_5xx"
+msgstr "網站暫時出錯。"
+
+msgid "br.fail.h"
+msgstr "打不開 {host}"
+
+msgid "br.retry"
+msgstr "重試"
+
+msgid "br.row.blocked"
+msgstr "agent 不開這個網站"
+
+msgid "br.need.login"
+msgstr "要登入"
+
+msgid "br.need.submit"
+msgstr "要送出"
+
+msgid "br.need.captcha"
+msgstr "要過機器人檢查"
+
+msgid "br.need.file"
+msgstr "要選檔案"
+
+msgid "br.relay"
+msgstr "只停在轉址頁，沒有內容"
+
+msgid "br.notRead"
+msgstr "沒讀到"
+
+msgid "br.youPress"
+msgstr "由你按"
+
+msgid "br.userOp"
+msgstr "你在操作"
+
+msgid "br.handback"
+msgstr "交還 agent"
+
+msgid "br.ask.login.h"
+msgstr "這一頁要登入"
+
+msgid "br.ask.submit.h"
+msgstr "送出由你按"
+
+msgid "br.ask.action.h"
+msgstr "這一步由你按"
+
+msgid "br.ask.file.h"
+msgstr "上傳由你選檔"
+
+msgid "br.ask.consent.h"
+msgstr "這一頁要你選 cookie 設定"
+
+msgid "br.ask.captcha.h"
+msgstr "要過機器人驗證"
+
+msgid "br.ask.p"
+msgstr "帳密由你輸入；你操作時 agent 暫停、不讀這一頁。"
+
+msgid "br.ask.captcha.p"
+msgstr "驗證由你自己過，agent 不會代解。"
+
+msgid "br.ask.skip"
+msgstr "跳過"
+
+msgid "br.ask.ddg"
+msgstr "改用 DuckDuckGo"
+
+msgid "br.ask.meLogin"
+msgstr "我來登入"
+
+msgid "br.ask.meSubmit"
+msgstr "我來按"
+
+msgid "br.ask.meFile"
+msgstr "我來選檔"
+
+msgid "br.ask.meVerify"
+msgstr "我來驗證"
+
+msgid "br.dl"
+msgstr "已擋下載：{name} 沒有存到這台電腦。"
+
+msgid "br.blk.domain.h"
+msgstr "agent 不開這個網站"
+
+msgid "br.blk.domain.p"
+msgstr "交易所與券商後台、銀行的網站，agent 一律不操作。"
+
+msgid "br.blk.list.p"
+msgstr "這個網站的條款不允許 AI 代理讀取。"
+
+msgid "br.blk.blave.p"
+msgstr "Blave 的資料 agent 直接取用，不經網站。"
+
+msgid "br.blk.addr.h"
+msgstr "已擋下這個網址"
+
+msgid "br.blk.addr.p"
+msgstr "本機位址、內網與非 http(s) 的網址一律不開。"
+
+msgid "br.openSystem"
+msgstr "用系統瀏覽器開"
+
+msgid "br.back"
+msgstr "返回"
+
+msgid "br.reload"
+msgstr "重新載入"
+
+msgid "br.url.aria"
+msgstr "網址"
+
+msgid "br.openLive"
+msgstr "開即時頁"
+
+msgid "br.openSnap"
+msgstr "看快照"
+
+msgid "br.snapMeta"
+msgstr "快照 · {time} 抓取"
+
+msgid "br.snapGone.h"
+msgstr "這份快照已經清掉了"
+
+msgid "br.snapGone.p"
+msgstr "可以用系統瀏覽器開原網址。"
+
+msgid "br.gone.h"
+msgstr "這一頁已經關了"
+
+msgid "br.gone.p"
+msgstr "沒有留快照；可以用系統瀏覽器開原網址。"
+
+msgid "br.gone.snap.h"
+msgstr "這一頁收成了快照"
+
+msgid "br.gone.snap.p"
+msgstr "看快照，或按重新載入開即時頁。"
+
+msgid "br.set.switch"
+msgstr "內建瀏覽器"
+
+msgid "br.set.lead"
+msgstr "agent 可以在這台電腦上開網頁查資料，開的每一頁都會出現在聊天裡。交易所與券商後台、銀行一律不開；登入、送出、付款由你自己按。"
+
+msgid "br.set.clear"
+msgstr "清除瀏覽資料"
+
+msgid "br.set.cleared"
+msgstr "已清除"
+
+msgid "br.set.busy"
+msgstr "對話進行中，結束後再清"
+
+msgid "br.ask.p.check"
+msgstr "按之前再看一次。"
+
+msgid "br.ask.p.pause"
+msgstr "你操作時 agent 暫停、不讀這一頁。"
+
+msgid "br.ask.p.file"
+msgstr "檔案由你選；agent 看不到你電腦裡的檔案。"
+
+msgid "br.ask.p.consent"
+msgstr "cookie 設定由你選；你操作時 agent 暫停、不讀這一頁。"
+
+msgid "br.blk.like.p"
+msgstr "{host} 跟 {like} 相似，可能是釣魚網站。"
+
+msgid "br.blk.mixed.p"
+msgstr "{host} 混用了不同文字的字母，可能是釣魚網站。"
+
+msgid "br.blk.oauth.p"
+msgstr "登入與授權頁由你自己操作，agent 不開。"
+
+msgid "br.compiling"
+msgstr "匯整成報告"
+
+msgid "br.act.outline"
+msgstr "看大綱"
+
+msgid "br.act.links"
+msgstr "讀連結"
+
+msgid "br.act.meta"
+msgstr "讀標題與日期"
+
+msgid "br.act.snapshot"
+msgstr "看頁面結構"
+
+msgid "br.pressing"
+msgstr "按 {key}"
+
+msgid "cap.venue"
+msgstr "群益"
+
+msgid "cap.group.tw"
+msgstr "台股"
+
+msgid "cap.title"
+msgstr "連接群益"
+
+msgid "cap.meta"
+msgstr "可以下單、讀帳戶。一次只能連一個。"
+
+msgid "cap.id"
+msgstr "身分證字號"
+
+msgid "cap.pw"
+msgstr "交易密碼"
+
+msgid "cap.store.q"
+msgstr "帳密存在哪？"
+
+msgid "cap.storeCloud"
+msgstr "身分證字號和交易密碼存在你雲端主機上的獨立檔案，只給群益下單程式使用，不會上傳。"
+
+msgid "cap.beforeC"
+msgstr "會在你的雲端主機安裝群益的下單元件。"
+
+msgid "cap.go"
+msgstr "開始開通"
+
+msgid "cap.needWin"
+msgstr "群益需要 Windows 主機。"
+
+msgid "cap.s.setup"
+msgstr "安裝群益元件"
+
+msgid "cap.s.setupRun"
+msgstr "安裝中…"
+
+msgid "cap.s.setupFail"
+msgstr "群益元件沒裝好。"
+
+msgid "cap.tryAgain"
+msgstr "再試一次"
+
+msgid "cap.c.pick"
+msgstr "憑證"
+
+msgid "cap.c.pfx"
+msgstr "匯入已有的憑證檔"
+
+msgid "cap.c.pfxM"
+msgstr "已在自己的 Windows 電腦申請過群益憑證。"
+
+msgid "cap.c.rdp"
+msgstr "改用遠端桌面"
+
+msgid "cap.c.rdpDo"
+msgstr "用遠端桌面連進你的主機，在主機上跑群益的憑證精靈。"
+
+msgid "cap.c.other"
+msgstr "換一種做法"
+
+msgid "cap.c.unlockDo"
+msgstr "解鎖後只能再試一次，還是不行就要到群益改密碼。"
+
+msgid "cap.unlocked"
+msgstr "我已解鎖"
+
+msgid "cap.c.verifyDo"
+msgstr "群益規定第一次要跑一次連線檢核。在你自己的 Windows 電腦打開群益的檢核工具，登入後按「模擬國內證券下單」「模擬國內期貨下單」，最後按「查詢是否已驗證」。"
+
+msgid "cap.pfx.how"
+msgstr "在你的 Windows 電腦打開群益憑證精靈，按「匯出憑證」。"
+
+msgid "cap.pfx.dl"
+msgstr "到群益網站下載精靈"
+
+msgid "cap.pfx.file"
+msgstr "憑證檔"
+
+msgid "cap.pfx.pick"
+msgstr "選擇檔案"
+
+msgid "cap.pfx.pw"
+msgstr "匯出密碼"
+
+msgid "cap.pfx.pwHint"
+msgstr "匯出憑證時設的那組，不是交易密碼。"
+
+msgid "cap.pfx.e2e"
+msgstr "憑證檔和密碼在你的電腦上加密後才送出，只有你的主機解得開，Blave 轉送時看不到。匯入後就刪掉。"
+
+msgid "cap.pfx.go"
+msgstr "上傳並匯入"
+
+msgid "cap.pfx.importing"
+msgstr "匯入中…"
+
+msgid "cap.pfx.errPw"
+msgstr "匯出密碼不對。"
+
+msgid "cap.pfx.errFile"
+msgstr "這個檔不是憑證檔（.pfx）。"
+
+msgid "cap.pfx.errIssuer"
+msgstr "這張憑證不是群益發的。"
+
+msgid "cap.pfx.errExpired"
+msgstr "這張憑證已經過期。先在群益憑證精靈展延，再匯出一次。"
+
+msgid "cap.pfx.errOlder"
+msgstr "你的主機上已經有一張比較新的群益憑證，這個檔是舊的。"
+
+msgid "cap.pfx.errRead"
+msgstr "讀不到這個檔。"
+
+msgid "cap.pfx.errKey"
+msgstr "上傳沒有完成，再上傳一次。"
+
+msgid "cap.pfx.errImport"
+msgstr "憑證沒有匯入成功。"
+
+msgid "cap.s.probe"
+msgstr "確認帳密…"
+
+msgid "cap.s.probeIdle"
+msgstr "憑證已匯入，還沒確認帳密。"
+
+msgid "cap.recheck"
+msgstr "重新確認"
+
+msgid "cap.s.pw"
+msgstr "確認帳密"
+
+msgid "cap.err.pw"
+msgstr "群益說交易密碼不對。"
+
+msgid "cap.err.pwLocked"
+msgstr "交易密碼被群益鎖住了。"
+
+msgid "cap.err.pwChange"
+msgstr "群益還是不接受這組密碼。在群益改好密碼後，在這裡重填。"
+
+msgid "cap.err.noCreds"
+msgstr "主機上讀不到身分證字號和交易密碼，重填一次。"
+
+msgid "cap.s.verify"
+msgstr "連線檢核"
+
+msgid "cap.retry"
+msgstr "再查一次"
+
+msgid "cap.s.sign"
+msgstr "簽署 API 聲明書"
+
+msgid "cap.s.signDo"
+msgstr "在群益網站簽要交易的市場：證券、期貨各一份。"
+
+msgid "cap.s.signOpen"
+msgstr "開啟簽署頁"
+
+msgid "cap.s.signDone"
+msgstr "我簽好了"
+
+msgid "cap.s.signNone"
+msgstr "還讀不到帳戶。可能還沒簽，或群益還沒開通。"
+
+msgid "cap.s.read"
+msgstr "讀取帳戶"
+
+msgid "cap.s.readRun"
+msgstr "讀取中…"
+
+msgid "cap.s.certExp"
+msgstr "到期 {date}"
+
+msgid "cap.acct.ts"
+msgstr "證券"
+
+msgid "cap.acct.tf"
+msgstr "期貨"
+
+msgid "cap.acct.exp"
+msgstr "憑證到期"
+
+msgid "cap.acct.read"
+msgstr "已開通"
+
+msgid "cap.tfMissing"
+msgstr "有期貨戶的話，要另簽期貨那份。"
+
+msgid "cap.finish"
+msgstr "完成"
+
+msgid "cap.pending"
+msgstr "開通中"
+
+msgid "cap.continue"
+msgstr "繼續"
+
+msgid "cap.err.busy"
+msgstr "主機上還有一步在跑，等它跑完再按。"
+
+msgid "cap.err.credsUnknown"
+msgstr "主機沒有回應，不確定存進去了沒。再按一次沒關係。"
+
+msgid "cap.err.idFormat"
+msgstr "身分證字號格式不對。"
+
+msgid "cap.err.notReady"
+msgstr "群益元件還沒裝好，等安裝完成再上傳。"
+
+msgid "cap.err.noMove"
+msgstr "主機還沒回報進度。"
+
+msgid "cap.err.generic"
+msgstr "主機沒有接受這一步。"
+
+msgid "cap.err.certOld"
+msgstr "主機上有一張過期的群益憑證，會讓登入失敗。匯入新的憑證檔時會一併刪掉。"
+
+msgid "cap.err.certUnusable"
+msgstr "主機上的群益憑證用不了，重新匯入一次憑證檔。"
+
+msgid "cap.err.certExpired"
+msgstr "群益憑證已過期。先在你的 Windows 電腦展延，再匯入新的憑證檔。"
+
+msgid "cap.err.timeout"
+msgstr "群益沒有及時回應。"
+
+msgid "cap.err.vehicle"
+msgstr "主機上的登入程式沒有起來。"
+
+msgid "cap.err.apiVersion"
+msgstr "主機上的群益元件太舊，要重裝。"
+
+msgid "cap.err.unknownCode"
+msgstr "群益回了沒見過的結果（代碼 {code}）。"
+
+msgid "cap.err.worker"
+msgstr "群益下單程式沒有起來。"
+
+msgid "cap.err.snapshot"
+msgstr "群益下單程式登入後讀不到帳戶。"
+
+msgid "cap.err.probeNotOk"
+msgstr "帳密還沒確認通過。"
+
+msgid "cap.ho.saved"
+msgstr "身分證字號和交易密碼已存到你的雲端主機，還不能下單。"
+
+msgid "cap.ho.left"
+msgstr "剩下 3 個步驟要你和 agent 一起完成："
+
+msgid "cap.ho.s1"
+msgstr "申請群益憑證（遠端桌面上的憑證精靈，加手機簡訊驗證）"
+
+msgid "cap.ho.s2"
+msgstr "跑 API 連線檢核（群益規定的模擬下單測試）"
+
+msgid "cap.ho.s3"
+msgstr "線上簽署 API 聲明書"
+
+msgid "cap.ho.go"
+msgstr "交給 agent 帶你完成"
+
+msgid "cap.ho.prompt"
+msgstr "我剛在電腦版把群益的身分證字號與交易密碼存到雲端主機。請帶我在雲端主機上完成剩下的開通：申請憑證、API 連線檢核、簽署聲明書，完成後先用唯讀方式確認讀得到帳戶，先不要下單。"
+
+msgid "cap.ho.promptRdp"
+msgstr "我要用遠端桌面在雲端主機上申請群益憑證，身分證字號與交易密碼已經存好了。請帶我完成：申請憑證、API 連線檢核、簽署聲明書，完成後先用唯讀方式確認讀得到帳戶，先不要下單。"
+
+msgid "cap.ho.promptVerify"
+msgstr "我的群益憑證已經匯入雲端主機，現在卡在群益的 API 連線檢核。請帶我用遠端桌面在雲端主機上跑檢核工具，跑完後先用唯讀方式確認讀得到帳戶，先不要下單。"
+
+msgid "cap.c.verifyDl"
+msgstr "下載檢核工具"
+
+msgid "cap.s.verifyNot"
+msgstr "群益還沒記到這次檢核。"
+
+msgid "cap.pfx.replace"
+msgstr "會取代主機上同一個身分證字號、較舊的群益憑證。"
+
+msgid "cap.s.querying"
+msgstr "查詢中…"
+
+msgid "cap.ho.promptRead"
+msgstr "我的群益開通在電腦版卡在「讀取帳戶」這一步。請看雲端主機上群益開通的狀態，帶我排除，完成後先用唯讀方式確認讀得到帳戶，先不要下單。"
+
+msgid "br.openPanel"
+msgstr "看網頁"
+
+msgid "br.closePanel"
+msgstr "收回"
+
+msgid "br.listShow"
+msgstr "展開清單"
+
+msgid "br.listHide"
+msgstr "收起清單"
+
+msgid "br.readDone"
+msgstr "已讀完"
+
+msgid "br.need.confirm"
+msgstr "要確認網址"
+
+msgid "br.ask.confirm.h"
+msgstr "要開這個網址嗎？"
+
+msgid "br.ask.p.confirm"
+msgstr "agent 這一輪還沒去過這個網站，網址卻帶著一大段資料，可能是被網頁誘導把讀到的內容送出去。先看網址列，確定沒問題再開。"
+
+msgid "br.ask.openAnyway"
+msgstr "仍要開啟"

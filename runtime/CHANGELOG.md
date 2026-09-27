@@ -8,6 +8,184 @@ miss it. (Channel rules: `.claude/docs/blave-agent-update-channels.md`.)
 
 ## Unreleased
 
+## 1.1.101 — 2026-09-27
+
+- **DeepSeek 排程的固定來源加回鉅亨列表頁+官方公告頁(Wei 09-27 拍板)**:鉅亨授權涵蓋抓其網站
+  新聞列表頁——`https://news.cnyes.com/news/cat/headline`(台股/通用)與
+  `https://news.cnyes.com/news/cat/bc_crypto`(加密)進 prompt 點名為 licensed 固定來源;官方公告頁
+  逐站查證後加入:TWSE(robots 對 * 與 GPTBot 明文 Allow;列表 HTML 靠 JS,改用 rwd JSON 端點)、
+  TAIFEX(無 robots.txt、userTerms 無自動化禁令,用 `/cht/11/announcement`)、Binance(robots 對 *
+  Allow 且公告 sitemap 在列,ToU 反爬條款由資料夥伴關係涵蓋,Wei 09-27)、OKX(robots 公告路徑無禁令,
+  API Agreement 反爬只限超出個人使用規模;下單夥伴,Wei 09-27)。CoinMarketCap 查證不過
+  (robots 對 * Disallow `/headlines/*`),不進名單。台股與加密固定來源各湊滿 3 站,加密排程不再預設
+  `few_sources` 降級(下面那條「加密沒有授權候選」的說法由此取代);五個禁站照舊不點名。
+  `_news_describe`、references/reports.md(含 source-quality 清單撤 CoinDesk/MoneyDJ/經濟日報/工商時報)
+  與 AGENTS.md 的 DeepSeek 句同步。
+- **DeepSeek 聊天回合也不綁 CLI 的假 USD 預算(稽核 A-P1-2)**:上一批只豁免了排程回合;聊天照掛
+  `max_budget_usd=10`,而 CLI 對經 proxy 的 DeepSeek 用 Claude 價目表(~0.116 假 USD/步),約 86 步就撞牆,
+  1.1.100 的 100 步宣稱對主力配置不成立。改成聊天與排程同一條 `_cli_cost_trusted` 判定:非 Anthropic 模型
+  一律不綁 USD 上限。真實曝險上界:29026 帳本實測 DeepSeek 約 0.9 點/步(9 步 8.06 點),100 步 ≈ 90 點
+  (成本基礎 ≈2.8 USD)——由步數與時間擋,不是錢。
+- **電腦版聊天回合補牆鐘 35 分鐘(`_TURN_WALL_CLOCK_SEC=2100`,同 web bridge 等級)**:稽核指出電腦版
+  (LocalSink)沒有 bridge 回合逾時,外殼只有停止鈕後的 5 秒沉默殺——拿掉假預算後等於沒有時間煞車。牆鐘掛在
+  訊息迴圈裡(只在有訊息時檢查:完全沉默的 CLI 不燒 token,歸停止鈕管),到點收掉回合、不續跑,用戶拿到
+  「只做完一部分」那句。只掛 LocalSink;雲端 TG/web bridge(2000/2100 秒)與排程 runner(600 秒)照舊自己管。
+  已知限制:牆鐘在 Claude 引擎的迴圈裡,`engine=codex`(用戶自己的訂閱)沒有——照舊沒有時間上限。
+- **DeepSeek 排程的固定新聞站撤下(ToS 逐站查證,09-27)**:1.1.99 寫死的六站,五站的條款或 robots.txt
+  禁止自動化/AI 使用——Cointelegraph(ToS 明文禁 AI/LLM)、經濟日報與 MoneyDJ(robots.txt 明文禁 LLM 且
+  Disallow ClaudeBot)、CoinDesk(ToS 禁 robots/scrapers + robots 擋 anthropic-ai/ClaudeBot/CCBot)、
+  Decrypt(ToS 禁自動化 data-mine/scrape)。只剩鉅亨(Blave 授權方,service.htm 與 robots 查無禁令)。
+  DeepSeek 版 prompt 改成只 WebFetch 授權候選的連結;湊不滿 3 站(加密沒有授權候選)走 `few_sources`
+  一句照發——這是產品行為,不提換模型。`_news_describe` 的聊天版名單與 references/AGENTS 同步撤下
+  被禁的站名,改寫「先看目標站的條款與 robots 有沒有禁 AI」。
+
+## 1.1.100 — 2026-09-27
+
+- **聊天回合步數上限 50 → 100(電腦版與雲端一致;排程 25 不動;Wei 09-27)**:「建 BNB MA 策略+回測+上
+  TradingView 對照」在 50 步被砍在貼完 Pine 之後(同日 ETH 那輪也用滿 49 步)——瀏覽器 UI 任務每個
+  click/wait/snapshot 都是一步,乾淨做完就要 ~60 步。煞車仍是預算(10 USD)與 bridge 回合逾時,不是步數。
+  references/browser.md 補一條:TradingView 換 symbol 走 `?symbol=` URL、不用搜尋框(那次在搜尋框上燒掉
+  約 20 步)。測試 `tests/check_scheduled_budget.py` 期望值同步。
+
+## 1.1.99 — 2026-09-27
+
+- **DeepSeek 的排程報告照樣有新聞欄(WebFetch 固定來源)**:WebSearch 是 Anthropic 伺服器端工具,DeepSeek 經 proxy 沒有;
+  但 WebFetch 是 CLI 自己抓網頁、用同一個模型摘要——mock proxy 實測(claude 2.1.283,model=deepseek/deepseek-v4-pro,
+  09-27):tool_use 有執行、摘要子呼叫帶同一個 model id,經 proxy 一樣路由到 DeepSeek 計費。`report_runner.scheduled_prompt`
+  分兩版:Claude 版照舊 WebSearch→WebFetch;DeepSeek 版(含沒有模型偏好的預設)直接 WebFetch 授權候選的連結加 2–3 個
+  固定頭條頁(crypto:CoinDesk/Cointelegraph/Decrypt;台股:鉅亨/經濟日報/MoneyDJ),照樣湊滿 3 個網站出完整版。
+  完全沒有上網工具的模型才降級(新聞欄不出＋尾註一句),這是產品行為:R8 的說明句講一次「這台目前的模型不含上網查新聞,
+  這個排程會出數據＋判讀版」,不建議切模型、不比價(Wei 09-27;references/reports.md §News 表、R8 與 AGENTS.md 同步改)。
+  測試 `tests/check_report_runner_agent.py`(兩版 prompt 各一例、預設模型走 WebFetch 版)。
+- **非 Anthropic 模型的排程回合不再用 CLI 的 USD 成本當預算**:CLI 的 `total_cost_usd` 照 Claude 價目表估,
+  經 proxy 跑 DeepSeek 時整個錯——29026 實測(09-27 14:25,deepseek-v4-pro)9 步被它算到 1.045 USD 撞預算、
+  退成 data-only,而 api 帳本同一輪 12 筆 `usage_llm` 合計只扣 8.06 點(成本基礎 ≈0.25 USD,CLI 高估約 4 倍)。
+  改法:`max_budget_usd` 只在模型是 Anthropic 系(claude/sonnet/opus/haiku/fable)時才綁(0.84),其他模型
+  (含沒偏好的預設 DeepSeek)靠 25 步+runner 10 分鐘擋;`.sched_result.json` 照實記 CLI 值但多帶
+  `cost_untrusted: true`;runner 的降級判定看到 `cost_untrusted` 就不把 budget 當成因(那個數不是真的)。
+  續跑的剩餘預算對不可信成本不再扣減。測試 `tests/check_scheduled_budget.py`、`check_report_runner_agent.py`。
+
+## 1.1.98 — 2026-09-27
+
+- **回合狀態列的分類(`agent_turn._tool_kind`;spec-turn-status-summary ①)**:每個 tool chunk 多帶 `kind`／`kind_obj`(受詞:網域、
+  搜尋字、策略名、代號、檔名,≤60)／`kind_tab`(瀏覽器分頁 alias),前端照 kind 查自己的字,把「執行中 · 第 39 步」換成
+  「正在讀 investing.com」。不送任何顯示字、不呼叫模型。兩條誠實規則:**下單**只認真的下單呼叫(place_/cancel_/run_twap/
+  close_position),`get_order`／`get_contract_rules` 這類查詢不算;**回測 vs 實盤**用 workspace 的明確路徑讀下單設定
+  (`manager/amounts.ui.json` 優先,再 `portfolio_config.json`),不呼叫 cwd 相對的 `strategy_amounts()`,`BLAVE_MODE=backtest` 優先。
+  執行的是 workspace 腳本時連腳本內容(前 64 KB)一起掃;ssh 包起來的剝掉外層照同一套規則,內層分不出來就是「連雲端主機」;
+  `grep`／`cat` 這類純讀檔的指令先看指令頭(grep 一支含 publish( 的檔不算在組報告)。另送 `tool_prep`(模型開始生工具參數時,
+  只帶工具名;大的 Write 要 10–30 秒,狀態列說「正在寫程式」)。**api 要先上**:`_safe_tool_chunk` 收 kind 白名單、
+  `tool_prep` 進 TURN_CHUNK_TYPES(舊 api 會把 kind 欄位丟掉,前端退回只看工具名)。列舉測試 `tests/check_tool_kind.py`;
+  本機電腦版最近 20 個回合的逐字稿重放:331 次工具呼叫,unknown 7.4%(門檻 15%)。29026 的重放沒做(這台 BYOA 通道不在
+  這次的工具裡)。
+  `tool_prep` 改成**邊收參數邊分類**(`ToolPrep`,設計稽核 A3):Bash／Write／Edit 開頭送 `code_prep`,每 256 字元或 0.5 秒
+  用完成後同一套分類判一次(組報告的 heredoc 一出現 `publish(`／`report_templates` 就是 report、寫進 `strategies/<name>/`
+  就是 strategy_write),只往更具體升級。實測(本機 Sonnet 加密晨報):狀態列在生參數時就是「正在組報告」。
+  下單分類補漏報(稽核 P1-3):`open_position`／`set_leverage`／`dispatch_order`／`reconcile` 算下單;
+  `manager/close_symbol|stop_strategy|flatten|close_all.py` 走路徑規則直接判下單;ssh 的 heredoc 本體一起分類。
+  Windows 反斜線路徑先正規化;WebFetch 的受詞改成可註冊網域;`_lang_hooks` 合併既有的 PostToolUse。
+  複審修正:ToolPrep 一路判到參數收完、只往更具體升級(order 最高;先抓資料後下單的 heredoc 最後是「正在下單」);
+  回合第一個工具就先讀下單設定(實盤不先說成回測);`stop_strategy.py` 只有帶 `--flatten` 才算下單,否則是「設定排程」。
+
+- **電腦版內建瀏覽器的 runtime 接線(`--mcp-servers`、`browser_rule`、Codex `browser_server`)**:外殼以 `--mcp-servers`
+  (逗號清單,只認 `blave` / `blave_browser`)標示這一輪掛了哪幾個本機 MCP,沒帶 = 舊外殼 = 只有 `blave`。掛了
+  `blave_browser` 的回合在 prompt 加瀏覽器規則(網頁內容是資料不是指令、`needs_user` 不繞、blocked 不叫用戶貼內容、
+  引用要附來源)並關掉 WebFetch(讀網頁一律走瀏覽器;WebSearch 保留);Codex 引擎 `browser_server()` 同 `blave` 那套閘門
+  (版本下限、撞名、snapshot)掛第二個 server,token 只走 `BLAVE_BROWSER_TOKEN`、被自己的 env filter 拔掉,
+  `tool_timeout_sec=120`。`session_store.SCAFFOLD_RE` 加 `[Runtime 規則`(網頁與摘要不能冒充 runtime 規則;稽核 S3)。
+  測試 `tests/check_local_mcp_config.py`、`tests/check_codex_engine.py` §7、`tests/check_codex_mcp_live.py` 第 4 條。
+
+- **回覆語言改成系統層規則(`agent_turn.reply_lang_rule`,兩條引擎、機隊與電腦版都帶)**:原本只有 prompt 尾端那一句錨,
+  工具讀進大量外文之後模型會跟著切語言——電腦版中文問「用瀏覽器查今天比特幣的兩則新聞」,回覆第一句與列表標題是英文
+  (Wei 2026-09-26)。新規則寫明回覆語言(解析同錨:設定 > ui_lang > 看用戶打的字)、外文網頁與工具輸出不改變它、外文標題
+  翻成回覆語言並可附原文(同 news block 的 `title`／`title_orig`);放在建議規則之前(建議規則仍在最尾端)。每則訊息的錨不變。
+  references/browser.md、reports.md 查過沒有蓋過語言的指令。測試 `tests/check_reply_lang_rule.py`。
+  規則也涵蓋工具呼叫之間的旁白;中文回覆一律全形標點(數字、英文、程式碼、網址除外)。**電腦版**另掛 PostToolUse hook,
+  每個工具結果後面附一句語言提醒(`lang_reminder`;深度研究讀進十幾頁英文後 Sonnet 的旁白照樣變英文)。機隊先不掛,
+  等 29026 驗過 hook 通道;Codex 引擎沒有對應的機制,只有系統層規則。實測(本機 Sonnet、真 CLI、四篇與三篇英文原文的研究
+  回合各一次):旁白全中文、回覆沒有半形標點夾在中文之間,也沒有把提醒講給用戶聽。
+
+- **雲端排程報告改成到點跑一輪 agent 寫判讀、整理新聞(`report_runner`、`agent_turn --delivery report --scheduled`)**:
+  只對 `job.json.agent_consent == true` 的 job(登記時用戶聽過每份估價、同意;這版之前登記的全部照舊出數據版、不加尾註)。
+  用戶「當時」的模型偏好(`state/model_prefs.json` 的 `_last`),不在登記時固定。每份上限 1.0 USD(Wei 09-26 由 0.8 調高;Sonnet 實測每份 0.46–0.55)、25 步(續跑不加步數)、10 分鐘;
+  Edit/Write 擋 strategies/ control/ report_jobs/ lib/ .env(**Bash 不擋:軟約束,Wei 09-26 接受**)。每個 job 每天最多起一次回合
+  (失敗、立即執行都算)。回合名額照 turn_slots(對話優先;試用機單一名額不佔、記憶體低不加);逾時先建停止旗標讓 turn_stop 收掉整棵樹
+  (動錢的行程放過),寬限 20 秒再硬殺。沒完成就退回 `run.py` 的純資料版,尾註一句原因(`BLAVE_REPORT_DEGRADED`);原因只看結構化結果
+  (`report_jobs/<id>/.sched_result.json` 與 runner 自己的逾時),不在回覆文字裡找字。連續 3 次降級發 `report_degraded`(P2,冷卻檔獨立,
+  不壓掉 strategy_failed);餘額不足只寫尾註。報告歸屬靠 `lib.report.write_report` 在 `BLAVE_SCHEDULED_JOB` 下寫的 `.published`。
+  **電腦版排程這版照舊只出數據版**(下一版);電腦版 app 關著時錯過的那一格記一筆 `skipped / app_closed`,不補跑。
+  每日次數另存 `report_jobs/<id>/.agent_day`,拿到名額、起回合**之前**寫入(runs.jsonl 只留 50 行會洗掉計數;runner 中途被殺也算數)。
+  稽核 0.1.7 修正:SDK 預算設「上限 − 0.16」(SDK 每步結束才比,超過的那一步照付;0.16 = 實測快取命中時單步最大成本);收盤報告 job 碰到休市(週末,或
+  workspace 的 `is_tw_trading_day` 說休市)在起回合前就跳過(`agent_skipped: market_closed`,不花預算、不算次數、不算降級);
+  雲端 `run.py` 也帶 `BLAVE_SCHEDULED_RUN=1`,純資料版休市照舊 skipped,不再落到上個交易日重發;沒有 `turn_limits.json`
+  (api 還沒回過名額)當成單一名額不叫 agent;回合名額改成直接用 `turn_slots`(不再在 runner 裡抄一份);回合帶
+  `--ui-lang`(用戶登記時的語言),訊息給 pack 的確切呼叫、雲端走 WebSearch/WebFetch。
+  同意過的 job 最密每小時一次(登記時拒絕更密的 cron)。試用機／單一名額:`agent_skipped: single_slot`,中性(不加尾註、不計次、
+  不通知),`lib.report.scheduled_agent_available()` 讓 R8 不去徵求同意。重新登記沒帶 `agent_consent` = 沿用舊值。
+  排程回合步數用完就不續跑(max_turns=0 對 SDK 是沒有上限)。硬殺後讀輸出最多等 10 秒。`report_degraded` 送成功才寫冷卻戳記。
+  試用轉付費(`agent_available()` 由 False 變 True):每個還沒同意的報告 job 記一筆 P3 `report_agent_available`(只記不推),下一份排程報告尾註一句
+  「升級後排程可以請 AI 整理新聞，跟 agent 說一聲就能開」,只講一次;不自動開、不扣費。寫 `.agent_day` 失敗就不起回合、名額馬上還回去。
+  新增 `session_store.clear_session`;api 新事件型別 `report_degraded`、`report_agent_available`(**先部署 api**,再發這個 VERSION)。
+
+- **報告 pack 只在同一輪重用**:`agent_turn` 每一輪把 `BLAVE_TURN_ID` 放進回合環境,`lib/report_bricks` 以它判斷
+  「同一輪」——publish 被拒後重送同一包,下一輪一律重建(行情已經變了)。測試 `tests/check_codex_engine.py`、
+  `tests/check_report_flow.py`。
+
+- **停止鈕按下 ≤2 秒停住,連跑到一半的工具一起殺掉(新 `runtime/turn_stop.py`)**:原本唯一的通道是 `/report` 回應夾帶的
+  `interrupt: true`,而 run_turn 只在訊息邊界檢查——agent 在跑回測／Bash、或模型安靜思考時根本不 POST,停止要等工具跑完才生效。
+  現在啟動方給每一輪一個旗標檔路徑(環境變數 `BLAVE_TURN_INTERRUPT_FILE`,不上 argv:舊 runtime 不認也不會 exit 2),建檔 = 停;
+  agent_turn 每 0.25 秒看一次(`/report` 夾帶的那條照舊有效、也走同一段),看到就殺這一輪的子行程樹(引擎 + 工具),1 秒內串流沒自己
+  結束就取消回合,照既有 interrupted 收尾(`done`、不給建議與轉出、寫回歷史;不送 `error`)。Claude 與 Codex 兩條引擎共用。
+  **網頁**:api 的 `/interrupt` 本來就會往 inbox 丟一則 `interrupt` 控制訊息(BLPOP 即時送到),web_bridge 以前對跑著的回合只 ack;
+  現在寫那一輪的旗標檔(`state/turn_stop/<uuid>`,回合結束刪)。**api 不用改。**
+  **電腦版**:外殼每輪給一個旗標檔、停止鈕寫它(見 shell)。
+  殺的範圍:POSIX 沿父子關係找這一輪的引擎與工具;**動錢的行程一律不殺、讓它跑完**(規則集中在 `turn_stop.MONEY_ARGV`):
+  指令列含 close_symbol／stop_strategy／manager/flatten／close_all／update_workspace／seed_ledger／reconciler.py／capital_worker／
+  lib/order_*／lib/execute／lib/venue／lib/portfolio(含 `from lib import … venue／portfolio／execute／order_*`)的行程,以及
+  import 過任何 `lib/order_*`、呼叫過 `venue.bind` 或 portfolio 寫帳函式的行程(`lib/guard.mark_money_process` 寫
+  `state/execution/money_pids/<pid>`,活到行程結束——不是每筆下單才標:撤停損與平倉之間那個空檔才是危險點)。
+  保留的單位是**整個工具 session**(Claude 每次 Bash 呼叫一個 setsid session):`python3 x.py | tail` 的 tail 也留著,
+  否則腳本下一次 print 就 BrokenPipe。
+  Claude 的工具輸出寫檔,引擎照殺、平倉腳本脫離後跑完;Codex 的工具輸出走 Codex 的管線,所以 Codex **留到腳本結束、最多
+  120 秒**,期間整棵樹都不殺(`x.py | tail` 的 tail 可能就在引擎自己的 session 裡)(`HOLD_MAX_S`;codex_engine 在有 watcher 的回合停止後只排乾不轉送、絕不自己 break／殺,殺不殺由 turn_stop 決定;
+  runtime 每秒送 ping)。超過 120 秒(前景 reconciler、TWAP、監控迴圈)就殺 Codex,回覆寫明「X 停止後兩分鐘仍未結束,
+  已不再等它,輸出已中斷,可能沒跑完」。
+  回覆與歷史寫「已停止;X 會動到部位或帳本,沒有中斷,仍在背景跑完」與停止時還在跑的步驟;被停止的回合也把工具收據寫進歷史。
+  `/report` 夾帶的停止會在區塊邊界結束迴圈、可能早於 watcher 第一次掃:收尾時再掃一次(實測 SDK 0.2.144 的 `aclose()`
+  不會結束 CLI,也不會殺仍在跑的 Bash 工具)。
+  **Windows(未經真機驗證)只殺引擎本身、不加 `/T`**,工具自己跑完。**Windows 電腦版 + Codex 上架前必修**:殺 Codex 會讓
+  管線上的平倉腳本 BrokenPipe,應改為 nt 且留引擎時完全不殺、只取消回合。後續:以 GetProcessTimes 確認子行程晚於父行程才信
+  ppid、逐 pid 殺;Windows 的 money_pids 只寫不清,探活不能用 `os.kill(pid, 0)`(會 TerminateProcess);標記寫入行程建立時間
+  以防 PID 重用;`lib[./]execute` 比對可收窄到 `-c`／`-m` 參數。
+  另:同一個工具呼叫裡平倉之後接無限迴圈(例如 `close_symbol …; while true; …`),Claude 下整個 session 會被保留、停不掉(稽核 T2,後續)。
+  web_bridge 啟動時清掉 `state/turn_stop/` 的殘留旗標。**`lib/` 有改(guard、每支 order_*、portfolio 寫帳函式、venue.bind),
+  要走 workspace 通道(VERSION)**;舊 workspace 只有指令列那條規則在保護,臨手寫的下單腳本要等 lib 更新後才受保護。
+  實測(本機 dev 外殼,真 CLI):Claude 0.73 秒、Codex 1.34 秒從按下到按鈕回到送出,`time.sleep` 工具行程都不在了;
+  網頁路徑本機模擬(真 web_bridge + agent_turn + Claude CLI、假 api):inbox `interrupt` → `/report` 收到 `done` 0.07 秒。
+  測試 `tests/check_turn_stop.py`。
+
+- **群益雲端開通:登記兩個仍把密碼放上指令列的點**(`capital_connect` 檔頭 audit C-1 註記:`schtasks /rp`、
+  `certutil -p`;換掉的做法會改變金鑰落地方式,要 desktop-win-test 真機驗過才動)。新增守門測試
+  `tests/check_capital_argv_secrets.py`:第三個把 secret 放上 argv 的點會紅。
+
+- **雲端視角要的報告在雲端主機上組與發**(`agent_turn._viewing_env_segment`):用戶看著雲端主機要報告(任何類型)時,
+  資料包與 `publish()` 照 `references/cloud-handoff.md` › Reports asked from the cloud view 在那台主機跑,網路搜尋留在
+  這台電腦;連不上雲端就先問、不擅自改在本機產出;回覆講報告幾分鐘後出現在雲端的報告清單、不說已打開。
+  測試 `tests/check_cloud_report_script.py`。
+
+- **群益雲端免 RDP 開通(新 `runtime/capital_connect.py`,五個機器指令 `capital_setup`／`capital_pfx_key`／`capital_pfx`／`capital_probe`／`capital_finish`)**:
+  用戶在自己的 Windows 匯出的 pfx 以主機一次性 RSA-OAEP 公鑰封裝上傳(api 只轉送密文),主機解密、驗是群益且未過期、經 schtasks 密碼載具
+  以 Administrator `certutil -user -importpfx … NoRoot` 匯入,刪掉同 ID 舊證與過期證、probe、再由 `capital_finish` 裝 NSSM worker(Administrator)。
+  進度寫 `state/capital_connect.json`,portfolio 報告帶 `capital_connect`(網頁與電腦版同一份)。雲端 Windows 且 workspace lib 支援時,
+  `credentials` 綁群益會把身分證字號＋交易密碼改存 `credentials/capital_vault.json`(只有 Administrator 讀得到,SYSTEM 只能刪),`.env` 只留哨兵;
+  解綁一併刪 vault(刪不掉也不中斷解綁)。哨兵的 id 是空值(舊版 lib 在送出登入前就以「missing」失敗,不會拿哨兵當密碼);
+`credentials\` 目錄先收權再寫,暫存檔任何失敗都刪。群益回 300/307 後,runtime、worker、`order_capital` 都不再用同一組帳密登入
+(`state/capital_login_block.json`;300 只有帳密換了才解除;307 另可由用戶按「我已解鎖」
+= `capital_probe {"after_unlock": true}` 放行恰好一次 probe 登入,worker 與下單 lib 期間照樣拒登,放行以獨占建立的 claim 檔搶、同時兩支 probe 只有一支登入;bridge 中斷會關掉放行窗口;成功即解除(`--once` 自己清這組帳密的 block)、失敗就回到 block 且同一組帳密不再放行),worker 失敗改指數退避(30 秒起、上限 30 分)。匯入前不刪任何有私鑰的證;
+新證比同 ID 現有的舊 → `PFX_OLDER`;同 ID 同到期日的舊那張在新證匯入後刪掉。只有 capital_* 指令會建立 `capital_connect.json`。雲端主機寫 `.env` 時一律收掉 Users 的讀取權。本機模式與非 Windows 一律拒收。測試 `tests/check_capital_connect.py`
+  (需 `cryptography`)、desktop-win-test 真機驗過(見 `.claude/output/backend/capital-cloud-progress-2026-09-26.md`)。**要 workspace 同時更新**
+  (`lib/capital_vault.py` 等),舊 workspace 照舊把帳密寫 `.env`,不會拿哨兵去登入。
+
 ## 1.1.97 — 2026-09-26
 
 - **電腦版排程報告帶 `BLAVE_AGENT_LOCAL=1`、`BLAVE_SCHEDULED_RUN=1` 與電腦版策略同一份放行名單(含 `BLAVE_KLINE_SOURCE`,

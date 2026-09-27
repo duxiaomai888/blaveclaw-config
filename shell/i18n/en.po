@@ -96,6 +96,9 @@ msgstr "Message the agent"
 msgid "ws.send"
 msgstr "Send"
 
+msgid "ws.stop"
+msgstr "Stop"
+
 msgid "ws.settings"
 msgstr "Settings"
 
@@ -108,8 +111,96 @@ msgstr "Show reasoning"
 msgid "turn.thinking"
 msgstr "Thinking"
 
-msgid "turn.running"
-msgstr "Running · step {n}"
+# 回合狀態列(runtime tool chunk 的 kind;受詞另外接在後面,不在字串裡)
+msgid "act.thinking"
+msgstr "Thinking"
+
+msgid "act.reply"
+msgstr "Writing the reply"
+
+msgid "act.unknown"
+msgstr "Working"
+
+msgid "act.search"
+msgstr "Searching:"
+
+msgid "act.web_read"
+msgstr "Reading"
+
+msgid "act.web_read_many"
+msgstr "Reading {n} pages"
+
+msgid "act.web_act"
+msgstr "Using"
+
+msgid "act.docs"
+msgstr "Checking the docs"
+
+msgid "act.files"
+msgstr "Looking through files"
+
+msgid "act.file_read"
+msgstr "Reading"
+
+msgid "act.strategy_read"
+msgstr "Reading strategy"
+
+msgid "act.strategy_write"
+msgstr "Writing strategy"
+
+msgid "act.file_write"
+msgstr "Editing"
+
+msgid "act.data"
+msgstr "Fetching data"
+
+msgid "act.backtest"
+msgstr "Backtesting"
+
+msgid "act.live_tick"
+msgstr "Running strategy"
+
+msgid "act.scan"
+msgstr "Scanning parameters"
+
+msgid "act.validate"
+msgstr "Validating"
+
+msgid "act.check"
+msgstr "Checking strategy code"
+
+msgid "act.report"
+msgstr "Building the report"
+
+msgid "act.watch"
+msgstr "Updating the watchboard"
+
+msgid "act.schedule"
+msgstr "Setting up a schedule"
+
+msgid "act.order"
+msgstr "Placing an order"
+
+msgid "act.account"
+msgstr "Checking the account"
+
+msgid "act.status"
+msgstr "Checking what's running"
+
+msgid "act.install"
+msgstr "Installing packages"
+
+msgid "act.cloud"
+msgstr "Connecting to the cloud machine"
+
+msgid "act.delegate"
+msgstr "Delegating research"
+
+msgid "act.code_prep"
+msgstr "Writing code"
+
+msgid "act.need_user"
+msgstr "Waiting for you"
 
 msgid "turn.busy"
 msgstr "The previous turn is still running."
@@ -1715,9 +1806,6 @@ msgstr "Machine starting"
 msgid "side.cloud.emptyCut1"
 msgstr "No strategies in the cloud yet."
 
-msgid "side.cloud.st.trading"
-msgstr "Trading"
-
 msgid "side.cloud.st.halted"
 msgstr "Paused"
 
@@ -2552,7 +2640,7 @@ msgid "cx.chk.backoffCloud"
 msgstr "The cloud machine was just rate-limited by Binance and is waiting it out, so it didn’t check this time and nothing was saved. Wait a few minutes, then connect again."
 
 msgid "cx.chk.noWhitelistCloud"
-msgstr "This key has no IP whitelist: Binance deletes keys that have no whitelist and sit unused for a long time. Adding the cloud machine’s IP to the whitelist is recommended."
+msgstr "This key has no IP whitelist: Binance deletes keys that have no whitelist and sit unused for a long time."
 
 msgid "tr.cloud.cxSavedBn"
 msgstr "API key saved to your cloud machine; Binance permissions check passed."
@@ -3054,12 +3142,6 @@ msgstr "Verified"
 msgid "lib.installed"
 msgstr "Installed"
 
-msgid "lib.unverified"
-msgstr "Unverified"
-
-msgid "lib.foot"
-msgstr "Want to list your own strategy? Submit it on the web."
-
 msgid "lib.kv.total"
 msgstr "Total return"
 
@@ -3076,7 +3158,7 @@ msgid "lib.gate.robustVal"
 msgstr "Keeps {ratio}%"
 
 msgid "lib.gates.failed"
-msgstr "Unverified: {k} of the three gates not passed. The backtest figures are the author's; Blave has not vouched for them."
+msgstr "{k} of the three gates not passed. The backtest figures are the author's; Blave has not vouched for them."
 
 msgid "lib.price"
 msgstr "{price}"
@@ -3169,7 +3251,7 @@ msgid "lib.gate.na"
 msgstr "MCPT n/a (portfolio strategy)"
 
 msgid "lib.gates.community"
-msgstr "Unverified: this strategy hasn't been through the quality gates. Community strategies are listed by their authors after manual review; the backtest figures are the author's."
+msgstr "This strategy hasn't been through the quality gates. Community strategies are listed by their authors after manual review; the backtest figures are the author's."
 
 msgid "lib.how"
 msgstr "How it trades"
@@ -3234,18 +3316,6 @@ msgstr "12h"
 msgid "lib.iv.1d"
 msgstr "Daily"
 
-msgid "lib.after"
-msgstr "What happens next"
-
-msgid "lib.after1"
-msgstr "The agent downloads it into strategies/ on {where}"
-
-msgid "lib.after2"
-msgstr "Reruns the backtest on fresh data; the full report (equity & drawdown, monthly returns, trades) shows up in the sidebar"
-
-msgid "lib.after3"
-msgstr "Whether to run it — paper or live — is your call"
-
 msgid "lib.use"
 msgstr "Use This"
 
@@ -3268,7 +3338,7 @@ msgid "lib.buy.price"
 msgstr "Price {price}"
 
 msgid "lib.buy.lead"
-msgstr "Charged to your Blave Agent balance; the download and backtest start right after."
+msgstr "Charged to your Blave Agent balance; the download and backtest start right after. No orders are placed."
 
 msgid "lib.buy.ok"
 msgstr "Confirm Purchase"
@@ -3301,25 +3371,25 @@ msgid "lib.fxNote"
 msgstr "Amounts shown in USD; billed in TWD."
 
 msgid "lib.note.owned"
-msgstr "Purchased. The agent downloads it to {where} and runs a backtest. No orders are placed."
+msgstr "Purchased."
 
 msgid "lib.gate.signedOutBuy"
 msgstr "Sign in to Blave to buy it and download to this computer."
 
 msgid "lib.note.free"
-msgstr "Free. The agent downloads it to {where} and runs a backtest. No orders are placed."
+msgstr "Free."
 
 msgid "lib.note.billed"
 msgstr "If the backtest uses Blave data, the data fee is charged per clock hour of use."
 
 msgid "lib.note.paid"
-msgstr "Charged to your Blave Agent balance. After purchase it downloads to {where} and runs a backtest. No orders are placed."
+msgstr "Charged to your Blave Agent balance."
 
 msgid "lib.note.installed"
 msgstr "Already in the strategy list on {where}. Downloading again overwrites the one with the same name and reruns the backtest."
 
 msgid "lib.note.pending"
-msgstr "Progress is in the chat on the right. When it finishes, the strategy appears in the sidebar."
+msgstr "Progress is in the chat on the right."
 
 msgid "lib.err.noNew"
 msgstr "The turn ended without a new strategy. See what the agent said in the chat."
@@ -3334,7 +3404,7 @@ msgid "lib.cf.title"
 msgstr "Download \"{title}\"?"
 
 msgid "lib.cf.l1"
-msgstr "The agent downloads it into strategies/ on {where}, then runs a backtest on fresh data; the result shows up in the sidebar."
+msgstr "The agent downloads it into strategies/ and runs a backtest on fresh data; the result shows up in the sidebar."
 
 msgid "lib.cf.l2"
 msgstr "No orders are placed — whether to run it is your call."
@@ -3364,9 +3434,6 @@ msgstr "Purchased"
 msgid "rpt.nav"
 msgstr "Reports"
 
-msgid "rpt.desc"
-msgstr "The agent turns backtests, briefings and research into documents you can come back to; they show up here."
-
 msgid "rpt.count.one"
 msgstr "{n} report"
 
@@ -3389,7 +3456,7 @@ msgid "rpt.empty"
 msgstr "No reports yet."
 
 msgid "rpt.emptyHint"
-msgstr "Use Add Report top-right to describe what you want, or just tell the agent in the chat on the right."
+msgstr "Use Add Report, or just tell the agent on the right."
 
 msgid "rpt.error"
 msgstr "Couldn't load the cloud report list."
@@ -3401,7 +3468,7 @@ msgid "rpt.readErr"
 msgstr "Couldn't load this report."
 
 msgid "rpt.note.pending"
-msgstr "Progress is in the chat on the right; it shows up here when done."
+msgstr "Progress is in the chat on the right."
 
 msgid "rpt.err.noNew"
 msgstr "This turn didn't produce a report; the reason is in the chat on the right."
@@ -3462,7 +3529,7 @@ msgid "rpt.new.tpl.research"
 msgstr "Research report: look into a market question — <e.g. does 'Sell in May' hold for Taiwan stocks / how many days does a stock take on average to recover its ex-dividend gap / how did the TAIEX move over the next 10 days after foreign investors sold 5 days in a row>. Give me a falsifiable conclusion, the data for and against it, robustness checks, and what would overturn it."
 
 msgid "rpt.new.honest"
-msgstr "The agent on {where} writes the report. The first report is not instant — it shows up under Reports in the sidebar when it is done."
+msgstr "The first report is not instant; it shows up in the Reports list when done."
 
 msgid "rpt.new.send"
 msgstr "Ask the Agent"
@@ -3475,9 +3542,6 @@ msgstr "Write me a report"
 
 msgid "rpt.new.msgOnce"
 msgstr "Produce it once — no schedule needed."
-
-msgid "rpt.queued"
-msgstr "Sent. The first report is not instant — it will appear under Reports in the sidebar once it is done."
 
 # 兩個表單 modal 共用:submitMessage 回 false(引擎失敗 / 被擋)時腳的那一句;原因由對話講
 msgid "modal.sendFailed"
@@ -3519,6 +3583,19 @@ msgstr "Image failed to load"
 
 msgid "rb.segOther"
 msgstr "Other"
+
+# news block 的 Mini tag(契約 1.4;spec-report-blocks-recipes §4.3):意思由文字承載,顏色只是輔助
+msgid "rb.newsPos"
+msgstr "Positive News"
+
+msgid "rb.newsNeg"
+msgstr "Negative News"
+
+msgid "rb.newsNeutral"
+msgstr "Neutral"
+
+msgid "rb.estModel"
+msgstr "Est. liquidation (model)"
 
 # ── 新增策略 modal(spec-desktop-0.1.6 §4;renderer/newstrategy.js;字逐字抄 web 的 workspace_ns_*)──
 msgid "ns.title"
@@ -3564,7 +3641,7 @@ msgid "ns.previewLabel"
 msgstr "Message to send"
 
 msgid "ns.previewEmpty"
-msgstr "(fill in at least one field)"
+msgstr "—"
 
 msgid "ns.libHint"
 msgstr "Not sure where to start?"
@@ -3611,3 +3688,570 @@ msgstr "The data fee for this hour couldn't be charged, so the agent can't reach
 
 msgid "lib.gate.unknown"
 msgstr "The account's data status couldn't be checked, so the agent may not reach the library. Open Data & Cloud Plan to check again."
+
+msgid "br.h"
+msgstr "Browser"
+
+msgid "br.browsing"
+msgstr "Agent browsing"
+
+msgid "br.readWord"
+msgstr "read"
+
+msgid "br.waiting"
+msgstr "Waiting for you"
+
+msgid "br.queued"
+msgstr "{n} queued"
+
+msgid "br.queuedOne"
+msgstr "Queued"
+
+msgid "br.inMain"
+msgstr "{n} pages in the main pane"
+
+msgid "br.summaryPre"
+msgstr "Read "
+
+msgid "br.summaryUsedPre"
+msgstr "Used "
+
+msgid "br.summaryPost"
+msgstr " pages"
+
+msgid "br.loading"
+msgstr "Loading"
+
+msgid "br.reading"
+msgstr "Reading"
+
+msgid "br.search"
+msgstr "Search results"
+
+msgid "br.failed"
+msgstr "Couldn't open: {why}"
+
+msgid "br.fail.timeout"
+msgstr "The connection timed out."
+
+msgid "br.fail.dns"
+msgstr "This site could not be found."
+
+msgid "br.fail.network"
+msgstr "The connection failed."
+
+msgid "br.fail.http_4xx"
+msgstr "The site returned an error."
+
+msgid "br.fail.http_5xx"
+msgstr "The site is having trouble."
+
+msgid "br.fail.h"
+msgstr "Couldn't open {host}"
+
+msgid "br.retry"
+msgstr "Retry"
+
+msgid "br.row.blocked"
+msgstr "The agent doesn't open this site"
+
+msgid "br.need.login"
+msgstr "Sign-in needed"
+
+msgid "br.need.submit"
+msgstr "Ready to submit"
+
+msgid "br.need.captcha"
+msgstr "Robot check needed"
+
+msgid "br.need.file"
+msgstr "File needed"
+
+msgid "br.relay"
+msgstr "Stopped at a redirect page, no content"
+
+msgid "br.notRead"
+msgstr "Not read"
+
+msgid "br.youPress"
+msgstr "Your turn"
+
+msgid "br.userOp"
+msgstr "You're in control"
+
+msgid "br.handback"
+msgstr "Hand back to agent"
+
+msgid "br.ask.login.h"
+msgstr "This page needs a sign-in"
+
+msgid "br.ask.submit.h"
+msgstr "You press submit"
+
+msgid "br.ask.action.h"
+msgstr "You press this one"
+
+msgid "br.ask.file.h"
+msgstr "You pick the file to upload"
+
+msgid "br.ask.consent.h"
+msgstr "This page wants your cookie choice"
+
+msgid "br.ask.captcha.h"
+msgstr "A robot check is in the way"
+
+msgid "br.ask.p"
+msgstr "You type any passwords. While you're in control, the agent pauses and doesn't read this page."
+
+msgid "br.ask.captcha.p"
+msgstr "You solve the check yourself; the agent never does."
+
+msgid "br.ask.skip"
+msgstr "Skip"
+
+msgid "br.ask.ddg"
+msgstr "Use DuckDuckGo"
+
+msgid "br.ask.meLogin"
+msgstr "I'll sign in"
+
+msgid "br.ask.meSubmit"
+msgstr "I'll press it"
+
+msgid "br.ask.meFile"
+msgstr "I'll pick the file"
+
+msgid "br.ask.meVerify"
+msgstr "I'll do the check"
+
+msgid "br.dl"
+msgstr "Download blocked: {name} was not saved to this computer."
+
+msgid "br.blk.domain.h"
+msgstr "The agent doesn't open this site"
+
+msgid "br.blk.domain.p"
+msgstr "Exchange and broker account areas and bank sites are never operated by the agent."
+
+msgid "br.blk.list.p"
+msgstr "This site's terms don't allow AI agents to read it."
+
+msgid "br.blk.blave.p"
+msgstr "The agent reads Blave data directly, not through the website."
+
+msgid "br.blk.addr.h"
+msgstr "This address was blocked"
+
+msgid "br.blk.addr.p"
+msgstr "Local, private-network and non-http(s) addresses are never opened."
+
+msgid "br.openSystem"
+msgstr "Open in system browser"
+
+msgid "br.back"
+msgstr "Back"
+
+msgid "br.reload"
+msgstr "Reload"
+
+msgid "br.url.aria"
+msgstr "Address"
+
+msgid "br.openLive"
+msgstr "Open live page"
+
+msgid "br.openSnap"
+msgstr "View snapshot"
+
+msgid "br.snapMeta"
+msgstr "Snapshot · captured {time}"
+
+msgid "br.snapGone.h"
+msgstr "This snapshot has been cleared"
+
+msgid "br.snapGone.p"
+msgstr "You can open the original address in your system browser."
+
+msgid "br.gone.h"
+msgstr "This page was closed"
+
+msgid "br.gone.p"
+msgstr "No snapshot was kept. You can open the original address in your system browser."
+
+msgid "br.gone.snap.h"
+msgstr "This page was saved as a snapshot"
+
+msgid "br.gone.snap.p"
+msgstr "View the snapshot, or reload to open the live page."
+
+msgid "br.set.switch"
+msgstr "Built-in browser"
+
+msgid "br.set.lead"
+msgstr "The agent can open web pages on this computer to look things up, and every page it opens shows up in the chat. It never opens exchange or broker account areas or bank sites; you press sign-in, submit and pay yourself."
+
+msgid "br.set.clear"
+msgstr "Clear browsing data"
+
+msgid "br.set.cleared"
+msgstr "Cleared"
+
+msgid "br.set.busy"
+msgstr "A turn is running; clear it after it ends"
+
+msgid "br.ask.p.check"
+msgstr "Check it once more before you press."
+
+msgid "br.ask.p.pause"
+msgstr "While you're in control, the agent pauses and doesn't read this page."
+
+msgid "br.ask.p.file"
+msgstr "You pick the file; the agent can't see the files on your computer."
+
+msgid "br.ask.p.consent"
+msgstr "You choose the cookie settings. While you're in control, the agent pauses and doesn't read this page."
+
+msgid "br.blk.like.p"
+msgstr "{host} looks like {like} and may be a phishing site."
+
+msgid "br.blk.mixed.p"
+msgstr "{host} mixes letters from different alphabets and may be a phishing site."
+
+msgid "br.blk.oauth.p"
+msgstr "Sign-in and app-authorization pages are yours to handle; the agent doesn't open them."
+
+msgid "br.compiling"
+msgstr "Compiling the report"
+
+msgid "br.act.outline"
+msgstr "Reading the outline"
+
+msgid "br.act.links"
+msgstr "Reading the links"
+
+msgid "br.act.meta"
+msgstr "Reading the title and date"
+
+msgid "br.act.snapshot"
+msgstr "Looking at the page structure"
+
+msgid "br.pressing"
+msgstr "Pressing {key}"
+
+msgid "cap.venue"
+msgstr "Capital"
+
+msgid "cap.group.tw"
+msgstr "Taiwan stocks"
+
+msgid "cap.title"
+msgstr "Connect Capital"
+
+msgid "cap.meta"
+msgstr "Can place orders and read your account. Connects one at a time."
+
+msgid "cap.id"
+msgstr "National ID number"
+
+msgid "cap.pw"
+msgstr "Trading password"
+
+msgid "cap.store.q"
+msgstr "Where is this stored?"
+
+msgid "cap.storeCloud"
+msgstr "Your ID number and trading password are kept in a separate file on your cloud machine, used only by the Capital order program, and never uploaded."
+
+msgid "cap.beforeC"
+msgstr "This installs Capital's order components on your cloud machine."
+
+msgid "cap.go"
+msgstr "Start Setup"
+
+msgid "cap.needWin"
+msgstr "Capital needs a Windows machine."
+
+msgid "cap.s.setup"
+msgstr "Install Capital components"
+
+msgid "cap.s.setupRun"
+msgstr "Installing…"
+
+msgid "cap.s.setupFail"
+msgstr "The Capital components didn't install."
+
+msgid "cap.tryAgain"
+msgstr "Try Again"
+
+msgid "cap.c.pick"
+msgstr "Certificate"
+
+msgid "cap.c.pfx"
+msgstr "Import an existing certificate file"
+
+msgid "cap.c.pfxM"
+msgstr "You already have a Capital certificate on your own Windows PC."
+
+msgid "cap.c.rdp"
+msgstr "Use Remote Desktop Instead"
+
+msgid "cap.c.rdpDo"
+msgstr "Connect to your machine over Remote Desktop and run Capital's certificate wizard there."
+
+msgid "cap.c.other"
+msgstr "Choose Another Way"
+
+msgid "cap.c.unlockDo"
+msgstr "After unlocking you get one more try; if it still fails, change the password with Capital."
+
+msgid "cap.unlocked"
+msgstr "I've Unlocked It"
+
+msgid "cap.c.verifyDo"
+msgstr "Capital requires a one-time connection check. On your own Windows PC, open Capital's check tool, sign in, press “模擬國內證券下單” and “模擬國內期貨下單”, then “查詢是否已驗證”."
+
+msgid "cap.pfx.how"
+msgstr "On your Windows PC, open Capital's certificate wizard and choose “匯出憑證” (Export certificate)."
+
+msgid "cap.pfx.dl"
+msgstr "Get the Wizard from Capital's Site"
+
+msgid "cap.pfx.file"
+msgstr "Certificate file"
+
+msgid "cap.pfx.pick"
+msgstr "Choose File"
+
+msgid "cap.pfx.pw"
+msgstr "Export password"
+
+msgid "cap.pfx.pwHint"
+msgstr "The one you set when exporting, not your trading password."
+
+msgid "cap.pfx.e2e"
+msgstr "The file and password are encrypted on this computer before they leave. Only your machine can decrypt them; Blave can't read them in transit. They're deleted after import."
+
+msgid "cap.pfx.go"
+msgstr "Upload and Import"
+
+msgid "cap.pfx.importing"
+msgstr "Importing…"
+
+msgid "cap.pfx.errPw"
+msgstr "That export password is wrong."
+
+msgid "cap.pfx.errFile"
+msgstr "This isn't a certificate file (.pfx)."
+
+msgid "cap.pfx.errIssuer"
+msgstr "This certificate wasn't issued by Capital."
+
+msgid "cap.pfx.errExpired"
+msgstr "This certificate has expired. Renew it in Capital's wizard, then export again."
+
+msgid "cap.pfx.errOlder"
+msgstr "Your machine already has a newer Capital certificate; this file is older."
+
+msgid "cap.pfx.errRead"
+msgstr "Couldn't read this file."
+
+msgid "cap.pfx.errKey"
+msgstr "The upload didn't finish. Upload again."
+
+msgid "cap.pfx.errImport"
+msgstr "The certificate didn't import."
+
+msgid "cap.s.probe"
+msgstr "Checking sign-in…"
+
+msgid "cap.s.probeIdle"
+msgstr "Certificate imported; sign-in not checked yet."
+
+msgid "cap.recheck"
+msgstr "Check Again"
+
+msgid "cap.s.pw"
+msgstr "Check sign-in"
+
+msgid "cap.err.pw"
+msgstr "Capital says the trading password is wrong."
+
+msgid "cap.err.pwLocked"
+msgstr "Capital has locked your trading password."
+
+msgid "cap.err.pwChange"
+msgstr "Capital still refuses this password. Change it with Capital, then enter it again here."
+
+msgid "cap.err.noCreds"
+msgstr "Your machine can't find the ID number and trading password. Enter them again."
+
+msgid "cap.s.verify"
+msgstr "Connection check"
+
+msgid "cap.retry"
+msgstr "Check Again"
+
+msgid "cap.s.sign"
+msgstr "Sign the API agreement"
+
+msgid "cap.s.signDo"
+msgstr "Sign on Capital's site for each market you'll trade: one for securities, one for futures."
+
+msgid "cap.s.signOpen"
+msgstr "Open Signing Page"
+
+msgid "cap.s.signDone"
+msgstr "I've Signed"
+
+msgid "cap.s.signNone"
+msgstr "No account readable yet. It may not be signed, or Capital hasn't enabled it yet."
+
+msgid "cap.s.read"
+msgstr "Read account"
+
+msgid "cap.s.readRun"
+msgstr "Reading…"
+
+msgid "cap.s.certExp"
+msgstr "Expires {date}"
+
+msgid "cap.acct.ts"
+msgstr "Securities"
+
+msgid "cap.acct.tf"
+msgstr "Futures"
+
+msgid "cap.acct.exp"
+msgstr "Certificate expires"
+
+msgid "cap.acct.read"
+msgstr "Enabled"
+
+msgid "cap.tfMissing"
+msgstr "If you have a futures account, sign the futures agreement too."
+
+msgid "cap.finish"
+msgstr "Done"
+
+msgid "cap.pending"
+msgstr "Setting up"
+
+msgid "cap.continue"
+msgstr "Continue"
+
+msgid "cap.err.busy"
+msgstr "Another step is still running on your machine. Try again when it finishes."
+
+msgid "cap.err.credsUnknown"
+msgstr "Your machine didn't answer, so it's unclear whether this was saved. It's safe to press again."
+
+msgid "cap.err.idFormat"
+msgstr "That ID number doesn't look right."
+
+msgid "cap.err.notReady"
+msgstr "The Capital components aren't installed yet. Upload once installation finishes."
+
+msgid "cap.err.noMove"
+msgstr "Your machine hasn't reported progress yet."
+
+msgid "cap.err.generic"
+msgstr "Your machine didn't accept this step."
+
+msgid "cap.err.certOld"
+msgstr "An expired Capital certificate on your machine is blocking sign-in. Importing a new certificate file removes it."
+
+msgid "cap.err.certUnusable"
+msgstr "The Capital certificate on your machine can't be used. Import the certificate file again."
+
+msgid "cap.err.certExpired"
+msgstr "The Capital certificate has expired. Renew it on your Windows PC, then import the new file."
+
+msgid "cap.err.timeout"
+msgstr "Capital didn't respond in time."
+
+msgid "cap.err.vehicle"
+msgstr "The sign-in program on your machine didn't start."
+
+msgid "cap.err.apiVersion"
+msgstr "The Capital components on your machine are too old and need reinstalling."
+
+msgid "cap.err.unknownCode"
+msgstr "Capital returned an unrecognized result (code {code})."
+
+msgid "cap.err.worker"
+msgstr "The Capital order program didn't start."
+
+msgid "cap.err.snapshot"
+msgstr "The Capital order program signed in but couldn't read the account."
+
+msgid "cap.err.probeNotOk"
+msgstr "Sign-in hasn't passed yet."
+
+msgid "cap.ho.saved"
+msgstr "Your ID number and trading password are saved on your cloud machine. It can't place orders yet."
+
+msgid "cap.ho.left"
+msgstr "Three steps left, which you'll do with the agent:"
+
+msgid "cap.ho.s1"
+msgstr "Get a Capital certificate (the wizard over Remote Desktop, plus an SMS code)"
+
+msgid "cap.ho.s2"
+msgstr "Run the API connection check (Capital's simulated order test)"
+
+msgid "cap.ho.s3"
+msgstr "Sign the API agreement online"
+
+msgid "cap.ho.go"
+msgstr "Let the Agent Walk You Through It"
+
+msgid "cap.ho.prompt"
+msgstr "I just saved my Capital ID number and trading password to my cloud machine from the desktop app. Please walk me through the rest of the setup on the cloud machine: the certificate, the API connection check and the agreement. When done, confirm read-only that the account can be read, and don't place any orders yet."
+
+msgid "cap.ho.promptRdp"
+msgstr "I want to get my Capital certificate on the cloud machine over Remote Desktop; my ID number and trading password are already saved. Please walk me through the certificate, the API connection check and the agreement. When done, confirm read-only that the account can be read, and don't place any orders yet."
+
+msgid "cap.ho.promptVerify"
+msgstr "My Capital certificate is already on the cloud machine, but I am stuck at Capital's API connection check. Please walk me through running the check tool on the cloud machine over Remote Desktop. When done, confirm read-only that the account can be read, and don't place any orders yet."
+
+msgid "cap.c.verifyDl"
+msgstr "Download the Check Tool"
+
+msgid "cap.s.verifyNot"
+msgstr "Capital hasn't recorded this check yet."
+
+msgid "cap.pfx.replace"
+msgstr "This replaces any older Capital certificate for the same ID number on your machine."
+
+msgid "cap.s.querying"
+msgstr "Checking…"
+
+msgid "cap.ho.promptRead"
+msgstr "My Capital setup in the desktop app is stuck at the “Read accounts” step. Please check the Capital setup status on the cloud machine and help me fix it. When done, confirm read-only that the account can be read, and don't place any orders yet."
+
+msgid "br.openPanel"
+msgstr "View pages"
+
+msgid "br.closePanel"
+msgstr "Close"
+
+msgid "br.listShow"
+msgstr "Show list"
+
+msgid "br.listHide"
+msgstr "Hide list"
+
+msgid "br.readDone"
+msgstr "Read"
+
+msgid "br.need.confirm"
+msgstr "Address check needed"
+
+msgid "br.ask.confirm.h"
+msgstr "Open this address?"
+
+msgid "br.ask.p.confirm"
+msgstr "This site hasn't come up this turn, and the address carries a block of data — a page may be steering the agent into sending out what it read. Check the address bar before opening."
+
+msgid "br.ask.openAnyway"
+msgstr "Open anyway"

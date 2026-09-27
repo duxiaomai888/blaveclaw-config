@@ -236,6 +236,7 @@ function cloudHost() {
 /* 雲端的寫入那一支(cloudcmd.js;線 B 第二刀)。跟讀那支分開:兩邊走不同的端點與速率桶,而且這支的
    owner/gen 要在登出時單獨作廢(cloudcmd.js:95)。憑證同樣只在這個行程裡。 */
 let _cloudCmd = null;
+let _capital = null;   // 雲端群益開通(cloud_capital.js):選好的 pfx 只在這一份記憶體裡
 function cloudCmd() {
   if (!_cloudCmd) _cloudCmd = require("./cloudcmd").createCloudCmd({
     apiBase: API_BASE, post: (u, b) => postJSON(u, b),
@@ -421,6 +422,7 @@ async function signOutBlave() {
   clearToken();
   if (_cloud) _cloud.reset();   // 登出:不留上一個帳號的部位在記憶體裡
   if (_cloudCmd) _cloudCmd.reset();   // 在途的雲端指令:回應回來時丟掉(它是上一個人的)
+  if (_capital) _capital.forget();   // 選好還沒上傳的群益憑證檔:是上一個人的
   if (_mcp) _mcp.reset();       // 接入碼也是:伺服器那邊 /revoke 會撤掉它,這裡把記憶體裡的丟掉、作廢在途的請求
   lastAcct = null;
   return { revoked };
@@ -966,6 +968,7 @@ function deleteSession(id) {
     db.prepare("DELETE FROM turns WHERE session_id = ?").run(id);
     db.prepare("DELETE FROM session_meta WHERE session_id = ?").run(id);
     try { fs.rmSync(path.join(IMG_DIR, id), { recursive: true, force: true }); } catch (_) { /* 圖刪不掉不擋 */ }
+    try { fs.rmSync(path.join(BASE, "state", "browser-snapshots", id), { recursive: true, force: true }); } catch (_) { /* 瀏覽器快照同上 */ }
     return true;
   } catch (_) { return false; } finally { db.close(); }
 }
@@ -1482,6 +1485,32 @@ const SAFE_ID = /^[A-Za-z0-9][\w.:\/-]{0,127}$/;
 const safeId = (v) => (typeof v === "string" && SAFE_ID.test(v) ? v : null);
 
 let activeTurn = null, turnStarting = false;
+/* 停止鈕:每一輪一個旗標檔(runtime/turn_stop.py 的 BLAVE_TURN_INTERRUPT_FILE)。建檔 = 要停;runtime 輪詢到就殺掉這一輪
+   的工具與引擎、照「已停止」收尾。只動這一輪的子行程樹——常駐程式、策略、對帳器不是它的子行程。路徑在送出當下就定好,
+   spawn 之前按停止也寫得進去(runtime 一起來就看到)。runtime 卡死時的保險:agent_turn 沉默滿 STOP_KILL_MS 才殺它。
+   不看按下後過了多久——runtime 在等平倉腳本跑完(Codex 的工具寫進引擎的管線,引擎不能先死)時每秒送 ping;
+   收到 done 就不殺(之後是寫歷史與壓縮摘要,砍了只會丟那一段)。 */
+let turnStopFile = null, turnFinalized = false, turnLastOut = 0;
+const STOP_KILL_MS = 5000;
+function newTurnStop() {
+  if (turnStopFile) { try { fs.rmSync(turnStopFile, { force: true }); } catch (_) { /* 換新檔名,留著也無害 */ } }
+  turnStopFile = path.join(BASE, "state", "turn_stop", crypto.randomBytes(8).toString("hex"));
+  turnFinalized = false;
+}
+function stopTurn() {
+  if (!(activeTurn || turnStarting) || !turnStopFile) return false;
+  try { fs.mkdirSync(path.dirname(turnStopFile), { recursive: true }); fs.writeFileSync(turnStopFile, ""); } catch (_) { return false; }
+  const file = turnStopFile;
+  let seen = activeTurn;
+  const arm = () => setTimeout(() => {
+    if (turnStopFile !== file || turnFinalized) return;   // 已經換下一輪 / runtime 已經收尾
+    if (activeTurn && activeTurn === seen && Date.now() - turnLastOut >= STOP_KILL_MS) { try { activeTurn.kill(); } catch (_) { /* 已經不在了 */ } return; }
+    seen = activeTurn;
+    if (seen || turnStarting) arm();   // 剛起來或還沒起來:再給它一段
+  }, STOP_KILL_MS);
+  arm();
+  return true;
+}
 /* 本機常駐程式的宿主(daemon.js)。環境只給 daemon 需要的:路徑、PATH、K 線來源——**不含**帳號 token
    與任何 Blave 憑證(策略碼跑在它底下)。引擎還沒裝好(沒有 venv)就不起。 */
 let _tradeHost = null;
@@ -1556,6 +1585,23 @@ function mcpCode() {
     getCreds: () => { const token = loadToken(); return token ? { token, appSecret: loadAppSecret() } : null; } });
   return _mcp;
 }
+/* 內建瀏覽器(shell/browser/;spec .claude/output/specs/desktop-browser-agent-tools-2026-09-26.md)。
+   agent 經本機 MCP(`blave_browser`,127.0.0.1、每回合一顆 token)操作;分頁是獨立 partition 的 WebContentsView,renderer 只收事件。
+   掛不掛:電腦版本機 + 設定開著(預設開),**不看登入**;token 跟 `blave` 那顆一樣只經單次設定檔 / Codex 子行程環境交給 CLI。 */
+let _browser = null;
+const BROWSER_PREFS = () => path.join(app.getPath("userData"), "browser.json");
+function browser() {
+  if (!_browser) _browser = require("./browser").createBrowser({
+    electron: require("electron"), stateDir: path.join(BASE, "state", "browser-snapshots"), reportsDir: RPT_DIR(), version: app.getVersion(),
+    getWin: () => imgWin || BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && isOurPageUrl(w.webContents.getURL())) || null,
+    uiLang: () => (/^zh/i.test(app.getLocale()) ? "zh" : "en"),
+    track: (name) => tm().track("feature_used", { name }),
+    reducedMotion: () => { try { return !!require("electron").systemPreferences.getAnimationSettings().prefersReducedMotion; } catch (_) { return false; } },
+    loadPrefs: () => { try { return JSON.parse(fs.readFileSync(BROWSER_PREFS(), "utf8")); } catch (_) { return null; } },
+    savePrefs: (p) => { try { fs.writeFileSync(BROWSER_PREFS(), JSON.stringify({ enabled: !!p.enabled }), { mode: 0o600 }); } catch (_) { /* 存不了就只在這次生效 */ } },
+  });
+  return _browser;
+}
 /* 這一輪帶哪些憑證(純函式;tests/check_shell_data_env.js 從原文切出來跑)。三顆各看各的:
      proxyToken(帳號 token,會燒 Blave AI 額度)= **連的是 Blave AI** 而且有登入;
      dataKey(縮權的資料 key,不能呼叫 LLM)= **有登入而且帳號含資料**,不看連的是誰——自帶 Claude Code / Codex 的人登入後也拿得到資料。
@@ -1604,6 +1650,12 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
   // 等於能替自己加掛 MCP server。本案不改變這點,另案處理。
   let mcpFile = null, mcpMount = null;
   if (plan.mcp) { mcpMount = await mcpCode().get(); if (mcpMount) mcpFile = require("./mcpcode").writeConfig(mcpDir(), mcpMount); }
+  // 內建瀏覽器:同一份單次設定檔多一個 `blave_browser`(兩個 server 可以只有其一)。runtime 靠 --mcp-servers 分別知道掛了哪幾個
+  let brMount = null;
+  try { brMount = await browser().beginTurn(win, sessionId); } catch (_) { brMount = null; }
+  if (brMount) { require("./mcpcode").removeConfig(mcpFile); mcpFile = require("./mcpcode").writeConfig(mcpDir(), mcpMount, brMount); }
+  const mcpServers = mcpFile ? [...(mcpMount ? ["blave"] : []), ...(brMount ? ["blave_browser"] : [])] : [];
+  const turnDone = () => { require("./mcpcode").removeConfig(mcpFile); if (_browser) _browser.endTurn(); };
   const env = {
     // venv/bin 放最前面:Claude Code 的 Bash 直接繼承這個 PATH,`python3` 就是我們的。
     // 但這對 Codex 無效——它用登入 shell(`zsh -lc`)跑指令,profile 會把 PATH 重排
@@ -1617,7 +1669,8 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
     ...(acct ? { BLAVE_PROXY_TOKEN: acct } : {}),
     // 接入碼只在 Codex 引擎進環境(Claude 走 --mcp-config 的檔)。Codex 預設會把整份環境(含 *TOKEN*)傳給 agent 跑的
     // shell,codex_engine 掛上時用 filters 只拔這一個、並關掉會繞過 filters 的 shell_snapshot
-    ...(useCodex && mcpFile ? { BLAVE_MCP_TOKEN: mcpMount.accessCode, BLAVE_MCP_URL: mcpMount.url } : {}),
+    ...(useCodex && mcpFile && mcpMount ? { BLAVE_MCP_TOKEN: mcpMount.accessCode, BLAVE_MCP_URL: mcpMount.url } : {}),
+    ...(useCodex && mcpFile && brMount ? { BLAVE_BROWSER_TOKEN: brMount.token, BLAVE_BROWSER_URL: brMount.url } : {}),
     // Keychain/暫存都認人:少了 USER,claude CLI 會回「Not logged in」(實測 repro-2/3)
     USER: process.env.USER || os.userInfo().username,
     LOGNAME: process.env.LOGNAME || os.userInfo().username,
@@ -1625,6 +1678,7 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
     BLAVE_AGENT_BASE: BASE, BLAVE_AGENT_WORKSPACE: WS, BLAVE_AGENT_HOME: BASE,
     BLAVE_AGENT_STATE: path.join(BASE, "state"),
     BLAVE_AGENT_DB: path.join(BASE, "state", "session.db"),
+    ...(turnStopFile ? { BLAVE_TURN_INTERRUPT_FILE: turnStopFile } : {}),
     // K 線走 Binance 公開 API(桌面版沒有 Blave 資料訂閱)。獨立、明確 opt-in 的
     // 變數,不用「有沒有 BLAVE_PROXY_TOKEN」推論——機隊上的 cron/manager 不一定
     // 帶著那顆 token,推論錯就是整支機隊無聲換資料源。
@@ -1659,29 +1713,31 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
     ...viewingArgs(viewing),
     // argv 上只有設定檔的**路徑**(碼在檔案裡,0600、workspace 以外、這一輪結束就刪);runtime 只在電腦版(LocalSink)認這個旗標
     ...(mcpFile ? ["--mcp-config=" + mcpFile] : []),
+    ...(mcpServers.length ? ["--mcp-servers=" + mcpServers.join(",")] : []),
     // 用戶打的字**不進 argv**(稽核 S5):同一台電腦上任何人 `ps` 都看得到命令列,而聊天貼 key 是支援的流程。走 stdin。
     // runtime 往下那一段本來就不走 argv(Claude 走 SDK 的 stream-json stdin、Codex 走 `exec -`)。
     "--message-stdin", "--", sessionId,
-  ], { env: childEnv(env), cwd: WS, windowsHide: true }); } catch (err) { require("./mcpcode").removeConfig(mcpFile); throw err; }
-  child.on("error", () => require("./mcpcode").removeConfig(mcpFile));
+  ], { env: childEnv(env), cwd: WS, windowsHide: true }); } catch (err) { turnDone(); throw err; }
+  child.on("error", () => turnDone());
   child.stdin.on("error", () => { /* 子行程一起來就死(EPIPE):close 事件會把失敗交給畫面 */ });
-  try { child.stdin.end(message); } catch (err) { try { child.kill(); } catch (_) { /* 已經不在了 */ } require("./mcpcode").removeConfig(mcpFile); throw err; }   // 不留一支卡在讀 stdin 的子行程
+  try { child.stdin.end(message); } catch (err) { try { child.kill(); } catch (_) { /* 已經不在了 */ } turnDone(); throw err; }   // 不留一支卡在讀 stdin 的子行程
   activeTurn = child;
   let buf = "";
   child.stdout.on("data", (d) => {
+    turnLastOut = Date.now();
     buf += d.toString();
     let i;
     while ((i = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, i); buf = buf.slice(i + 1);
       if (line.startsWith("@@BLAVE@@")) {
-        try { win.webContents.send("turn-event", JSON.parse(line.slice(9))); } catch (_) {}
+        try { const c = JSON.parse(line.slice(9)); if (c && c.type === "done") turnFinalized = true; win.webContents.send("turn-event", c); } catch (_) {}
       }
     }
   });
   let errTail = "";
   child.stderr.on("data", (d) => { errTail = (errTail + d.toString()).slice(-2000); });
   child.on("close", (code) => {
-    require("./mcpcode").removeConfig(mcpFile);   // 這一輪結束:設定檔(裡面是接入碼)立刻刪
+    turnDone();   // 這一輪結束:設定檔(裡面是接入碼 / 瀏覽器 token)立刻刪,瀏覽器 token 作廢
     activeTurn = null;
     // 視窗可能已經關掉了(結束時回合才收尾):送到已銷毀的 webContents 會丟例外
     if (!win.isDestroyed()) win.webContents.send("turn-end", { code, errTail: code === 0 ? "" : errTail });
@@ -1878,6 +1934,21 @@ app.whenReady().then(() => {
     let r = null; try { r = await sendTrustedCreds(built.secrets); } catch (_) { /* 當沒送到 */ }
     return CC.interpretVenueBind(r, built.secrets);
   }, { ok: false, code: "NOT_ALLOWED", detail: {} });
+  /* 雲端主機的群益開通(cloud_capital.js;畫面 renderer/capital.js)。pfx 與匯出密碼只在這個行程裡封裝,renderer 只拿得到檔名與代號;
+     指令只收固定那幾步。送完不管結果都要一份新狀態:長步驟的結果在主機回報的 capital_connect 裡,不在回條裡 */
+  const capital = () => _capital || (_capital = require("./cloud_capital").createCapital({
+    send: (cmd, args, secrets) => cloudCmd().send(cmd, args, secrets),
+    pick: async () => { const w = BrowserWindow.getAllWindows()[0]; const r = await dialog.showOpenDialog(w, { properties: ["openFile"], filters: [{ name: "PFX", extensions: ["pfx", "p12"] }] }); return r.canceled ? null : r.filePaths[0]; },
+    stat: (p) => fs.statSync(p), readFile: (p) => fs.readFileSync(p), basename: (p) => path.basename(p),
+    after: () => { cloudHost().start(); cloudHost().refresh(true).catch(() => {}); },
+  }));
+  const capDenied = { code: "NOT_ALLOWED" };
+  handle("capital-pick", () => capital().pickPfx(), capDenied);
+  handle("capital-creds", (_e, a) => capital().saveCreds({ id: a && a.id, pw: a && a.pw }), capDenied);
+  handle("capital-step", (_e, name) => capital().step(String(name || "")), capDenied);
+  handle("capital-upload", (_e, pw) => capital().upload(pw), capDenied);
+  handle("capital-unbind", () => capital().unbind(), capDenied);
+  handle("capital-forget", () => { if (_capital) _capital.forget(); return true; }, false);
   // Binance 真錢連接:四支都只收自家頁面。金鑰只在 binance-connect 經過一次,形狀先驗(binance_link.keyShapeOk),不回傳、不 log
   ipcMain.handle("binance-ip", (e) => (fromOurPage(e) ? binanceLink().ip() : null));
   ipcMain.handle("binance-state", (e) => (fromOurPage(e) ? binanceLink().state() : null));
@@ -1899,6 +1970,25 @@ app.whenReady().then(() => {
   ipcMain.handle("telemetry-set", (e, on) => { if (!fromOurPage(e)) return false; tm().setEnabled(on === true); return tm().isEnabled(); });
   // 功能被使用(renderer 的 trackFeature):name 由 telemetry.js 對 feature_used 白名單驗,renderer 給的字不可信、不在表上就整則不送
   ipcMain.on("track-feature", (e, name) => { if (fromOurPage(e)) tm().track("feature_used", { name }); });
+  /* 內建瀏覽器(renderer/browser.js):畫面只送分頁 id、中欄的 bounds 與用戶的動作;網址只有用戶自己在網址列打的那一條(照樣過網路層政策)。
+     頁面物件、token、網頁內容都不進 renderer(縮圖與快照是圖片與文字)。 */
+  handle("browser-expand", (_e, id, b) => browser().expand(id, b), null);
+  ipcMain.on("browser-bounds", (e, b) => { if (fromOurPage(e) && _browser) _browser.bounds(b); });
+  handle("browser-collapse", () => { if (_browser) _browser.collapse(); return true; }, false);
+  handle("browser-takeover", (_e, id) => { browser().takeover(String(id)); return true; }, false);
+  handle("browser-handback", (_e, id) => { browser().handback(String(id)); return true; }, false);
+  handle("browser-user-done", (_e, id, choice) => { browser().userDone(id, choice); return true; }, false);
+  handle("browser-navigate", (_e, id, url) => browser().navigate(id, url), { error: "NOT_ALLOWED" });
+  handle("browser-reload", (_e, id) => browser().reload(id), false);
+  handle("browser-open-live", (_e, sid, snap) => (okSessionId(sid) ? browser().openLive(sid, snap) : null), null);
+  handle("browser-show-live", (_e, url) => browser().showLive(url), null);
+  handle("browser-snapshot", (_e, sid, snap) => (okSessionId(sid) ? browser().snapshot(sid, snap) : null), null);
+  handle("browser-history", (_e, sid) => (okSessionId(sid) ? browser().history(sid) : []), []);
+  ipcMain.on("browser-block-visible", (e, on) => { if (fromOurPage(e) && _browser) _browser.setBlockVisible(on === true); });
+  handle("browser-open-external", (_e, id) => { const u = _browser && _browser.externalUrl(id); return u ? openWebSafe(u) : false; }, false);
+  handle("browser-prefs", () => browser().prefs(), { enabled: false });
+  handle("browser-prefs-set", (_e, p) => browser().setPrefs({ enabled: !!(p && p.enabled === true) }), null);
+  handle("browser-clear", () => (activeTurn ? false : browser().clearData()), false);
   /* 自帶資料來源(datasrc.js;設定 › 資料來源)。金鑰的值只從 renderer 的表單經過 datasrc-save 一次,寫進 workspace 的 .env(拿 .env.lock);
      之後任何一支都不把值交回去——list 只有名稱與欄位名。四支都走 handle()(只收自家頁面,拒絕時回各自的形狀);參數在 datasrc.js 裡驗(名稱白名單、值不含換行與引號)。
      不 log、不進 argv / 環境、不寫 userData。這些名字都在 DATA_ 命名空間,機器端不把它們當交易所:永遠不會拿去下單。 */
@@ -1930,6 +2020,7 @@ app.whenReady().then(() => {
   handle("sign-out-blave", () => signOutBlave());
   handle("agent-login", (_e, kind) => agentLogin(String(kind || "")));
   handle("cancel-agent-login", () => cancelAgentLogin());
+  handle("stop-turn", () => stopTurn(), false);
   ipcMain.handle("send-message", async (e, payload) => {
     if (!fromOurPage(e)) return { busy: true };   // 會 spawn agent、花 AI 額度:只收自家頁面
     if (activeTurn || turnStarting) return { busy: true };
@@ -1939,6 +2030,7 @@ app.whenReady().then(() => {
     // runTurn 要先 await 登入 shell 的 PATH 與 account_status 才 spawn;這段期間 activeTurn 還是 null,
     // 不另外立旗標的話連按兩下會 spawn 兩顆 agent 搶同一個 session.db(下面補問版本閘的那段 await 也算在內)
     turnStarting = true;
+    newTurnStop();
     // 最低版本閘:只擋 Blave AI;連自己 CLI 的人照常聊
     try {
       const kind = (loadConnection() || {}).kind;
@@ -1952,28 +2044,33 @@ app.whenReady().then(() => {
     }).finally(() => { turnStarting = false; });
     return { started: true };
   });
+  // 選單字由畫面交過來(trPushLabels):收件的 handler 要在視窗之前掛好,而且 app 選單先重建、再動選單列——
+  // 以前掛在一串啟動步驟的最後,中間任何一步拋例外 handler 就沒掛上,app 選單停在英文(File／Edit／View…)、畫面其他都正常
+  ipcMain.on("trade-labels", (e, labels) => {
+    if (!fromOurPage(e) || !labels || typeof labels !== "object") return;
+    for (const k of Object.keys(tmLabels)) if (typeof labels[k] === "string" && labels[k] && labels[k].length <= 400) tmLabels[k] = labels[k];
+    if (labels.lang === "zh" || labels.lang === "en") uiLang = labels.lang;   // 只拿來組官網網址的語言段:白名單兩個值
+    startStep("app menu", appMenuSync);
+    startStep("tray", traySync);
+  });
   createWindow();
+  startStep("app menu", appMenuSync);
   // 要在常駐程式起來之前:它 import 的就是 workspace 裡的 lib。只有拿到單一實例鎖的那一份才做——
   // 第二份 app 在結束前也會走到 whenReady,不能讓它把新 lib 拷進第一份正在下單的 workspace(稽核 S7)
-  if (app.hasSingleInstanceLock()) syncOfficialOnUpdate();
-  tradeStartIfReady();   // 引擎早就裝好的人:一開 app 就有狀態可看(對帳器仍要他自己按啟動)
+  if (app.hasSingleInstanceLock()) startStep("workspace sync", syncOfficialOnUpdate);
+  startStep("trade host", tradeStartIfReady);   // 引擎早就裝好的人:一開 app 就有狀態可看(對帳器仍要他自己按啟動)
   // 視窗回前景 = 用戶可能剛在瀏覽器綁完卡、開完主機:「含不含資料」的答案作廢,下一輪重查
   // (不在這裡打 api——跟 LLM 共用每分鐘 30 次的桶,而且畫面那邊有卡片時本來就會重查)
   app.on("browser-window-focus", () => { lastAcct = null; p1Badge = 0; if (app.dock) app.dock.setBadge(""); cloudHost().setForeground(true); });
   app.on("browser-window-blur", () => cloudHost().setForeground(false));   // 背景時輪詢放慢到 60 秒
   app.on("activate", () => showMain());   // 點 Dock:視窗被紅燈收起來的話把它叫回來
-  trayStart();
-  tm().start();
-  updater().start();
-  minGate().start();
-  appMenuSync();
-  ipcMain.on("trade-labels", (e, labels) => {
-    if (!fromOurPage(e) || !labels || typeof labels !== "object") return;
-    for (const k of Object.keys(tmLabels)) if (typeof labels[k] === "string" && labels[k] && labels[k].length <= 400) tmLabels[k] = labels[k];
-    if (labels.lang === "zh" || labels.lang === "en") uiLang = labels.lang;   // 只拿來組官網網址的語言段:白名單兩個值
-    traySync(); appMenuSync();
-  });
+  startStep("tray", trayStart);
+  startStep("telemetry", () => tm().start());
+  startStep("updater", () => updater().start());
+  startStep("min version gate", () => minGate().start());
 });
+/* 啟動步驟各自隔開:一步拋例外只記一行、不擋後面的步驟(選單、選單列、更新、遙測彼此無關) */
+function startStep(what, fn) { try { return fn(); } catch (e) { console.error(`[startup] ${what} failed: ${(e && e.stack) || e}`); return undefined; } }
 // 一次只跑一份:第二份會跟第一份搶同一個 workspace 與 session.db,也讓「用同一顆 binary 再開一份」這條
 // 旁路少一點(稽核 M1)
 if (!app.requestSingleInstanceLock()) app.quit();

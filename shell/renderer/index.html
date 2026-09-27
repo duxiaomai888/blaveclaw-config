@@ -10,10 +10,12 @@
 <link rel="stylesheet" href="report-trades.css">
 <link rel="stylesheet" href="report-robust.css">
 <link rel="stylesheet" href="trade.css">
+<link rel="stylesheet" href="capital.css">
 <link rel="stylesheet" href="datasrc.css">
 <link rel="stylesheet" href="library.css">
 <link rel="stylesheet" href="report-blocks.css">
 <link rel="stylesheet" href="reports.css">
+<link rel="stylesheet" href="browser.css">
 </head><body>
 
 <!-- ============ 連結畫面(獨立畫面,不是 modal) ============ -->
@@ -183,7 +185,6 @@
           <div class="lib-gate" id="lib-gate" hidden></div>
           <div class="lib-rows" id="lib-rows"></div>
           <p class="lib-state" id="lib-state" role="status" hidden></p>
-          <p class="lib-foot" id="lib-foot" hidden></p>
           <div class="lib-det" id="lib-det" hidden></div>
         </div>
       </div>
@@ -194,7 +195,6 @@
         <div class="rpt-head" id="rpt-head">
           <div class="rpt-head-list" id="rpt-head-list">
             <h5 class="main-head-name" id="rpt-h" tabindex="-1" data-i18n="rpt.nav"></h5>
-            <p class="rpt-desc" data-i18n="rpt.desc"></p>
             <div class="rpt-tools">
               <span class="rpt-count" id="rpt-count"></span>
               <!-- 鈕上的字隨狀態換(新增報告 / agent 寫作中…),由 reports.js 寫,不掛 data-i18n -->
@@ -287,7 +287,7 @@
                 <p class="mp-note" id="mp-note" aria-live="polite"></p>
               </div>
             </div>
-            <button class="btn-send" id="btn-send" type="button" data-i18n-aria="ws.send">↑</button>
+            <button class="btn-send" id="btn-send" type="button" data-i18n-aria="ws.send"><span class="icon-send" aria-hidden="true">↑</span><svg class="icon-stop" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg></button>
           </div>
         </div>
       </div>
@@ -444,7 +444,7 @@
       <button type="button" class="modal-close" id="ns-close" data-i18n-aria="set.close">✕</button>
     </div>
     <div class="modal-body">
-      <p class="ns-hint" data-i18n="ns.hint"></p>
+      <p class="ns-hint" id="ns-hint" data-i18n="ns.hint"></p>
       <label class="fld"><span class="fld-l" data-i18n="ns.name"></span><input class="f-input txt" id="ns-name" name="name" autocomplete="off" data-i18n-ph="ns.namePh"></label>
       <div class="f-row">
         <label class="fld"><span class="fld-l" data-i18n="ns.symbol"></span><input class="f-input txt" name="symbol" autocomplete="off" data-i18n-ph="ns.symbolPh"></label>
@@ -503,8 +503,10 @@
 <script src="reports.js"></script>
 <script src="newstrategy.js"></script>
 <script src="trade.js"></script>
+<script src="capital.js"></script>
 <script src="datasrc.js"></script>
 <script src="handoff.js"></script>
 <script src="library.js"></script>
 <script src="app.js"></script>
+<script src="browser.js"></script>
 </body></html>
