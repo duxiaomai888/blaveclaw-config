@@ -3,6 +3,19 @@
 ## Confirmation Required
 CRITICAL: You MUST NEVER deploy a live strategy or set up a cron job without explicit user confirmation.
 
+- **The question names everything the deployment puts on the machine**, in the user's words: the strategy's own schedule (「每小時整點跑一次」) and, when the machine has none yet, the health check that alerts them if a schedule goes quiet (「另外會加一個每 30 分鐘的健康檢查，排程停了會通知你」). Their YES covers exactly what the question named, nothing more.
+- **Do the one thing that was asked.** Anything else you notice is missing or wrong on the machine — no health check, an unset variable, an old file, a package — goes into the reply as a finding with what it would take, and is done only when the user then says so. Never "while I was at it" (「順手補上」).
+- **Every route onto the machine asks the same question.** The desktop agent working on the user's cloud machine (`references/cloud-handoff.md` › *A schedule on the cloud machine*) confirms exactly as the agent on that machine would: a message that already names the schedule (「排程上線，每小時跑一次」, 「做好就排程上線」) is the request, not the YES. From the desktop it puts on the machine only the one schedule the user asked for — never the health check beside it.
+
+## Desktop app (`BLAVE_AGENT_LOCAL=1`) — no system scheduler
+
+Everything in this file about cron and Scheduled Tasks is for cloud machines. Check once per session: `python3 -c "print(__import__('os').environ.get('BLAVE_AGENT_LOCAL'))"` prints `1` on the desktop app. There:
+
+- **Never run `crontab`, `launchctl` / launchd, `schtasks` or any other OS scheduler, and never write a plist or a cron file.** macOS answers with a system prompt (「想要管理你的電腦」) the user never asked for and the command hangs on it; the runtime refuses these commands. Do not look for another way in.
+- **Never tell the user to change a system permission** (Full Disk Access, 「管理你的電腦」) or to schedule it themselves in a terminal.
+- **Type A/C:** the user funds the strategy and presses 「啟動下單」 on the app's 自動下單 page (`references/portfolio-steps.md`); the app runs it on every bar while it is open. None of the schedule steps below apply (Type A step 5, the healthcheck schedule), and there is no "Reply YES and I will schedule it" question — point to the page.
+- **Type B:** it cannot run on a schedule on this computer yet. Say so in one plain sentence when you deliver the strategy, and offer the two ways out: send it to the user's cloud machine (the app's 送上雲端 button; `references/cloud-handoff.md` moves it and runs it once there — a schedule there is a request of its own, made from the cloud view: that file's *A schedule on the cloud machine*), or run it once by hand now (`python3 strategies/<name>/strategy.py`). Never ask for a YES to deploy it here.
+
 ## No LLM in the Execution Loop
 
 Strategy execution MUST be scheduled as a system cron job (Linux) or Scheduled Task (Windows) that runs Python directly through `manager/wait_for_bar.py` (Type A/C) or `manager/run_strategy.sh`/direct `strategy.py` (Type B — see its own section below) — NEVER as an OpenClaw agent cron that wakes the agent to "run the strategy and report the result".
@@ -52,7 +65,7 @@ run — never `strategies/<name>.py` at the top level (healthcheck flags it).
 
 At deployment time:
 
-1. **Add the healthcheck schedule once.** Check first with `crontab -l | grep healthcheck` (Linux) or `schtasks /query /tn blaveclaw-healthcheck` (Windows):
+1. **Add the healthcheck schedule once — as part of what the user confirmed** (*Confirmation Required*: the question named it). Check first with `crontab -l | grep healthcheck` (Linux) or `schtasks /query /tn blaveclaw-healthcheck` (Windows):
 ```
 */30 * * * * cd $BLAVE_AGENT_HOME/workspace && python3 manager/healthcheck.py
 ```
@@ -88,16 +101,26 @@ Real users have asked "are you still running?", "it's been two hours", "did it f
 - Web workspace: an activity block with a per-second elapsed clock and one receipt row per tool call (running → done). The text you write *before* a tool call goes into that block's collapsible reasoning log, never into the chat bubble or the history.
 - Telegram: only the typing indicator. Text you write before a tool call is dropped. The one channel that reaches the user mid-turn is a real message via `lib.notify.send_text`.
 - Tool stdout never reaches the user on either surface — you relay it.
-- The Bash tool's default timeout is 120 s; an explicit `timeout` goes up to 30 min. A call that hits its timeout is NOT killed — the runtime moves it to the background and it keeps running (still writing `scan.json` / `stats.json`) until the turn ends. So after a timeout: read that command's output / `tail` its log until the final line appears; never start a second run (two copies would overwrite each other's output, and it breaks the Iteration Brakes). Any backgrounded process is killed when the turn ends.
+- The Bash tool's default timeout is 120 s; an explicit `timeout` goes up to 30 min. That `timeout` is a setting of the tool call (milliseconds), never a `timeout` command in front of the line — macOS has no such command and the call fails with `command not found`. A call that hits its timeout is NOT killed — the runtime moves it to the background and it keeps running (still writing `scan.json` / `stats.json`) until the turn ends. So after a timeout: read that command's output / `tail` its log until the final line appears; never start a second run (two copies would overwrite each other's output, and it breaks the Iteration Brakes). Any backgrounded process is killed when the turn ends.
 
 **Procedure**
 1. **Estimate** before running: a scan is cells × one `compute_signals` pass (numbers in `references/strategy-code.md` › *Grid size*); a cold 1-min fetch is 30-day chunks, 10 in parallel. Cannot estimate → treat it as long (step 3b) and let the first `[…] ~N left` line give the number.
 2. **Notice — one line, before the run:** the estimate and how you will report, e.g. 「開始掃 15×15=225 格,約 6 分鐘,跑完回報」. Telegram: `python3 -c "from lib.notify import send_text; send_text('開始掃 225 格,約 6 分鐘,跑完回報')"` as its own tool call first. Web: write the line as the narration right before the run's Bash call (it lands in the activity log).
 3. **Run:**
-   - **a. ≤ 10 min** — foreground, `timeout` = 2× the estimate (≤ 30 min). The `[scan]` / `[mcpt]` / `[fetch]` lines come back in the output. If the call still hits its timeout, the run is now in the background and still going: keep reading its output (the tool says where) until the final line — never launch it again.
+   - **a. ≤ 10 min** — foreground, tool `timeout` = 2× the estimate (≤ 30 min). The `[scan]` / `[mcpt]` / `[fetch]` lines come back in the output. If the call still hits its timeout, the run is now in the background and still going: keep reading its output (the tool says where) until the final line — never launch it again.
    - **b. > 10 min or unknown** — background with the output in a log, then poll:
-     `nohup python3 strategies/<name>/scan.py > tmp/<name>_scan.log 2>&1 &` (same line on Windows — the Bash tool there is Git Bash), then repeat the single command `timeout 150 tail -f -n 3 tmp/<name>_scan.log` (Bash tool `timeout` 180000; no `;`/`&&` chaining — it prints new lines as they land and exits by itself). Jobs past ~30 min: poll every 5 min (`timeout 300`, tool timeout 360000) to keep the turn's step count down. After each poll relay the newest progress line in one short sentence (web: narration; Telegram: `send_text`, at most once per ~10 min or when the ETA changes a lot). Done = the log shows the final line (`Scan written:` / `Heatmap saved:` / the stats block; a Python traceback = crashed). Progress lines land one per 10 % of the work, so the first one only appears once the job is 10 % done (a 2-hour job: ~12 min in) and the expected gap between lines is about a tenth of the whole run — hang = three consecutive polls with no new line once that expected gap has passed (before the first line, on a job whose length you cannot estimate, allow ~15 min of silence). Report a hang with the last line, do not restart on your own.
+     `nohup python3 strategies/<name>/scan.py > tmp/<name>_scan.log 2>&1 &` (same line on Windows — the Bash tool there is Git Bash), then repeat the single command `python3 -c "import time; time.sleep(150); print(''.join(open('tmp/<name>_scan.log', encoding='utf-8', errors='replace').readlines()[-3:]))"` (Bash tool `timeout` 180000; no `;`/`&&` chaining — it waits, prints the last three lines and exits by itself; the same line on macOS, Linux and Windows). Never `timeout 150 tail -f …` (no `timeout` command on macOS), never a leading `sleep` (the engine refuses it) and never the engine's `Monitor` / cron tools (next section). Jobs past ~30 min: poll every 5 min (`time.sleep(300)`, tool timeout 360000) to keep the turn's step count down. After each poll relay the newest progress line in one short sentence (web: narration; Telegram: `send_text`, at most once per ~10 min or when the ETA changes a lot). Done = the log shows the final line (`Scan written:` / `Heatmap saved:` / the stats block; a Python traceback = crashed). Progress lines land one per 10 % of the work, so the first one only appears once the job is 10 % done (a 2-hour job: ~12 min in) and the expected gap between lines is about a tenth of the whole run — hang = three consecutive polls with no new line once that expected gap has passed (before the first line, on a job whose length you cannot estimate, allow ~15 min of silence). Report a hang with the last line, do not restart on your own.
 4. **Final report** = result + elapsed, e.g. 「掃描 15×15,耗時 7 分 40 秒:穩健點 …」. Timeout / crash / user Stop: what happened, the last progress line, and what you propose — the Iteration Brakes apply (no silent re-run, no widening).
+
+### When the job does not finish in the turn
+
+A turn is one process. When it ends, the engine is closed: nothing calls you again, and every process you started — foreground, backgrounded by a timeout, `nohup` — is killed with it. The hard ceilings are 30 min for one Bash call and 35 min for the whole turn. Measured 2026-09-28 (desktop): a five-stock Taiwan backtest from 2015 needed ~35 min of cold fetches; the call was given 10 min, got backgrounded, the agent armed a `Monitor` on `stats.json`, wrote 「回測還在跑，等它完成後我會回報結果」 and ended the turn. The backtest died, the watcher had no one to report to, and the user was left with a strategy card saying 「沒有回測」 and a promise nobody could keep.
+
+- **No promise of a later report.** 「完成後我會回報」, 「稍後通知你」, 「跑完再跟你說」, "I'll let you know when it's done" are all false here. The one exception is something the machine does by itself and that already exists: a registered report schedule, a deployed strategy's own notifications. Name that mechanism when you rely on it.
+- **No watcher tools.** `Monitor`, `CronCreate` and any other engine tool that waits for an event or a time deliver to a session that is gone by then; the runtime refuses the first two. Waiting happens inside the turn, with the polling line of step 3b.
+- **Before starting**, when the estimate is over ~25 min: say it cannot finish in one go, and offer the version that can — a shorter span or fewer symbols first (the full span afterwards reuses what was fetched), or the fetch in this turn and the backtest in the next.
+- **When it was cut anyway**, the reply has four parts, in plain words: (1) what did not finish — 「回測沒有跑完」; (2) why — 「抓資料花的時間超過這一輪的上限」; (3) what is done and kept — which symbols are fully fetched, which one stopped where (count the files in `cache/<dataset>_<id>_<src>/`; months already fetched stay cached, so the next run resumes there); (4) what the user says to continue — 「說『繼續回測』我就接著跑，剩下大約 N 分鐘」. Then stop: no re-run on your own (Iteration Brakes).
+- **A strategy left without a backtest is said as such** — 「策略寫好了，但還沒有回測結果」 — never reported as a finished strategy.
 
 **Progress lines lib prints** (stdout, one per 10 % of the work, with elapsed and ETA; silent when the whole job projects under 5 s — 30 s for MCPT, so the automatic backtest MCPT inside the runner's budget adds nothing to the output):
 - `[scan] 36/120 cells, 2m10s elapsed, ~5m03s left` / `[scan] 120/120 cells done in 7m40s` — `lib/param_scan.scan_grid` (cells = combos that actually run `compute_signals`)
@@ -136,11 +159,12 @@ schtasks /create /tn "blaveclaw-strategy-<name>" /tr "cmd /c cd /d %BLAVE_AGENT_
 ```
 
 ## Type B (Everything else) — mandatory flow:
+Cloud machines only — on the desktop app a Type B strategy is never scheduled (*Desktop app* above).
 Type B strategies (screener, grid, arbitrage, one-off execution, alert bot) have no `INTERVAL`/`fetch_data` contract to poll a bar against, so they do NOT go through `wait_for_bar.py` — they keep a plain fixed-cadence schedule, same as before this mechanism existed.
 1. Skip backtest entirely
 2. Ask the user to confirm before deploying: "Do you want to deploy this live? Reply YES to confirm."
 3. After YES, ask **Spot or futures/perpetual?** and **Align positions?** (same as Type A step 3) before writing any code.
-4. Only after all confirmations: agree a run cadence with the user (there's no bar to wait for, so this is just "how often"), set up the schedule, and add the healthcheck schedule if not already present:
+4. Only after all confirmations: agree a run cadence with the user (there's no bar to wait for, so this is just "how often"), set up the schedule, and add the healthcheck schedule if not already present and the confirmation question named it (*Confirmation Required*):
 ```
 <M> * * * * cd $BLAVE_AGENT_HOME/workspace && BLAVE_MODE=live bash manager/run_strategy.sh <name>
 ```

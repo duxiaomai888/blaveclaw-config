@@ -76,7 +76,7 @@ const mk = (dir, extra = {}) => { const sent = []; const tm = createTelemetry({ 
   const tmSrc = fs.readFileSync(path.join(__dirname, "..", "shell", "telemetry.js"), "utf8");
   t("os 不再寫死:依 process.platform 對到 macos / windows / linux(這台是 " + process.platform + ")", !/os: "macos"/.test(tmSrc) && sent.length > 0 && sent.every((b) => b.os === ({ darwin: "macos", win32: "windows", linux: "linux" })[process.platform]));
   for (const v of ["10.0.20348", "10.0.19045", "10.0.26100", "15.5", "14.6.1", "26.0"]) { const x = mk(fs.mkdtempSync(path.join(os.tmpdir(), "blave-tm-")), { osVersion: v }); x.tm.start(); await tick(); t("osVersion=" + v + " 照送(Windows 五位 build 號)", x.sent.length === 2 && x.sent[0].os_version === v); }
-  { const apiPy = path.join(__dirname, "..", "..", "api", "openclaw", "desktop_telemetry.py");
+  { const apiPy = path.join(process.env.BLAVE_API_DIR || path.join(__dirname, "..", "..", "api"), "openclaw", "desktop_telemetry.py");
     if (fs.existsSync(apiPy)) { const api = fs.readFileSync(apiPy, "utf8"), pick = (src, k) => { const m = src.match(new RegExp(k + '[^\\n]*?(/|r")(\\^[^"/]+)')); return m ? m[2].replace(/\\Z$/, "$") : null; };
       t("os_version / lang / app_version 三個形狀跟 api 的 _*_RE 逐字相同(api 早已是 {1,5},外殼落後就是這次的 bug)", ["os_version", "lang", "app_version"].every((k) => pick(tmSrc, k + ":") && pick(tmSrc, k + ":") === pick(api, "_" + k.toUpperCase() + "_RE = re\\.compile\\("))); }
     else console.log("SKIP  api 不在旁邊,略過形狀比對"); }
@@ -91,8 +91,8 @@ const mk = (dir, extra = {}) => { const sent = []; const tm = createTelemetry({ 
   // ── cloud_started:「送上雲端」確認框 → submitMessage(msg, { handoff: "up" }) → send-message → runTurn 成功才送。把真的那支 handler 切出來跑 ──
   const R = path.join(__dirname, "..", "shell", "renderer");
   const hoSrc = fs.readFileSync(path.join(R, "handoff.js"), "utf8"), appSrc = fs.readFileSync(path.join(R, "app.js"), "utf8");
-  t("接線:確認框 onOk 帶 handoff 方向;submitMessage 原樣轉進 payload;重送(lastUserText)不帶", /submitMessage\(msg, \{ handoff: dir \}\)/.test(hoSrc)
-    && /async function submitMessage\(msg, opts\)/.test(appSrc) && /message: msg, handoff: opts && opts\.handoff, model:/.test(appSrc) && !/submitMessage\(lastUserText, /.test(appSrc));
+  t("接線:確認框 onOk 帶 handoff 方向;submitMessage 原樣轉進 payload;重送(lastUserText)不帶", /submitMessage\(msg, \{ handoff: dir, noBacktest: tb === "B" \}\)/.test(hoSrc)
+    && /async function submitMessage\(msg, opts\)/.test(appSrc) && /message: msg, handoff: opts && opts\.handoff, note: lastUserNote, model:/.test(appSrc) && !/submitMessage\(lastUserText, /.test(appSrc));
   t("主行程:標記只認 \"up\" 且旗標要開;事件掛在 runTurn 的 then(spawn + stdin 成功),不在 catch", /const cloudUp = cloudHandoffOn\(\) && payload && payload\.handoff === "up";/.test(mainSrc)
     && /runTurn\(win, payload\)\.then\(\(\) => \{ if \(cloudUp\) tm\(\)\.track\("cloud_started"\); \}\)\.catch\(/.test(mainSrc));
   const hi = mainSrc.indexOf('ipcMain.handle("send-message", async (e, payload) => {');
@@ -126,9 +126,9 @@ const mk = (dir, extra = {}) => { const sent = []; const tm = createTelemetry({ 
   t("不是自家頁面:回 busy、不送", s.r.busy === true && s.events === "");
   // ── feature_used:名字是白名單,兩端同一份;renderer 每個送出點的名字都在表上;主行程拒絕表外的名字 ──
   const FEATURES = EVENTS.feature_used.name, trSrc = fs.readFileSync(path.join(R, "trade.js"), "utf8");
-  t("feature_used 不是 once、name 白名單 = canon product-telemetry.md 那 44 個(0.1.6:+reports_list / reports_read / reports_ask / strategy_new;0.1.7 內建瀏覽器 +9、停止鈕 chat_stop、雲端群益開通 +6、晨報與新聞管道 +4;library_comm 沒送出點但 0.1.5 還在送,留到它退場)", ONCE_OF(fs) && FEATURES.length === 44 && FEATURES[0] === "report_backtest" && FEATURES[15] === "chat_stop" && FEATURES[24] === "strategy_new" && FEATURES[33] === "browser_url" && FEATURES[39] === "cap_rdp_open" && FEATURES[FEATURES.length - 1] === "news_licensed" && FEATURES[20] === "library_comm");
+  t("feature_used 不是 once、name 白名單 = canon product-telemetry.md 那 69 個 + browser_open_ext = 70 個(0.1.6:+reports_list / reports_read / reports_ask / strategy_new;0.1.7 內建瀏覽器 +9、停止鈕 chat_stop、雲端群益開通 +6、晨報與新聞管道 +4;0.1.8 報告分享 +3、策略轉出 +6、策略版本 +5、聊天結果卡 +2、報告存成 PDF +1、設定 › 公開連結 +1、送進 TradingView +7;library_comm 沒送出點但 0.1.5 還在送,留到它退場;batch 6:+browser_open_ext,放最後一個)", ONCE_OF(fs) && FEATURES.length === 70 && FEATURES[69] === "browser_open_ext" && FEATURES[68] === "tv_fail_compile" && FEATURES[0] === "report_backtest" && FEATURES[15] === "chat_stop" && FEATURES[24] === "strategy_new" && FEATURES[33] === "browser_url" && FEATURES[39] === "cap_rdp_open" && FEATURES[43] === "news_licensed" && FEATURES[57] === "version_fork" && FEATURES[58] === "result_report" && FEATURES[59] === "result_strategy" && FEATURES[60] === "report_pdf" && FEATURES[61] === "share_list_open" && FEATURES.slice(62).join() === "tv_send,tv_pasted,tv_read,tv_fix,tv_agent_paste,tv_fail_editor,tv_fail_compile,browser_open_ext" && FEATURES.every((n) => n.length <= 16) && FEATURES[20] === "library_comm");
   // 兩端漂移:api/openclaw/desktop_telemetry.py 的 EVENTS["feature_used"] 逐字同一份(同 check_runtime_mirror:要 monorepo 版面)
-  const apiPy = path.join(__dirname, "..", "..", "api", "openclaw", "desktop_telemetry.py");
+  const apiPy = path.join(process.env.BLAVE_API_DIR || path.join(__dirname, "..", "..", "api"), "openclaw", "desktop_telemetry.py");
   if (!fs.existsSync(apiPy)) console.log("SKIP  api 白名單比對(需要 monorepo 版面:../api/openclaw/desktop_telemetry.py)");
   else { const m = /"feature_used": \{"props": \{"name": \(([\s\S]*?)\)\}, "once": False\}/.exec(fs.readFileSync(apiPy, "utf8"));
     const apiNames = m ? [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]) : null;
@@ -152,12 +152,17 @@ const mk = (dir, extra = {}) => { const sent = []; const tm = createTelemetry({ 
   }
   t("renderer 每個 trackFeature 送出點的名字都在白名單上、都是字面(沒有拿變數當名字)", bad.length === 0 && used.size > 0);
   if (bad.length) console.log("      " + bad.join("\n      "));
-  const LEGACY = ["library_comm"];   // 0.1.6 起沒送出點(社群段平鋪),但 0.1.5 舊外殼還在送、api 要繼續收、兩端順序要一致:留到 0.1.5 退場
+  // 0.1.6 起沒送出點(社群段平鋪),但 0.1.5 舊外殼還在送、api 要繼續收、兩端順序要一致:留到 0.1.5 退場。
+  // browser_source 同理:0.1.8 拿掉來源卡、沒有送出點了,0.1.7 還在送
+  // tv_read / tv_fix / tv_fail_compile:送進 TradingView 的流程改成停在交接(Wei 2026-09-28),三個入口拿掉之後沒有送出點;0.1.8 開發版之前的外殼還在送
+  const LEGACY = ["library_comm", "browser_source", "tv_read", "tv_fix", "tv_fail_compile"];
+  // 先佔名字、送出點還沒併進來的(report_pdf = 報告「存成 PDF」):送出點一進來這條就紅,提醒把它從這裡拿掉
+  const RESERVED = ["report_pdf"];
   // 主行程送的:browser_agent(agent 第一次呼叫瀏覽器工具,shell/browser/index.js firstUse 的 o.track;main.js 接到 telemetry)
   const brSrc = fs.readFileSync(path.join(R, "..", "browser", "index.js"), "utf8");
   const MAIN_SENT = /if \(o\.track\) o\.track\("browser_agent"\)/.test(brSrc) && /track: \(name\) => tm\(\)\.track\("feature_used", \{ name \}\)/.test(fs.readFileSync(path.join(R, "..", "main.js"), "utf8")) ? ["browser_agent"] : [];
-  const noSender = FEATURES.filter((n) => !used.has(n) && LEGACY.indexOf(n) < 0 && MAIN_SENT.indexOf(n) < 0);
-  t("白名單上每個名字都有送出點(library_comm 例外:留給 0.1.5 舊外殼)", noSender.length === 0 && LEGACY.every((n) => FEATURES.includes(n) && !used.has(n))); if (noSender.length) console.log("      沒送出點:" + noSender.join(", "));
+  const noSender = FEATURES.filter((n) => !used.has(n) && LEGACY.indexOf(n) < 0 && RESERVED.indexOf(n) < 0 && MAIN_SENT.indexOf(n) < 0);
+  t("白名單上每個名字都有送出點(library_comm / browser_source / tv_read / tv_fix / tv_fail_compile 例外:留給舊外殼)", noSender.length === 0 && LEGACY.concat(RESERVED).every((n) => FEATURES.includes(n) && !used.has(n))); if (noSender.length) console.log("      沒送出點:" + noSender.join(", "));
   t("送出點只在功能那一層:report 四個分頁在 #rp-tabs 的 click(程式自動選預設分頁不記)、下單分頁在 trSetTab、選擇策略在 psOpen、切雲端在 envSwitch、掃描在 rpRobAsk 送出成功、聊天在 started、停止在 stopTurn 按下、設定兩類在 setCat、送上 / 拉回在 hoAsk 確認",
     /const RP_TAB_FEATURE = \{ bt: "report_backtest", tr: "report_trades", rob: "report_scan", code: "report_code" \};\n\$\("rp-tabs"\)\.addEventListener\("click", \(e\) => \{[^\n]*\n\s*const b = e\.target\.closest\("\.rp-tab"\); if \(b && !b\.disabled\) \{ rpShowTab\(b\.dataset\.tab\); trackFeature\(RP_TAB_FEATURE\[b\.dataset\.tab\]\); \}/.test(appSrc)
     && !/trackFeature/.test(appSrc.slice(appSrc.indexOf("function rpShowTab("), appSrc.indexOf("function rpRobOpts(")))
@@ -166,7 +171,7 @@ const mk = (dir, extra = {}) => { const sent = []; const tm = createTelemetry({ 
     && /\.then\(\(ok\) => \{ if \(ok\) trackFeature\("scan_requested"\); resolve\(ok \? turnSeq : false\); \}\)/.test(appSrc) && /if \(r\.started\) \{ busyStart\(\); trackFeature\("chat_sent"\); return true; \}/.test(appSrc)
     && /turnStopping = true; turnStopped = true; sendBtnSync\(\);\n\s*trackFeature\("chat_stop"\);/.test(appSrc)
     && /if \(cat === "src"\) \{ srcLoad\(\); trackFeature\("settings_datasrc"\); \}/.test(appSrc) && /if \(cat === "plan"\) \{ planPaint\(\); trackFeature\("settings_plan"\);/.test(appSrc)
-    && /submitMessage\(msg, \{ handoff: dir \}\)[^\n]*\n\s*\.then\(\(ok\) => \{ if \(ok\) trackFeature\(dir === "up" \? "handoff_cloud" : "handoff_pull"\); \}\);/.test(hoSrc));
+    && /submitMessage\(msg, \{ handoff: dir, noBacktest: tb === "B" \}\)[^\n]*\n\s*\.then\(\(ok\) => \{ if \(ok\) trackFeature\(dir === "up" \? "handoff_cloud" : "handoff_pull"\); \}\);/.test(hoSrc));
   // 主行程:preload 只暴露 send、主行程只收自家頁面、名字交給 track()——表外的整則不送、表內的 props 只有 name 一格
   t("接線:preload trackFeature → send(\"track-feature\");主行程 fromOurPage 才 tm().track(\"feature_used\", { name })",
     /trackFeature: \(name\) => ipcRenderer\.send\("track-feature", name\),/.test(fs.readFileSync(path.join(__dirname, "..", "shell", "preload.js"), "utf8"))

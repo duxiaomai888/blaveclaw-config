@@ -6,6 +6,7 @@
 <title>Blave</title>
 <link rel="stylesheet" href="tokens.css">
 <link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="results.css">
 <link rel="stylesheet" href="report-backtest.css">
 <link rel="stylesheet" href="report-trades.css">
 <link rel="stylesheet" href="report-robust.css">
@@ -15,7 +16,11 @@
 <link rel="stylesheet" href="library.css">
 <link rel="stylesheet" href="report-blocks.css">
 <link rel="stylesheet" href="reports.css">
+<link rel="stylesheet" href="report-share.css">
+<link rel="stylesheet" href="report-sharelist.css">
 <link rel="stylesheet" href="browser.css">
+<link rel="stylesheet" href="export.css">
+<link rel="stylesheet" href="versions.css">
 </head><body>
 
 <!-- ============ 連結畫面(獨立畫面,不是 modal) ============ -->
@@ -140,12 +145,26 @@
           <div class="txt">
           <!-- tabindex="-1":文字鈕把人送回這台電腦、而那支策略已經不在時,焦點落在中欄標題(同 #tr-h / #cv-h 的作法) -->
           <h5 class="rp-name" id="rp-name" tabindex="-1"></h5>
-          <p class="rp-desc" id="rp-desc"></p>
+          <!-- 第二行 = 版本觸發器 · 說明(renderer/versions.js;策略版本 spec §1:≥ 2 版且名字過 canon §9b 才出)。
+               固定 24 高:有 / 沒有版本的策略互切時分頁列不跳 -->
+          <div class="rp-sub">
+            <span class="vwrap" id="ver-wrap" hidden>
+              <button class="vtrig" id="ver-trig" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="ver-menu"><span class="vn mono" id="ver-trig-n"></span><span class="vl" id="ver-trig-l"></span><span class="mp-chev" aria-hidden="true"></span></button>
+              <div class="vmenu" id="ver-menu" role="menu" hidden></div>
+            </span>
+            <span class="rp-sub-sep" id="ver-sep" aria-hidden="true" hidden>·</span>
+            <p class="rp-desc" id="rp-desc"></p>
+          </div>
           <!-- 雲端停機 / 讀不到時按「送上雲端」:不切視角,在原地講一句 + 一顆「去雲端看」(handoff.js 的 hoNote)。
                role="status":按了鈕畫面只多這一行,讀屏不唸的話等於沒有回應 -->
           <p class="rp-ho-note" id="rp-ho-note" role="status" hidden></p>
           </div>
           <div class="act" id="rp-act" hidden></div>
+        </div>
+        <!-- 時光機橫幅(versions.js):看舊版時才出,「唯讀」在任何寬度都看得到 -->
+        <div class="vbanner" id="ver-banner" hidden>
+          <p class="vb-t" id="ver-banner-t"></p>
+          <div class="vb-acts"><button class="btn-out" id="ver-back" type="button"><span class="vb-long" data-i18n="ver.back"></span><span class="vb-short" data-i18n="ver.backShort"></span></button><button class="btn-fill" id="ver-restore" type="button" data-i18n="ver.restore"></button></div>
         </div>
         <div class="rp-tabs" role="tablist" id="rp-tabs">
           <button class="rp-tab" type="button" role="tab" data-tab="bt" data-i18n="rp.tab.backtest"></button>
@@ -202,8 +221,18 @@
             </div>
             <p class="rpt-msg" id="rpt-msg" hidden></p>
           </div>
-          <!-- 閱讀模式:頁首只剩返回鈕 -->
-          <button class="rpt-back" id="rpt-back" type="button" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span data-i18n="rpt.nav"></span></button>
+          <!-- 閱讀模式:左返回、右動作群〔分享〕〔存成 PDF〕(spec-share-0.1.8 DT1、spec-report-pdf-0.1.8 DT1;殼的地盤,不往 rb-report 渲染輸出裡塞鈕)。
+               分享鈕的顯示由 report-share.js 管:performance / 公開中 / 還在問狀態時收起。「存成 PDF」固定最右、所有報告都出(report-pdf.js;
+               字隨狀態換,不掛 data-i18n)——唯一每種狀態都在的那顆放在錨定邊,分享出現或收起時它不位移 -->
+          <div class="rpt-rhead">
+            <button class="rpt-back" id="rpt-back" type="button" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span data-i18n="rpt.nav"></span></button>
+            <!-- 存成 PDF 之後的狀態句(report-pdf.js;設計 D1):在返回鈕與動作群之間、同一列,不另起一行。讀屏走 srSay,這裡不掛 role="status" -->
+            <p class="rpt-saved" id="rpt-saved" hidden><span class="d"></span><span class="s"></span><button class="btn-quiet" id="rpt-reveal" type="button"></button></p>
+            <div class="rpt-acts">
+              <button class="btn-out" id="rpt-share" type="button" aria-haspopup="dialog" data-i18n="shr.btn" hidden></button>
+              <button class="btn-out" id="rpt-pdf" type="button" hidden></button>
+            </div>
+          </div>
         </div>
         <div class="rpt-body" id="rpt-body" tabindex="0">
           <div class="rpt-rows" id="rpt-rows"></div>
@@ -263,6 +292,8 @@
         <!-- 輸入框:上 textarea、下工具列(左=model/effort 觸發鈕,右=送出)。
              選 model 放這裡而不是左下角:引擎是設一次的事(誰付錢、要不要重新授權),
              model / effort 是每個任務都可能換的,兩件事不擠同一個入口。 -->
+        <!-- 回合進行中、草稿非空時按 Enter:不送,這一行講為什麼(e2e 0.1.8 #71);字由 taWaitShow 寫,回合結束即收 -->
+        <p class="ta-wait" id="ta-wait" role="status"></p>
         <div class="chat-input">
           <textarea id="ta" rows="1" data-i18n-ph="ws.placeholder"></textarea>
           <div class="ci-bar">
@@ -285,6 +316,9 @@
                 </p>
                 <div class="mp-rail" id="mp-rail" role="radiogroup"></div>
                 <p class="mp-note" id="mp-note" aria-live="polite"></p>
+                <!-- 引擎是 Blave AI 時常駐(app.js mpBillPaint);別的引擎整句與分隔線都收起 -->
+                <div class="mp-div" id="mp-bill-div" hidden></div>
+                <p class="mp-note mp-bill" id="mp-bill" hidden><span id="mp-bill-rule"></span><span class="sep" id="mp-bill-sep" aria-hidden="true"> · </span><span class="b" id="mp-bill-bal"></span></p>
               </div>
             </div>
             <button class="btn-send" id="btn-send" type="button" data-i18n-aria="ws.send"><span class="icon-send" aria-hidden="true">↑</span><svg class="icon-stop" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg></button>
@@ -297,7 +331,7 @@
 </div>
 
 <!-- ============ 設定 modal(樣式照雲端 .scrim / .ns-modal.set-modal) ============
-     分類:一般(語言、關於)、模型接入、資料與雲端方案、帳號、隱私。每一類的內容各自由 app.js 畫;
+     分類:一般(語言、關於)、模型接入、資料來源、帳號與方案、公開連結、隱私。每一類的內容各自由 app.js 畫;
      「模型接入」不借用連結畫面那張卡(那裡是第一次做決定的地方,這裡是回來換的地方)。 -->
 <div class="scrim" id="set-scrim" role="dialog" aria-modal="true" aria-labelledby="set-title" hidden>
   <div class="set-modal" id="set-modal">
@@ -311,10 +345,11 @@
         <button type="button" class="set-cat" data-set-cat="model" data-i18n="set.cat.model"></button>
         <!-- 資料來源:自帶資料商的金鑰(排在「AI 接入」後面)。內容由 datasrc.js 的 srcPaint 畫 -->
         <button type="button" class="set-cat" data-set-cat="src" data-i18n="src.title"></button>
-        <!-- 會花錢的一類排最後:前兩類是偏好。聊天裡的情境卡會直接開到這裡 -->
+        <!-- 帳號與方案(原本「資料與雲端方案」與「帳號」兩類併成一類;id 留 plan,舊的 acct 由 setCat 轉過來)。
+             聊天裡的情境卡、策略庫、分享的「去登入」都直接開到這裡 -->
         <button type="button" class="set-cat" data-set-cat="plan" data-i18n="set.cat.plan"></button>
-        <!-- 帳號:身分與登入 / 登出(錢的事在「資料與雲端方案」)。內容由 app.js 的 acctPaintAcct 畫 -->
-        <button type="button" class="set-cat" data-set-cat="acct" data-i18n="set.cat.acct"></button>
+        <!-- 公開連結:這個帳號所有公開中的報告(兩袋都列;spec-share-list-0.1.8 A1)。內容由 report-sharelist.js 的 shlPaint 畫 -->
+        <button type="button" class="set-cat" data-set-cat="shares" data-i18n="set.cat.shares"></button>
         <!-- 隱私:使用資料的開關與「會收 / 不收」(排最後;與視角無關)。內容由 app.js 的 privPaint 畫 -->
         <button type="button" class="set-cat" data-set-cat="priv" data-i18n="set.cat.priv"></button>
       </nav>
@@ -342,20 +377,10 @@
         </div>
         <div class="set-pane" data-set-cat="model" id="set-model" hidden></div>
         <div class="set-pane" data-set-cat="src" id="set-src" hidden></div>
-        <!-- 雲端方案:內容由 app.js 的 planPaint 畫(依 account_status.plan)。上半自己捲,
-             底列(「存在就扣」那句 + 鈕)不捲——那句話永遠貼在鈕的正上方 -->
+        <!-- 帳號與方案:整頁由 app.js 的 planPaint 畫——最上面一組帳號列(登入狀態＋登出)、訊息格 #acct-hint、Blave 餘額列,
+             細線以下是方案(依 account_status.plan)。上半自己捲,底列(「存在就扣」那句 + 鈕)不捲——那句話永遠貼在鈕的正上方 -->
         <div class="set-pane plan-pane" data-set-cat="plan" id="set-plan" hidden></div>
-        <div class="set-pane" data-set-cat="acct" id="set-acct-pane" hidden>
-          <div class="acct-id">
-            <div class="t"><p class="a1" id="acct-a1"></p><p class="a2" id="acct-a2"></p></div>
-            <!-- 同一個位置的同一顆鈕:已登入 = 登出(不跳確認框,可逆、沒有東西會被刪);未登入 = 登入 Blave -->
-            <button type="button" class="btn-out" id="set-acct-btn"></button>
-          </div>
-          <!-- 這一頁唯一放訊息的地方(登出沒撤成、登入等待中):只由 acctPaintAcct 寫,不讓第二個人碰 -->
-          <p class="cn-hint" id="acct-hint" hidden></p>
-          <ul class="acct-list" id="acct-list"></ul>
-          <div class="acct-link"><p id="acct-to-plan"></p><button type="button" class="pf-act" id="acct-to-plan-btn"></button></div>
-        </div>
+        <div class="set-pane" data-set-cat="shares" id="set-shares" hidden></div>
         <div class="set-pane" data-set-cat="priv" id="set-priv" hidden></div>
       </div>
     </div>
@@ -434,6 +459,24 @@
   </div>
 </div>
 
+<!-- 比較兩個版本(versions.js;策略版本 spec §5):640 框、唯讀、沒有腳。差異在這台電腦由主行程跑 difflib、雲端由 api 算好 -->
+<div class="scrim" id="vc-scrim" role="dialog" aria-modal="true" aria-labelledby="vc-title" hidden>
+  <div class="set-modal vc-modal" id="vc-modal">
+    <div class="modal-head">
+      <h6 id="vc-title" data-i18n="ver.cmpTitle"></h6>
+      <button type="button" class="modal-close" id="vc-close" data-i18n-aria="set.close">✕</button>
+    </div>
+    <div class="modal-body vc-body">
+      <div class="vc-pick">
+        <span class="set-selw"><select class="set-sel" id="vc-a" data-i18n-aria="ver.cmpA"></select></span>
+        <span class="vc-vs" data-i18n="ver.cmpVs"></span>
+        <span class="set-selw"><select class="set-sel" id="vc-b" data-i18n-aria="ver.cmpB"></select></span>
+      </div>
+      <div class="vc-out" id="vc-out" aria-live="polite"></div>
+    </div>
+  </div>
+</div>
+
 <!-- 新增策略 modal(spec-desktop-0.1.6 §4;照雲端 #ns_modal 逐格搬,殼同 confirmBox 家族:#del-scrim 的 440 框)。
      五格 + 即時預覽句(.cf-quote)+「至少填一項」+ 策略庫連結;由 newstrategy.js 接線。雲端視角:標題列灰底 + 「雲端」記號 + 腳的目的地句 -->
 <div class="scrim" id="ns-scrim" role="dialog" aria-modal="true" aria-labelledby="ns-title" hidden>
@@ -463,6 +506,47 @@
   </form>
 </div>
 
+<!-- 報告公開分享確認框(spec-share-0.1.8 DT2;殼 = .set-modal 640,接線同 #rpn:trapTab、點框外關、Esc 由 app.js escTop 收;由 report-share.js 接線)。
+     結構同 web D2:連結預覽 → 作者 → hint → 揭露小字 → 三行 → 勾選 → 腳(條款句 + 取消 + 主鈕)。揭露小字按視角換、標題與主鈕按模式換,由 JS 寫。
+     預覽縮圖 = og 固定圖(1200×630 淺底 lockup + 標籤行)縮 0.1 畫:晨報那張圖還沒出,不放點陣圖資產 -->
+<div class="scrim" id="shr-scrim" role="dialog" aria-modal="true" aria-labelledby="shr-title" hidden>
+  <form class="set-modal shr-modal" id="shr-modal" novalidate>
+    <div class="modal-head">
+      <span class="envm" id="shr-env" hidden></span>
+      <h6 id="shr-title"></h6>
+      <button type="button" class="modal-close" id="shr-close" data-i18n-aria="set.close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="shr-same" id="shr-same" data-i18n="shr.introSame" hidden></p>
+      <div class="shr-lpv" role="group" aria-labelledby="shr-lpv-l">
+        <span class="sr-only" id="shr-lpv-l" data-i18n="shr.lpvLabel"></span>
+        <div class="shr-th" aria-hidden="true"><div class="shr-og"><svg class="shr-og-lk" viewBox="0 0 826.333 180" fill="currentColor"><g transform="translate(0,6.667) scale(0.962963)"><path d="M0 108.973 A90 90 0 0 1 76.668 108.182 A20 20 0 0 0 105 90 A45 45 0 0 1 180 56.459 L180 180 L0 180 Z"/></g><g transform="translate(238.333,0)"><path fill-rule="evenodd" clip-rule="evenodd" d="M0 0H20V68.7962C31.8393 57.2517 47.8079 50 65 50C99.9506 50 130 80 130 115C130 150 100 180 65 180C30 180 -5.27718e-05 150 0 115V0ZM64.9999 70C39.9999 70 19.9999 90 19.9999 115C19.9999 140 40.0001 160 65 160C89.9999 160 110 140.5 110 115C110 89.5 89.9999 70 64.9999 70Z"/><path d="M174 0H154V170C154 170 154 174 157 177C160 180 164 180 164 180H188V160H174V0Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M328 180H308V161.194C296.161 172.738 280.192 179.991 263 179.991C228.049 179.991 198 149.989 198 114.99C198 79.9912 228 50 263 50C298 50 328 79.9912 328 114.99V180ZM263 159.99C288 159.99 308 139.99 308 114.99C308 89.9909 288 69.9903 263 69.9903C238 69.9903 218 89.491 218 114.99C218 140.49 238 159.99 263 159.99Z"/><path d="M393 150L354.494 50H333L378 165.5L382 175.5C383.5 178 385 180 393 180C401 180 402.5 178 404 175.5L408 165.5L453 50H431.5L393 150Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M523 180C488.049 180 458 150 458 115C458 79.9998 488 49.9998 523 49.9998C558 49.9998 588 79.9998 588 115C587.2 122.761 581 125.069 578 125.253H566.845H479.12C483.659 145.546 501.476 160 523 160C539.672 160 554.12 151.106 561.896 137.766L578.848 147.5C567.329 166.713 546.264 180 523 180ZM523 69.9998C501.282 69.9998 483.337 84.7164 479 105.299H566.968C562.576 85.0203 544.665 69.9998 523 69.9998Z"/></g></svg><div class="shr-og-tag" id="shr-og-tag"></div></div></div>
+        <div class="shr-tx"><div class="shr-tt" id="shr-tt"></div><div class="shr-ds" id="shr-ds"></div></div>
+      </div>
+      <div class="shr-arow">
+        <span class="shr-al" id="shr-author-l" data-i18n="shr.author"></span>
+        <span class="shr-anon-only" id="shr-anon-only" data-i18n="shr.anon" hidden></span>
+        <div class="shr-radios" id="shr-radios" role="radiogroup" aria-labelledby="shr-author-l">
+          <label class="shr-rad"><input type="radio" name="shr-byline" value="anonymous" id="shr-anon" checked><span data-i18n="shr.anon"></span></label>
+          <label class="shr-rad"><input type="radio" name="shr-byline" value="name" id="shr-named"><span><span data-i18n="shr.named"></span> <span class="shr-nm" id="shr-nm"></span></span></label>
+        </div>
+      </div>
+      <p class="ns-hint" id="shr-hint" role="status"></p>
+      <div class="shr-agree">
+        <p class="shr-must shr-perf" id="shr-perf" data-i18n="shr.perfNote" hidden></p>
+        <p class="shr-must" id="shr-must"></p>
+        <ul class="shr-three"><li data-i18n="shr.ack1"></li><li data-i18n="shr.ack2"></li><li data-i18n="shr.ack3"></li></ul>
+        <label class="shr-chk"><input type="checkbox" class="ps-cb" id="shr-ack"><span data-i18n="shr.ack"></span></label>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="shr-tos"><span data-i18n="shr.tosBefore"></span><button type="button" class="shr-tlnk" id="shr-tos" data-i18n="shr.tosLink"></button><span data-i18n="shr.tosAfter"></span></span>
+      <span class="foot-msg" id="shr-msg" role="status"></span>
+      <span class="modal-btns"><button type="button" class="btn-out" id="shr-cancel" data-i18n="del.cancel"></button><button type="submit" class="btn-fill" id="shr-send" disabled></button></span>
+    </div>
+  </form>
+</div>
+
 <!-- 新增報告 modal(spec-desktop-0.1.6 §1.5;照雲端 #rp_modal 搬,拿掉「定期」段):描述欄 + 5 顆範例句 chip(.pf-act)+ 誠實句;
      由 reports.js 接線。chip 的 data-tpl 是字串表的 key(範本句由 t() 取,換語言不用重畫) -->
 <div class="scrim" id="rpn-scrim" role="dialog" aria-modal="true" aria-labelledby="rpn-title" hidden>
@@ -479,8 +563,6 @@
         <button type="button" class="pf-act" data-tpl="rpt.new.tpl.tw" data-i18n="rpt.new.chip.tw"></button>
         <button type="button" class="pf-act" data-tpl="rpt.new.tpl.close" data-i18n="rpt.new.chip.close"></button>
         <button type="button" class="pf-act" data-tpl="rpt.new.tpl.crypto" data-i18n="rpt.new.chip.crypto"></button>
-        <button type="button" class="pf-act" data-tpl="rpt.new.tpl.symbol" data-i18n="rpt.new.chip.symbol"></button>
-        <button type="button" class="pf-act" data-tpl="rpt.new.tpl.research" data-i18n="rpt.new.chip.research"></button>
       </div>
       <!-- 帶 {where} 的誠實句由 reports.js 寫(不掛 data-i18n) -->
       <p class="ns-hint" id="rpn-honest"></p>
@@ -496,17 +578,26 @@
 <script src="../node_modules/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <script src="strings.js"></script>
 <script src="i18n.js"></script>
+<script src="results.js"></script>
 <script src="report-backtest.js"></script>
 <script src="report-trades.js"></script>
 <script src="report-robust.js"></script>
+<script src="md.js"></script>
 <script src="report-blocks.js"></script>
 <script src="reports.js"></script>
+<script src="report-share.js"></script>
+<script src="report-sharelist.js"></script>
+<script src="report-pdf.js"></script>
 <script src="newstrategy.js"></script>
 <script src="trade.js"></script>
 <script src="capital.js"></script>
 <script src="datasrc.js"></script>
 <script src="handoff.js"></script>
+<script src="export.js"></script>
 <script src="library.js"></script>
 <script src="app.js"></script>
+<script src="strategy_versions.js"></script>
+<script src="versions.js"></script>
 <script src="browser.js"></script>
+<script src="pine-install.js"></script>
 </body></html>

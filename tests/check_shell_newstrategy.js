@@ -8,6 +8,7 @@
 // 跑法:node tests/check_shell_newstrategy.js(找不到 shell/node_modules 的 Electron 時 ③ SKIP,①② 照跑)
 const fs = require("fs"), path = require("path"), vm = require("vm"), os = require("os");
 const SHELL = path.join(__dirname, "..", "shell"), R = path.join(SHELL, "renderer");
+const GATE = require("./_electron_gate");
 let red = 0; const ok = (n, c, d) => { console.log((c ? "PASS  " : "FAIL  ") + n + (c || d === undefined ? "" : "  ← " + String(d).slice(0, 2000))); if (!c) red++; };
 const read = (f) => fs.readFileSync(f, "utf8");
 const src = read(path.join(R, "newstrategy.js")), appSrc = read(path.join(R, "app.js")), html = read(path.join(R, "index.html")), strings = read(path.join(R, "strings.js"));
@@ -35,6 +36,13 @@ if (!process.versions.electron) {
     && P.nsCompose({ name: "  ", symbol: "\n" }, "zh", S("zh")) === "" && P.nsCompose({}, "zh", S("zh")) === "" && P.nsCompose(null, "zh", S("zh")) === "");
   ok("① en 全填:名稱進雙引號、半形冒號句號、邏輯尾端的 . 不重複、尾句前一個空格", P.nsCompose({ name: "MA cross", symbol: "BTC", timeframe: "4h", indicators: "RSI", logic: "Long when RSI < 30." }, "en", S("en"))
     === 'Create a strategy "MA cross". Symbol: BTC. Timeframe: 4h. Indicators: RSI. Logic: Long when RSI < 30. For crypto symbols, default to USDT-margined perpetual futures unless stated otherwise.');
+  // e2e 0.1.8 #47:標的 2330 也被附上「加密貨幣標的…」那句
+  const DZ = S("zh").dflt, DE = S("en").dflt;
+  ok("① 台股標的(2330):不附加密那句;其餘照舊", P.nsCompose({ name: "台積電均線", symbol: "2330", timeframe: "1d" }, "zh", S("zh")) === "幫我建立策略「台積電均線」。標的：2330。週期：1d。"
+    && P.nsCompose({ symbol: "2330", timeframe: "1d" }, "en", S("en")) === "Create a strategy. Symbol: 2330. Timeframe: 1d.");
+  ok("① 認得出來的台股 / 台指期寫法都不附", ["2330", "00878", "006208", "00679B", "2330.TW", "6488.TWO", "TXF", "mxf", "TMF", "台指期", "臺指期 TXF", "小台", "微台", "2330 台積電", "2330、2317", "2330, 2454", "台股 0050", "加權指數"].every((x) => P.nsIsTw(x) && !P.nsCompose({ symbol: x }, "zh", S("zh")).includes(DZ)));
+  ok("① 判不出來的照舊附(加密、美股、混寫、沒填、3 碼或 7 碼數字、只有公司名)", ["BTC", "BTCUSDT", "ETH/USDT", "AAPL", "2330, BTC", "TSMC 2330", "", "   ", "123", "1234567", "台積電", "1000SHIB", "TX"].every((x) => !P.nsIsTw(x))
+    && P.nsCompose({ symbol: "BTC", timeframe: "1h" }, "zh", S("zh")).endsWith(DZ) && P.nsCompose({ symbol: "2330, BTC" }, "en", S("en")).endsWith(" " + DE) && P.nsCompose({ timeframe: "4h" }, "zh", S("zh")).endsWith(DZ));
   ok("① en 只填週期", P.nsCompose({ timeframe: "4h" }, "en", S("en")) === "Create a strategy. Timeframe: 4h. For crypto symbols, default to USDT-margined perpetual futures unless stated otherwise.");
 
   // ── ② 接線 ──
@@ -53,8 +61,8 @@ if (!process.versions.electron) {
     ok("② 用到的 " + keys.length + " 個 ns.* key zh / en 都齊;zh 全形標點", missing.length === 0 && Object.keys(STR.zh).filter((k) => k.startsWith("ns.")).every((k) => !/[一-鿿][,.?:;!]/.test(STR.zh[k])), missing); }
 
   // ── ③ 交給 Electron ──
-  const bin = path.join(SHELL, "node_modules", ".bin", "electron");
-  if (!fs.existsSync(bin)) { console.log("SKIP  ③ 找不到 shell/node_modules 的 Electron(先 cd shell && npm install)"); console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0); }
+  const bin = GATE.bin(SHELL, "③");
+  if (!bin) { console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0); }
   const r = require("child_process").spawnSync(bin, [__filename], { stdio: "inherit" });
   const sub = r.status == null ? 1 : r.status;
   console.log(red || sub ? `\n${red + sub} 紅` : "\nALL PASS");

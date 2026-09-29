@@ -1,7 +1,7 @@
 // shell/cloud.js:讀雲端主機狀態(唯讀)。不打真的 api(post 是假的)。
 // 跑法:node tests/check_shell_cloud.js
 const fs = require("fs"), path = require("path");
-const { createCloudHost, interpret, interpretStrategy, interpretOverview, interpretPerformance, ENDPOINT, EVENTS_ENDPOINT, STRATEGY_ENDPOINT, OVERVIEW_ENDPOINT, PERFORMANCE_ENDPOINT, EVENTS_MIN_GAP_MS, MIN_GAP_MS, POLL_BACKGROUND_MS, POLL_FOREGROUND_MS, BACKOFF_MS } = require("../shell/cloud.js");
+const { createCloudHost, interpret, interpretStrategy, interpretVersion, interpretVersionCompare, VERSION_ENDPOINT, interpretOverview, interpretPerformance, ENDPOINT, EVENTS_ENDPOINT, STRATEGY_ENDPOINT, OVERVIEW_ENDPOINT, PERFORMANCE_ENDPOINT, EVENTS_MIN_GAP_MS, MIN_GAP_MS, POLL_BACKGROUND_MS, POLL_FOREGROUND_MS, BACKOFF_MS } = require("../shell/cloud.js");
 let red = 0; const t = (n, ok) => { console.log((ok ? "PASS  " : "FAIL  ") + n); if (!ok) red++; };
 const body = (o = {}) => ({ machine: { state: "running", os_type: "linux", public_ip: "1.2.3.4" }, portfolio: { reported_at: 100, halt: { halted: false }, reconciler: { alive: true }, venues: {} },
   portfolio_reported_at: 100, portfolio_stale: false, server_time: 130, fx_rates: { USD: 1 }, currency: "USDT",
@@ -114,7 +114,10 @@ const body = (o = {}) => ({ machine: { state: "running", os_type: "linux", publi
   // 列舉:app_secret 讀出來的地方就這幾個(多一個就要有人看過它交給了誰)
   // 第 4 個 = mcpCode() 的 getCreds(換 `blave` MCP 的接入碼;只交給 mcpcode.js 去打 api,不進 agent、不進 renderer——tests/check_shell_mcp_code.js)
   // 第 5 個 = cloudCmd() 的 getCreds(對雲端主機下指令;同樣只交給 cloudcmd.js 去打 api——tests/check_shell_cloud_cmd.js)
-  t("main.js:loadAppSecret( 的出現次數沒有變多(第六處 = 策略庫購買 libraryPurchase,同 planStart 那一級)", (mainSrc.match(/loadAppSecret\(/g) || []).length === 6
+  // 第 7 個 = shareClient() 的 getCreds(報告公開分享;只交給 reportshare.js 去打 /oauth/desktop/share/*——tests/check_shell_report_share.js)
+  // 第 8 個 = balanceHost() 的 getCreds(讀自己的 Blave 餘額;只交給 balance.js 去打 /oauth/desktop/balance——tests/check_shell_balance.js)
+  t("main.js:loadAppSecret( 的出現次數沒有變多(第六處 = 策略庫購買 libraryPurchase,同 planStart 那一級;第七處 = 報告分享 shareClient;第八處 = 餘額 balanceHost)", (mainSrc.match(/loadAppSecret\(/g) || []).length === 8
+    && /createShareClient\(\{\n    apiBase: API_BASE, post: \(u, b\) => postJSON\(u, b, [^\n]*\{ timeout: SHARE_UPLOAD_TIMEOUT_MS \} : undefined\), readLocal: reportForShare,\n    logError: rptLogError, log: \(m\) => console\.error\("\[share\] " \+ m\), store: RS\.createShareStore\(path\.join\(BASE, "state", "report-shares\.json"\)\),\n    getCreds: \(\) => \{ const token = loadToken\(\); return token \? \{ token, appSecret: loadAppSecret\(\) \} : null; \},\n  \}\);/.test(mainSrc)
     && /createMcpCode\(\{ apiBase: API_BASE, post: \(u, b\) => postJSON\(u, b\),\s*getCreds: \(\) => \{ const token = loadToken\(\); return token \? \{ token, appSecret: loadAppSecret\(\) \} : null; \} \}\);/.test(mainSrc));
   t("main.js:登出時清掉雲端宿主手上的東西(讀、寫兩支都要:在途的指令回來時是上一個人的)",
     /if \(_cloud\) _cloud\.reset\(\);/.test(mainSrc) && /if \(_cloudCmd\) _cloudCmd\.reset\(\);/.test(mainSrc));
@@ -185,7 +188,7 @@ const body = (o = {}) => ({ machine: { state: "running", os_type: "linux", publi
      物件是雲端那台機器上的策略碼寫得進去的東西:逐欄驗型別、只留報告要畫的那幾欄(形狀對齊主行程 loadStrategy)。 */
   const stBody = (o = {}) => ({ machine_state: "running", server_time: 130, strategy: { name: "momo", display_name: "Momentum", description: "MARKER-DESC", status: "draft", code: "MODE = 'backtest'", backtest: { "Sharpe Ratio": 1.2, candles: [[1, 2, 3, 4, 5, 6]] }, images: [{ hash: "x" }] }, ...o });
   { const r = interpretStrategy({ status: 200, body: stBody() }, "momo");
-    t("策略:OK,只留 name / displayName / description / stats(= 整份 backtest)/ scan / code;images 與 status 不往上交", r.code === "OK" && JSON.stringify(Object.keys(r.strategy)) === '["name","displayName","description","stats","scan","code"]'
+    t("策略:OK,只留 name / displayName / description / stats(= 整份 backtest)/ scan / code / versions;images 與 status 不往上交", r.code === "OK" && JSON.stringify(Object.keys(r.strategy)) === '["name","displayName","description","stats","scan","code","versions"]'
       && r.strategy.displayName === "Momentum" && r.strategy.stats["Sharpe Ratio"] === 1.2 && r.strategy.stats.candles.length === 1 && r.strategy.code === "MODE = 'backtest'");
     t("策略:scan(參數掃描)是物件才原樣往上交,缺 / 陣列 / 字串 → null(逐欄檢查在 report-robust.js 的 sanitizeScan)", r.strategy.scan === null
       && interpretStrategy({ status: 200, body: stBody({ strategy: { name: "momo", scan: { row_param: "A", grid: [[1]] } } }) }, "momo").strategy.scan.row_param === "A"
@@ -198,6 +201,23 @@ const body = (o = {}) => ({ machine: { state: "running", os_type: "linux", publi
     t("策略:物件的 name 對不上要的名字(key 是截短雜湊,撞到就是別支)→ 讀不到,不畫成那支", bad({ name: "other", code: "x" }).code === "UNREACH" && bad("momo").code === "UNREACH" && bad(7).code === "UNREACH");
     for (const b of [{ status: 401, body: {} }, { status: 429, body: {} }, { status: 500, body: {} }, { status: 200, body: {} }, { status: 200, body: null }, { status: 200, body: "x" }, null])
       t("策略:壞回應 → UNREACH + strategy null(" + (b ? b.status + "/" + JSON.stringify(b.body) : "連不上") + ")", (() => { const r = interpretStrategy(b, "momo"); return r.code === "UNREACH" && r.strategy === null; })()); }
+  /* ── 策略版本(/cloud/version;canon strategy-versions §9):404 = 還在同步(上傳落差,不是錯誤);名字過 §9b 閘門、版號只收正整數才打 ── */
+  { const vs = { counter: 3, current: 3, items: [{ n: 2 }, { n: 3 }], drift: false };
+    t("版本:摘要清單是物件才原樣往上交,缺 / 陣列 → null", interpretStrategy({ status: 200, body: stBody({ strategy: { name: "momo", versions: vs } }) }, "momo").strategy.versions.current === 3
+      && interpretStrategy({ status: 200, body: stBody() }, "momo").strategy.versions === null && interpretStrategy({ status: 200, body: stBody({ strategy: { name: "momo", versions: [1] } }) }, "momo").strategy.versions === null);
+    t("版本:單版 200 物件 = OK;404 = SYNCING;其餘(401 / 429 / 500 / 壞形狀 / 連不上)= UNREACH",
+      interpretVersion({ status: 200, body: { v: 1, n: 2, code: "x" } }).blob.n === 2 && interpretVersion({ status: 404, body: {} }).code === "SYNCING"
+      && [{ status: 401, body: {} }, { status: 429, body: {} }, { status: 500, body: {} }, { status: 200, body: [1] }, { status: 200, body: null }, null].every((b) => interpretVersion(b).code === "UNREACH"));
+    t("版本:比較 404 帶 missing = SYNCING(只留正整數);200 缺 a / b / hunks = UNREACH",
+      JSON.stringify(interpretVersionCompare({ status: 404, body: { missing: [3, "x", -1] } })) === '{"code":"SYNCING","missing":[3]}'
+      && interpretVersionCompare({ status: 200, body: { a: {}, b: {}, hunks: [], truncated: true } }).data.truncated === true
+      && interpretVersionCompare({ status: 200, body: { a: {}, hunks: [] } }).code === "UNREACH");
+    const vCalls = [], hv = createCloudHost({ apiBase: "https://x", getCreds: () => ({ token: "acct-V", appSecret: "appsec-V" }), post: async (u, b) => { vCalls.push({ u, b }); return { status: 404, body: { missing: [2] } }; }, now: () => clock, setTimer: () => 0, clearTimer: () => {} });
+    const bad = [{ name: "bad name", op: "get", n: 1 }, { name: "a".repeat(129), op: "get", n: 1 }, { name: "momo", op: "get", n: 0 }, { name: "momo", op: "get", n: "2" }, { name: "momo", op: "compare", a: 1 }, { name: "momo", op: "list" }, null];
+    const outs = []; for (const q of bad) outs.push((await hv.version(q)).code);
+    t("版本:名字過不了閘門 / 版號不是正整數 / op 不認得 → 不發請求、UNREACH", outs.every((c) => c === "UNREACH") && vCalls.length === 0);
+    const rc = await hv.version({ name: "momo", op: "compare", a: 1, b: 2 });
+    t("版本:比較 POST 到契約的路徑,body = 兩顆憑證 + name / op / a / b", vCalls.length === 1 && vCalls[0].u === "https://x" + VERSION_ENDPOINT && JSON.stringify(Object.keys(vCalls[0].b).sort()) === '["a","app_secret","b","name","op","token"]' && rc.code === "SYNCING" && rc.missing[0] === 2); }
   { const stCalls = []; let stCreds = { token: "acct-S", appSecret: "appsec-S" }, stReply = { status: 200, body: stBody() };
     const h = createCloudHost({ apiBase: "https://x", getCreds: () => stCreds, post: async (u, b) => { stCalls.push({ u, b }); if (stReply instanceof Error) throw stReply; return stReply; }, now: () => clock, setTimer: () => 0, clearTimer: () => {} });
     const r0 = await h.strategy("momo");

@@ -28,6 +28,10 @@ numbers are all in `describe()`: cite them, don't restate them in a narrative sl
     publish(pack)                          # no narrative = data pack only, id gets "-auto"
                                            # (a scheduled run: no LLM, no invented view)
 
+publish() never overwrites a report: an id that is taken gets the next free one (`-2`, `-3`, …)
+and the path it returns names the file written. To correct the report you published earlier in
+the same turn, publish again with `replace=True`.
+
 Templates: `tw_market_brief()`, `tw_close_brief()`, `crypto_market_brief()`, `symbol_brief(symbol)`.
 A pack with `pack.skip` set (tw_close_brief on a non-trading day, or before today's close
 has landed) is never published: `publish()` prints why and returns None.
@@ -52,6 +56,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from lib import data as _data
+from lib import report as _report
 from lib.report import write_report
 
 TPE = timezone(timedelta(hours=8))
@@ -218,7 +223,8 @@ def _publish_checklist(pack):
         "時間窗照用戶問的(問「這週」就是 7 日,describe 只有 24h 就從序列自己算 7 日,不拿 24h 頂替)",
         f"  5. news ≤{n} 則,來自至少 {NEWS_MIN_SITES} 個不同網站;每則填 symbols(它點名的代號,如 [\"XRP\"]、[\"2330\"]);"
         f"tag 只能 pos / neg / neutral;summary 一句 ≤{NEWS_SUMMARY_MAX} 字、自己的話、不給建議;"
-        f"published_at 在 {NEWS_MAX_AGE_DAYS} 天內;web 來的每則至少一個 https 連結",
+        f"published_at 在 {NEWS_MAX_AGE_DAYS} 天內;web 來的每則至少一個 https 連結,"
+        "同一個連結只能出現在一則(兩則不同的事都只有同一個列表頁當來源 → 只留一則,或各用文章自己的連結)",
         "  6. 今天的特殊事件要有自己的積木:新聞點名的標的(正面/負面)、lead／read／summary 講到的個股或幣,"
         "build 時加做 extra=[…](台股個股 [\"tw_institutional\", {\"symbol\": \"2409\"}] 或 price_chart;"
         "這份報告自己的幣 relative_to;其他幣 coin_snapshot);narrative['no_extra'] 只在積木建不出來(沒資料)時用。"
@@ -235,8 +241,17 @@ def _publish_checklist(pack):
         "  10. 圖型由積木決定,不自選:每期發生量(爆倉金額、買賣超、成交量)→ bar_chart、"
         "水位與指標(OI、融資、資金費率、z-score)→ line_chart、價格 → K 線;自組序列(自訂報告)也照這張表",
         "  11. 中文標點用全形(夾在中文之間的 , : ; ( ) 會自動轉)",
+        f"  12. 引用網頁上的圖(用戶要求時必放,最多 {_report.CITED_IMAGES_MAX} 張):browser_capture(tab, ref, report={rid!r}) 回傳的 file 與 source "
+        "原樣放進 narrative[\"images\"] = [{\"file\": …, \"source\": {…}, \"alt\": \"這張圖畫的是什麼\"}];不算進 16 塊,不要改 pack.blocks;"
+        "擷取了卻不放 → narrative[\"images_unused\"] 一句說明(檔案會刪),並在回覆講那張圖沒有放進報告",
+        "  13. 前後比較用同一個基準:寫「從 A 到 B」「擴大／收斂 N 個百分點」的兩個值,基準與算法要一樣——分母、匯率、對照價"
+        "都取同一天;有一個換了日期就不是同一個指標的變化,不寫成「從 A 到 B」。"
+        "自己換算的衍生數字(上面 describe() 沒有的):在表或圖說寫明公式與每個輸入的日期;拿不到同基準的輸入,那一格寫「—」,不硬算;"
+        "用戶說「不要估」時,衍生數字不進標題與 lead。百分位與排名不互換(「第 2 百分位」不是「第 2 低」)",
         "  讀網頁:有內建瀏覽器(電腦版)時 browser_read 只用 part=\"meta\" / \"outline\" / \"section\",不用 \"full\"(每頁約 3,000 字);"
         "沒有瀏覽器(雲端、排程)用 WebSearch 找、WebFetch 讀,prompt 只要標題、發布時間與一句重點",
+        "  開頁:browser_open_many 只開打算讀的頁,開了的每一頁都要讀,不讀的不要開;新聞與數字先讀媒體或官方原文,"
+        "論壇貼文、轉述、聚合頁只在找不到原文時用,來源名後面加「（轉述）」",
         "narrative 範例(照這個形狀填,不用去讀 references 或 lib 原始碼):",
         "  {\"lead\": \"一句結論。第二句放數字。\", \"read\": [\"**結論**:數字與基準\", …],"
         + (" \"against\": \"- …\", \"robustness\": \"- …\"," if research else " \"watch\": [(\"條件\", \"門檻\", \"現在值\"), …],"),
@@ -247,6 +262,8 @@ def _publish_checklist(pack):
         f"  publish({rid!r}, narrative, title=\"<結論 ≤{TITLE_MAX} 字>\"" + (", shareable=True)" if research else ")"),
         f"  被拒:只改 narrative,publish({rid!r}, narrative, title=…) 重送同一個 pack;不要再呼叫範本重建"
         f"(資料會變、又多花 {int(sum(t for _, t in pack.timings)) or '數十'} 秒)",
+        "  已經發出去才發現要改:同一輪內再 publish 一次並加 replace=True(只會換掉這一輪自己發的那份);"
+        "不加就是多一份新報告——舊報告一律不會被蓋掉,id 已有報告時新的一份自動排下一個號,回覆不用提編號",
     ]
     return lines
 
@@ -347,8 +364,16 @@ def line_chart(title, series, y_unit=None, caption=None, reflines=None):
     return b
 
 
-# 範本的價格 K 線一律畫最後 60 根:手機寬度約放得下 68 根完整 K 棒(日 K 建議 40–65)。
-_PRICE_BARS = 60
+# 範本的日 K 畫最後 90 根(60 日均涵蓋段 + 一個月對照),研究報告 120 根(契約上限)。桌機與 PDF 到 120 根
+# 都是完整 K 棒;手機寬超過約 72 根渲染器降階成高低線——接受,不在產出端截短。
+_PRICE_BARS = 90
+_RESEARCH_BARS = 120
+
+
+def _bars_window_days(bars, trading_week=5):
+    """Calendar days to fetch so `bars` daily bars come back: a crypto day is a bar
+    (`trading_week=7`); a Taiwan session week is 5 days plus room for a long holiday."""
+    return bars + 2 if trading_week == 7 else bars * 7 // 5 + 14
 
 
 def _clean_ohlc(df):
@@ -637,13 +662,14 @@ def _tw_market(blave, public, name, notes, missing, used, empty_cols):
     return df
 
 
-# 指數日 K 固定抓 90 個日曆日(約 60 個交易日):60 日均與 60 根 K 棒要這麼多;lookback_days 只管
+# 指數日 K 固定抓 140 個日曆日(90 根 K 棒 + 春節長假的餘裕;免費路徑一個月一次請求);lookback_days 只管
 # 成交值、法人、融資、期貨法人——免費路徑上法人與融資一天一次請求,冷啟動成本跟著它走。
-_TW_INDEX_DAYS = 90
+_TW_INDEX_DAYS = _bars_window_days(_PRICE_BARS)
 
 
-def _tw_index_start(date, start):
-    return min(start, (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=_TW_INDEX_DAYS)).strftime("%Y-%m-%d"))
+def _tw_index_start(date, start, bars=_PRICE_BARS):
+    days = max(_TW_INDEX_DAYS, _bars_window_days(bars))
+    return min(start, (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=days)).strftime("%Y-%m-%d"))
 
 
 def _tw_market_index(start, date, headers, used):
@@ -737,12 +763,12 @@ _TW_FLOW = [["tw_turnover", {}], ["tw_institutional", {}], ["tw_margin", {}], ["
 _TW_KPI = ["price_chart", "tw_turnover", "tw_institutional", "tw_margin", "tw_futures_inst"]
 
 RECIPES = {
-    # 晨報 v2(spec 2026-09-26 §2.2):沿用 id tw-market-YYYYMMDD。指數計算窗口仍 90 天(60 日均、前 20 日高
-    # 要 60 個交易日),K 線只畫最後 45 天;融資只留 KPI,圖留在收盤報告。
+    # 晨報 v2(spec 2026-09-26 §2.2):沿用 id tw-market-YYYYMMDD。K 線與收盤報告同為 90 根;融資只留 KPI,
+    # 圖留在收盤報告。
     "tw_market_brief": {
         "id": "tw-market", "title": "台股大盤晨報", "lookback_days": 45,
         "kpi": _TW_KPI + ["txf_night"],
-        "bricks": [["price_chart", {"symbol": "TAIEX", "display_days": 45}], ["tw_turnover", {}],
+        "bricks": [["price_chart", {"symbol": "TAIEX"}], ["tw_turnover", {}],
                    ["tw_institutional", {}], ["tw_margin", {"chart": False}], ["movers", {"market": "tw", "n": 10}],
                    ["tw_futures_inst", {}], ["txf_night", {}], ["tw_announcements", {"n": 3}],
                    ["news", {"market": "tw", "n": 5}],
@@ -754,14 +780,15 @@ RECIPES = {
         "bricks": [["price_chart", {"symbol": "TAIEX"}]] + _TW_FLOW + [
             ["event_calendar", {"countries": ["US", "CN", "TW", "JP", "EU"], "today_only": True}]],
     },
-    # 恐懼貪婪的條款確認前,KPI 第六格放交易員曝險(spec §2.2)。
+    # 恐懼貪婪的條款確認前,KPI 第六格放交易員曝險(spec §2.2)。lookback_days 是報價表「30 日報酬」欄的 N,
+    # 指標折線的 90 日由積木自己的 days 決定。
     "crypto_market_brief": {
         "id": "crypto-market", "title": "加密市場晨報", "lookback_days": 30,
         "kpi": ["quote_table", "liquidation", "funding", "blave_indicators"],
         "bricks": [["quote_table", {"top_mcap": 5}], ["funding", {"symbol": "BTC", "chart": False}],
                    ["derivs_table", {}], ["liquidation", {"hours": 24}], ["movers", {"market": "crypto", "n": 5}],
                    ["blave_indicators", {"names": ["市場方向", "資金稀缺", "頂尖交易員曝險"],
-                                         "kpi": ["市場方向", "頂尖交易員曝險"], "raw_chart": False}],
+                                         "kpi": ["市場方向", "頂尖交易員曝險"], "raw_chart": False, "days": 90}],
                    ["news", {"market": "crypto", "n": 5}],
                    ["event_calendar", {"countries": ["US", "CN", "EU", "JP"]}]],
     },
@@ -786,6 +813,59 @@ def build(recipe, date=None, headers=None, extra=None, fresh=False):
     a second identical call within 10 minutes returns the kept pack unless `fresh=True`."""
     from lib import report_bricks
     return report_bricks.build(recipe, date, headers, extra=extra, fresh=fresh)
+
+
+def quickstart():
+    """What a report in the user's own words (a custom recipe) or a research report needs before the
+    first line of code, printed — so nothing is read or grepped first. Measured 09-28: one research
+    turn spent its first three minutes and 15 calls in references/reports.md and lib source.
+    The brick list and the signatures are taken from the code, so they cannot drift. Returns the text."""
+    import inspect
+    from lib import report_bricks
+    sig = lambda f, drop=(): "(" + ", ".join(str(p) for n, p in inspect.signature(f).parameters.items() if n not in drop) + ")"
+    first = lambda f: " ".join((f.__doc__ or "").strip().split("\n")[0].split())[:110]
+    lines = [
+        "[report] QUICK START for a report in the user's own words, or a research report.",
+        "  Read this and start. Not first: references/reports.md, lib source, a grep for a signature (they are below).",
+        "  Open a section of references/reports.md only when publish() refuses something its message does not explain.",
+        "ORDER (fixed)",
+        "  1. Search the web (browser_search, then browser_open_many and browser_read part=meta / section; read every page",
+        "     you opened). Blave data may be fetched in the same step while pages load.",
+        "  2. Build the data pack once:",
+        f"       one coin or Taiwan stock : pack = research_pack{sig(research_pack)}",
+        f"       anything else            : pack = build(check_recipe(recipe), extra=[...])   build{sig(build)}",
+        "  3. print(pack.describe())  -> every figure you may cite, the narrative slots with their limits, the publish checklist",
+        f"  4. publish{sig(publish)}",
+        "     research needs shareable=True or False. Refused -> fix what it lists, publish('<report id>', narrative, ...); never rebuild.",
+        "RECIPE",
+        '  {"id": "btc-derivs", "title": "BTC 衍生品", "lookback_days": 90, "kpi": ["price_chart", "liquidation"],',
+        '   "bricks": [["price_chart", {"symbol": "BTC"}], ["derivs_table", {"symbols": ["BTC", "ETH"], "window": "7d"}]]}',
+        f"  keys: {', '.join(_RECIPE_KEYS)}; id [a-z0-9-] up to 40, not starting with {' / '.join(_BUILTIN_PREFIXES)};",
+        f"  at most {RECIPE_MAX_BRICKS} bricks that lay out a block; kpi names bricks of the recipe, the first is the focus;",
+        "  extra = up to 3 more bricks for what today's news is about, same [name, {params}] form.",
+        f"  research_pack topics: {', '.join(RESEARCH_TOPICS)}",
+        "BRICKS  name(arguments) : what it lays out",
+    ]
+    lines += [f"  {name}{sig(fn, ('b',))} : {first(fn)}" for name, fn in report_bricks.BRICKS.items()]
+    lines += [
+        "A FIGURE NO BRICK SHOWS",
+        "  Look once in references/lib.md (the fetchers and their signatures), not in lib source. What is not there comes",
+        "  from the pages you read - the outlet's own article or the official page - cited, and the report says it is from the web.",
+        "A FIGURE YOU WORK OUT YOURSELF, AND BEFORE / AFTER",
+        "  'From A to B' needs both values on one basis and one formula: the denominator, the FX rate and the reference",
+        "  price each of the SAME date on both sides. One input changed date -> not the same measure; never 'from A to B'.",
+        "  State the formula and the date of every input in the table or the caption. No input on the same basis -> the",
+        "  cell says —, do not compute it anyway. The user said not to estimate -> no derived figure in the title or the lead.",
+        "  A percentile is not a rank: '2nd percentile' is never 'second lowest'.",
+        "RUN IT",
+        "  python3 -c '...' from the workspace root, or a tmp/ script run as python3 -m tmp.x (python3 tmp/x.py cannot import lib).",
+    ]
+    text = "\n".join(lines)
+    try:   # Windows run.log is cp950: a line that cannot be encoded must not turn into an exception
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", "replace").decode("ascii"))
+    return text
 
 
 # ─── 自組配方:report_jobs/<id>/recipe.json ─────────────────────────────────────
@@ -814,7 +894,7 @@ def check_recipe(recipe):
         raise ValueError("a recipe is a dict {id, title, kpi, bricks}")
     extra = sorted(set(recipe) - set(_RECIPE_KEYS))
     if extra:
-        # report_id / type / report_type stay the built-ins' own: a custom id overwriting tw-market-*, or a
+        # report_id / type / report_type stay the built-ins' own: a custom id filed among tw-market-*, or a
         # `performance` type carrying news, is exactly what this check is for
         raise ValueError(f"recipe has unknown key(s) {extra}; a custom recipe takes {', '.join(_RECIPE_KEYS)}")
     lb = recipe.get("lookback_days", 45)
@@ -825,7 +905,7 @@ def check_recipe(recipe):
         raise ValueError(f"recipe id {rid!r} must match [a-z0-9][a-z0-9-]{{0,39}}")
     if any(rid == p.rstrip("-") or rid.startswith(p if p.endswith("-") else p + "-") for p in _BUILTIN_PREFIXES):
         raise ValueError(f"recipe id {rid!r} collides with a built-in template ({', '.join(_BUILTIN_PREFIXES)}): "
-                         "the same id on the same day overwrites that template's report")
+                         "its reports would be filed as that template's")
     title = recipe.get("title")
     if not isinstance(title, str) or not 1 <= len(title) <= 80:
         raise ValueError("recipe title must be 1–80 characters")
@@ -960,7 +1040,7 @@ def tw_market_brief(date=None, headers=None, lookback_days=45, extra=None, fresh
     session, the 10 largest 成交值 and the day's 重大訊息 (desktop: TWSE open data), a news
     slot (鉅亨 headlines as candidates; yours to fill in chat) and today's macro events and
     除權息. `lookback_days` covers the flow series (20-day means, futures chart); the index
-    always spans 90 days for its 60-day mean, and the chart draws its last 45 days."""
+    chart always draws its last 90 sessions, whatever `lookback_days` is."""
     return build(_recipe("tw_market_brief", lookback_days=lookback_days), date, headers, extra, fresh)
 
 
@@ -1054,14 +1134,16 @@ def crypto_market_brief(date=None, headers=None, symbols=("BTC", "ETH", "SOL"), 
     largest coins by market cap, the derivatives table (OI 24h, funding, long/short), 24h
     liquidations, the day's movers, the market-wide Blave indicators, a news slot (yours to
     fill in chat; a scheduled run has no licensed crypto source and lays out none) and
-    today's macro events."""
+    today's macro events. `lookback_days` is the N of the N-day return column; the indicator
+    chart spans 90 days regardless."""
     return build(_with_symbols(_recipe("crypto_market_brief", lookback_days=lookback_days), symbols), date, headers,
                  extra, fresh)
 
 
 def symbol_brief(symbol, date=None, headers=None, lookback_days=90, extra=None, fresh=False):
     """單標的晨報 data pack. A 4–6 digit id is a Taiwan stock (日 K + 外資買賣超);
-    anything else is a crypto USDT perp (日 K + 資金費率 + 爆倉 / 巨鯨 / 多空力道)."""
+    anything else is a crypto USDT perp (日 K + 資金費率 + 爆倉 / 巨鯨 / 多空力道). The daily
+    chart draws 90 bars; `lookback_days` is the window of the funding and indicator lines."""
     sym = str(symbol).strip().upper()
     if sym.isdigit():
         recipe = {"id": f"symbol-{sym}", "subject": sym, "title": f"{sym} 晨報", "report_type": "單標的晨報",
@@ -1089,12 +1171,13 @@ def research_pack(symbol, topics=None, date=None, headers=None, lookback_days=90
     `publish(pack, narrative, title="<your claim>")` (references/reports.md §7b).
 
     topics (default all) picks the sections:
-      price        daily candles (90 days) with the prior-20 high/low and moving averages
-      volume       today's volume against its 20-day mean (coin)
+      price        daily candles (120 bars) with the prior-20 high/low and moving averages
+      volume       today's volume against its 20-day mean, over a 90-bar daily chart (coin)
       relative     the symbol against `benchmark` over 30 days, rebased to 100 (coin)
       derivatives  funding (Binance), open interest change over `window` ("7d" default — a research
                    question spans weeks; "24h" only for a question about today) and long/short ratio (coin)
-    `days` is the relative / volume window (default 30): set it to the span the user asked about.
+    `days` is the relative-performance window (default 30): set it to the span the user asked
+    about. It does not change how many candles a chart draws.
       indicators   Blave 爆倉 / 巨鯨 / 多空力道 z-scores (coin)
       levels       recent highs / lows and moving averages as a table
       flows        外資買賣超, last 10 sessions (Taiwan stock)
@@ -1107,7 +1190,7 @@ def research_pack(symbol, topics=None, date=None, headers=None, lookback_days=90
     if bad:
         raise ValueError(f"unknown topic(s) {bad}; topics: {', '.join(RESEARCH_TOPICS)}")
     if sym.isdigit():
-        bricks = [["price_chart", {"symbol": sym}]] if "price" in want or "levels" in want else []
+        bricks = [["price_chart", {"symbol": sym, "bars": _RESEARCH_BARS}]] if "price" in want or "levels" in want else []
         if "flows" in want:
             bricks.append(["tw_institutional", {"symbol": sym}])
         if "levels" in want:
@@ -1117,7 +1200,7 @@ def research_pack(symbol, topics=None, date=None, headers=None, lookback_days=90
                   "lookback_days": lookback_days, "kpi": ["price_chart", "tw_institutional"], "bricks": bricks}
     else:
         label = _data.normalize_symbol(sym if sym.endswith("USDT") else sym + "USDT").replace("USDT", "")
-        bricks = [["price_chart", {"symbol": label}]] if "price" in want or "levels" in want else []
+        bricks = [["price_chart", {"symbol": label, "bars": _RESEARCH_BARS}]] if "price" in want or "levels" in want else []
         if "volume" in want:
             bricks.append(["coin_snapshot", {"symbol": label, "days": days}])
         if "relative" in want and label != benchmark.upper():
@@ -1272,7 +1355,7 @@ def _missing_item(pack, lang):
     return ("blave", head.format(names=names) + _access_fix(lang))
 
 
-def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang="zh", shareable=None):
+def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang="zh", shareable=None, replace=False):
     """Assemble the pack and the narrative into a report and drop it. Returns the path.
 
     `pack` is a Pack or its report id (a string): a template call keeps the pack it built for
@@ -1296,6 +1379,8 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang=
     origin: "chat" (default) or "scheduled" — shown in the report header.
     lang: "zh" (default) or "en" — only the footnote line about missing Blave data
     (`pack.missing`) and the exchanges' attribution lines are localised; the blocks are Chinese.
+    replace: True only to correct the report this turn already published under this id; by
+    default a taken id means a new report under the next free id (lib.report.write_report).
     Returns None without writing when `pack.skip` is set."""
     if isinstance(pack, str):
         pack = load_pack(pack)
@@ -1313,8 +1398,8 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang=
             problems.append(str(e))
             return None
 
-    # 表態欄位:不渲染,只證明 agent 看過這兩條提示(加做、來源不到 3 家)才決定不照做
-    waived = {k: narrative.pop(k) for k in ("no_extra", "few_sources") if k in narrative}
+    # 表態欄位:不渲染,只證明 agent 看過這幾條提示(加做、來源不到 3 家、擷取了圖卻不放)才決定不照做
+    waived = {k: narrative.pop(k) for k in ("no_extra", "few_sources", "images_unused") if k in narrative}
     for k, v in waived.items():
         if not (isinstance(v, str) and 1 <= len(v.strip()) <= 200):
             problems.append(f"narrative[{k!r}] must be one sentence (1–200 characters) saying why")
@@ -1322,12 +1407,13 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang=
         problems.append("'action' was renamed to 'watch' (觀察重點): conditions and indicator thresholds "
                         "only, no trade instruction, see references/reports.md §1b")
         narrative.pop("action")
-    unknown = set(narrative) - set(pack.slots) - {"lead_chart"}
+    unknown = set(narrative) - set(pack.slots) - {"lead_chart", "images"}
     if unknown:
-        problems.append(f"unknown narrative slot(s): {sorted(unknown)}; allowed: {sorted(set(pack.slots) | {'lead_chart'})}")
+        problems.append(f"unknown narrative slot(s): {sorted(unknown)}; allowed: {sorted(set(pack.slots) | {'lead_chart', 'images'})}")
         for k in unknown:
             narrative.pop(k)
     lead_chart = narrative.pop("lead_chart", None)
+    images_in = narrative.pop("images", None)
     news_given = "news" in narrative
     news_in = narrative.pop("news", None)
     watch = narrative.pop("watch", None)
@@ -1358,7 +1444,21 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang=
     if narrative.get("lead", "").strip():
         problems.extend(_lead_problems(narrative["lead"].strip()))
     problems.extend(_number_problems(pack, narrative, watch_block))
-    narrated = bool(watch_block) or any(v.strip() for v in narrative.values()) or bool(news_in)
+    image_blocks = attempt(_image_blocks, report_id or pack.report_id, images_in, replace) or []
+    narrated = bool(watch_block) or any(v.strip() for v in narrative.values()) or bool(news_in) or bool(image_blocks)
+    unused = sorted(set(_report.captured_files(report_id or pack.report_id, replace)) - {b["file"] for b in image_blocks})
+    if unused and images_in is not None and not image_blocks:
+        unused = []   # narrative['images'] 本身有錯:上面已經列了,改好再來算誰沒用到
+    if unused and "images_unused" not in waived:
+        problems.append(f"{len(unused)} captured image(s) are not in the report: {', '.join(unused)}. Cite each with "
+                        "narrative['images'] = [{\"file\", \"source\", \"alt\"}] (file and source exactly as browser_capture "
+                        "returned them), or say in one sentence why not in narrative['images_unused'] — those files are then "
+                        "deleted, and when the user asked for a cited image the reply must say it is not in the report")
+    if len(pack.owners) != len(pack.blocks):
+        problems.append(f"pack.blocks was changed by hand ({len(pack.blocks)} blocks, {len(pack.owners)} owners): blocks added "
+                        "that way are dropped without a word. Publish the kept pack by its id instead — "
+                        f"publish({pack.report_id!r}, narrative) — with a cited image in narrative['images'] and extra data "
+                        "from build(extra=[…])")
     news = attempt(_news_block, pack, news_in, news_given, narrated)
     news_block, news_foot = news if news else (None, None)
     news_block = _fw_block(news_block) if news_block else None
@@ -1441,6 +1541,7 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang=
     if narrative.get("lead", "").strip():
         out.append(text(narrative["lead"].strip(), lead=True))
     out += blocks
+    out += image_blocks   # 引用圖排在數據區塊之後、判讀之前:判讀引用它時圖已經在上面
     for slot in ("read", "against", "robustness"):
         body = narrative.get(slot, "").strip()
         if body and slot in pack.slots:
@@ -1476,9 +1577,10 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang=
         problems.append("origin must be 'chat' or 'scheduled'")
     if problems:
         raise ValueError(_refusal(pack, problems))
-    if len(out) + 1 > MAX_BLOCKS:
-        print(f"WARNING: {len(out) + 1} blocks, over {MAX_BLOCKS} (references/reports.md §1b R4): "
-              "drop the bricks the lead does not use")
+    counted = len(out) + 1 - len(image_blocks)   # 引用圖是用戶點名要的,不算進 R4 的 16 塊
+    if counted > MAX_BLOCKS:
+        print(f"NOTE for you, not for the reply: {counted} blocks, over {MAX_BLOCKS} (references/reports.md §1b R4). "
+              "The report is written as it is; next time drop the bricks the lead does not use.")
     meta = dict(pack.meta)
     meta["origin"] = origin or ("chat" if narrated else "scheduled")
     title, day_cell = _dated_title(pack, title or pack.title)
@@ -1486,12 +1588,15 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang=
         meta["extra"] = list(meta.get("extra") or []) + [day_cell]
     if shareable is not None and pack.type == "research":
         meta["shareable"] = bool(shareable)   # §7b B7 的自評紀錄(research_pack 的報告)
-    # 純數據包用自己的 id(-auto):排程版同一天跑,不能把早上那份有判讀的蓋掉
-    # (29026 實測:cron 首跑覆蓋了對話產的 tw-market-20260902)。明給 report_id 就照給。
+    # 純數據包用自己的 id(-auto):runtime 靠這個字尾分資料版與有判讀的(report_runner._published)。
+    # 明給 report_id 就照給。id 已經有報告 → write_report 自己換下一個空的(-2、-3…),不蓋舊的
     if report_id is None:
         report_id = pack.report_id if narrated else pack.report_id + "-auto"
     # write_report prints the "moved to reports/sent/, reply now" line for both paths.
-    path = write_report(report_id, title, out, type=pack.type, report_type=pack.report_type, meta=meta)
+    path = write_report(report_id, title, out, type=pack.type, report_type=pack.report_type, meta=meta, replace=replace)
+    if unused:
+        print(f"[report] {len(unused)} captured image(s) were left out and deleted. If the user asked for a cited "
+              "image, say in the reply - one plain sentence - that it is not in the report and why.")
     reply = _reply_draft(narrative, watch_block)
     if reply:
         # 09-27 實測:光是「一兩句」的規則,agent 仍回四句、重述數字、加粗體標籤——給一個照抄得了的範本
@@ -1500,6 +1605,57 @@ def publish(pack, narrative=None, report_id=None, title=None, origin=None, lang=
         except UnicodeEncodeError:
             pass
     return path
+
+
+IMAGE_ALT_MAX, IMAGE_CAPTION_MAX, IMAGE_SOURCE_NAME_MAX = 200, 300, 40
+
+
+def _image_blocks(report_id, images, replace=False):
+    """narrative['images'] → cited `image` blocks (references/reports.md §5 › Citing an image from the
+    web). Each item is what browser_capture returned — `file`, `source` {name, url} — plus `alt`
+    and an optional `caption`. Every problem is raised at once; nothing is dropped quietly."""
+    if images is None:
+        return []
+    if not isinstance(images, (list, tuple)) or not all(isinstance(x, dict) for x in images):
+        raise ValueError("narrative['images'] must be a list of {\"file\", \"source\", \"alt\"} items")
+    bad = []
+    if len(images) > _report.CITED_IMAGES_MAX:
+        bad.append(f"narrative['images'] has {len(images)} items, at most {_report.CITED_IMAGES_MAX}: keep the ones a "
+                   "claim in the text rests on")
+    have = set(_report.captured_files(report_id, replace))
+    own = None if replace else _report._own(report_id)
+    out = []
+    for i, it in enumerate(images):
+        where = f"narrative['images'][{i}]"
+        extra = sorted(set(it) - {"file", "source", "alt", "caption"})
+        if extra:
+            bad.append(f"{where}: unknown key(s) {extra}; an item is file, source, alt and an optional caption")
+        file, src, alt, cap = it.get("file"), it.get("source"), it.get("alt"), it.get("caption")
+        if not isinstance(file, str) or file not in have:
+            bad.append(f"{where}.file {file!r} is not a capture of this report — browser_capture(tab, ref, "
+                       f"report={report_id!r}) writes it and returns the name; captured now: {sorted(have) or 'none'}"
+                       + (" (you already published this report in this turn: to correct that one, publish with "
+                          "replace=True and its pictures are found again)" if own else ""))
+        if not (isinstance(alt, str) and 1 <= len(alt.strip()) <= IMAGE_ALT_MAX):
+            bad.append(f"{where}.alt is required: what the chart shows, in the report's language, ≤{IMAGE_ALT_MAX} characters")
+        if cap is not None and not (isinstance(cap, str) and 1 <= len(cap.strip()) <= IMAGE_CAPTION_MAX):
+            bad.append(f"{where}.caption must be 1–{IMAGE_CAPTION_MAX} characters when given")
+        name = src.get("name") if isinstance(src, dict) else None
+        if not isinstance(src, dict) or set(src) != {"name", "url"} \
+                or not (isinstance(name, str) and 1 <= len(name.strip()) <= IMAGE_SOURCE_NAME_MAX):
+            bad.append(f"{where}.source must be {{\"name\" (≤{IMAGE_SOURCE_NAME_MAX}), \"url\"}}, as browser_capture returned it")
+        else:
+            try:
+                _check_url(src["url"], f"{where}.source")
+            except ValueError as e:
+                bad.append(str(e))
+        out.append((file, alt, src, cap))
+    if bad:
+        raise ValueError("\n           ".join(bad))
+    return [dict({"type": "image", "file": file, "alt": alt.strip(),
+                  "source": {"name": src["name"].strip(), "url": src["url"]}},
+                 **({"caption": cap.strip()} if cap else {}))
+            for file, alt, src, cap in out]
 
 
 def _reply_draft(narrative, watch_block):
@@ -1992,11 +2148,9 @@ _AGENT_AVAILABLE_FOOT = "升級後排程可以請 AI 整理新聞，跟 agent �
 
 def _news_describe(news):
     c = news["candidates"]
-    # 名單 09-27 逐站查證後只點名查無禁令的:經濟日報/MoneyDJ 的 robots 明文禁 LLM、CoinDesk/Reuters 的
-    # 條款禁自動化抓取——「條款禁止 AI 摘要/自動化的來源不用」是既有規則,先看目標站的 terms 與 robots。
     search = ("  先上網查:至少 3 個不同網站(優先 鉅亨(授權,列表頁 https://news.cnyes.com/news/cat/headline"
-              " 與 /news/cat/bc_crypto 可直接抓)與交易所/專案方官方公告;其他站先確認它的"
-              "條款與 robots.txt 沒有禁止 AI 使用——經濟日報、MoneyDJ、CoinDesk、Cointelegraph 都有明文禁令,不用);"
+              " 與 /news/cat/bc_crypto 可直接抓)與交易所/專案方官方公告;其他新聞站都可以用,"
+              "標明來源、摘要用自己的話、不照抄全文);"
               "下面的候選只是起點,不能代替上網")
     why = {"denied": "無 Blave 資料權限,鉅亨候選省略", "failed": "鉅亨新聞抓取失敗", None: "上一個收盤之後"}[news.get("state")]
     head = (f"  新聞候選 {len(c)} 則(鉅亨授權,{why}):"
@@ -2177,10 +2331,12 @@ def _news_one(i, it, urls, titles):
 
 
 def _news_title(items):
+    """The block's own name comes first: 「綜合 3 家」 alone does not say what the block is
+    (e2e 0.1.8 #59). The count or the outlet names are the supplement."""
     names = list(dict.fromkeys(s["name"] for it in items for s in it["sources"]))
     if len(names) >= 3:
-        return f"綜合 {len(names)} 家"
-    return "、".join(names)
+        return f"新聞 · 綜合 {len(names)} 家"
+    return "新聞 · " + "、".join(names) if names else "新聞"
 
 
 def _news_block(pack, news_in, given, narrated):

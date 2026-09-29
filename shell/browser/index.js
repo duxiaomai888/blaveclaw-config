@@ -12,18 +12,25 @@ const { createPage } = require("./cdp");
 const { createPace } = require("./pace");
 const { createMcpServer } = require("./mcp");
 const { createSnapshots } = require("./snapshots");
+const { createCapture, sweepCites } = require("./capture");
 const { TOOLS, INSTRUCTIONS } = require("./tools");
 const IP = require("./inpage");
+const VF = require("./verify");
 
 const PARTITION = "persist:agent-browser";
-const LOAD_TIMEOUT_MS = 20000, WAIT_MAX_MS = 25000, AGENT_WINDOW_MS = 3000, SEARCH_LOAD_MS = 12000, CAPTCHA_WAIT_MS = 20000;
+const LOAD_TIMEOUT_MS = 20000, WAIT_MAX_MS = 25000, AGENT_WINDOW_MS = 3000, SEARCH_LOAD_MS = 12000;
+/* 讀得到就算好,不等所有資源載完(實測 09-28:廣告多的新聞站永遠到不了 load,browser_wait 四次各等滿 20–25 秒)。
+   READY_TEXT_MIN:主文件解析完之後,40 字以上的段落合計至少這麼多字,而且連續兩次量到的字數一樣(內容不再長)才算;每 EARLY_EVERY_MS 量一次。
+   WAIT_STRAGGLER_MS:等好幾頁時,第一頁好了之後最多再等其他頁這麼久就先回。READ_WAIT_MS:browser_read 遇到還在載的頁自己短等的上限 */
+const READY_TEXT_MIN = 400, EARLY_EVERY_MS = 700, WAIT_STRAGGLER_MS = 3000, READ_WAIT_MS = 5000;
 const THUMB_EVERY_MS = 2000, THUMB_W = 240;
 const PARK_X = 20000;   // 不在畫面上的分頁停在視窗外(實測:沒掛上視窗的 view 拍不到縮圖,掛在視窗外可以)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * o: { electron: { WebContentsView, session, nativeImage }, stateDir, getWin(), uiLang(), openWeb(url), track(name),
- *      loadPrefs() → {enabled}, savePrefs(p), version, reducedMotion() }
+ *      loadPrefs() → {enabled}, savePrefs(p), version, reducedMotion(), notify(kind)?(app 不在前景時的系統通知),
+ *      userPresent()?(視窗在不在畫面上;沒給就自己問視窗), engines?(搜尋引擎表,預設 verify.js 的 ENGINES) }
  */
 function createBrowser(o) {
   const E = o.electron;
@@ -44,6 +51,8 @@ function createBrowser(o) {
   const snaps = createSnapshots(o.stateDir);
   let prefs = Object.assign({ enabled: true }, (o.loadPrefs && o.loadPrefs()) || {});
   let mcp = null;
+  const engines = o.engines || VF.ENGINES;
+  const searchGate = VF.createGate({ now: () => Date.now(), sleep });
 
   const tabs = createTabs({ create: createView, destroy: destroyView, emit: (type, p) => emit(type, p) });
 
@@ -156,7 +165,7 @@ function createBrowser(o) {
   // ── 分頁的 view ──
   /* captureBeyondViewport 會暫時改掉頁面的 viewport;還原時偶爾停在錯的尺寸,之後這一頁就一直用那個窄寬度排版
      (實測:中欄 544 寬,頁面 innerWidth 卻是 240,排成手機版)。每次擷取後、每次放到中欄時都清一次 */
-  function unEmulate(v) { v.parkEmu = false; v.emuGen = (v.emuGen || 0) + 1; try { v.wc.debugger.sendCommand("Emulation.clearDeviceMetricsOverride").catch(() => {}); } catch (_) { /* 沒掛 debugger */ } }
+  function unEmulate(v) { if (v.wide) { wideEmulate(v); return; } v.parkEmu = false; v.emuGen = (v.emuGen || 0) + 1; try { v.wc.debugger.sendCommand("Emulation.clearDeviceMetricsOverride").catch(() => {}); } catch (_) { /* 沒掛 debugger */ } }
   /* parked 分頁常駐 1280×800 override:視窗外的 view 會被裁到 0 寬(實測 innerWidth = 0),
      頁面用 0 視口排版就出行動版(TradingView 連 Pine Editor 入口都沒有、SPA 路由也會壞)。
      設一次不再動,不會閃;進中欄時 bounds() 的 unEmulate 清掉、用真實大小。 */
@@ -168,6 +177,19 @@ function createBrowser(o) {
     try { v.wc.debugger.sendCommand("Emulation.setDeviceMetricsOverride", { width: parkSize.width, height: parkSize.height, deviceScaleFactor: 0, mobile: false }).then(() => { if (v.emuGen === g) v.parkEmu = true; }, () => { /* 還沒掛 debugger:下一次 park / attach 之後補設 */ }); }
     catch (_) { /* 同上 */ }
   }
+  /* 顯示在中欄、但頁面要用比中欄寬的寬度排版(「送進 TradingView」:窄版面沒有 Pine 那顆鈕,pine.js TV_MIN_W):
+     排版寬 v.wide、縮小到剛好放進中欄。v.wide 還在的期間,每次換位置(bounds)都重算一次,不會被 unEmulate 清掉 */
+  function wideEmulate(v) {
+    let b; try { b = v.view.getBounds(); } catch (_) { return Promise.resolve(false); }
+    if (!v.wide || !(b.width > 0)) return Promise.resolve(false);
+    v.parkEmu = false; v.emuGen = (v.emuGen || 0) + 1;
+    const s = Math.min(1, b.width / v.wide);
+    try { return v.wc.debugger.sendCommand("Emulation.setDeviceMetricsOverride", { width: v.wide, height: Math.max(1, Math.round(b.height / s)), deviceScaleFactor: 0, mobile: false, scale: s }).then(() => true, () => false); }
+    catch (_) { return Promise.resolve(false); }
+  }
+  /** 分頁現在的網址。about:blank 從來不是一格 agent 分頁該在的網址(openUrl 只收 http(s)),看到它就是 priming 的空文件、或真網址
+      還沒 commit(loadURL 之後到 did-navigate 之前 getURL 仍回空文件):報要載的那個網址,不能讓 tabFor 把它當成被擋的 scheme */
+  const pageUrl = (t, v) => { const u = v.wc.getURL(); return u && u !== "about:blank" ? u : t.url; };
   function park(v, i) { try { v.view.setBounds({ x: PARK_X + (i || 0) * (parkSize.width + 50), y: 0, width: parkSize.width, height: parkSize.height }); } catch (_) { /* 已銷毀 */ } parkEmulate(v); }
   function createView(t) {
     win = o.getWin(); if (!win || win.isDestroyed()) { tabs.failed(t.id, "network"); return; }
@@ -177,10 +199,12 @@ function createBrowser(o) {
       safeDialogs: true, devTools: false, navigateOnDragDrop: false, autoplayPolicy: "document-user-activation-required",
     } });
     const wc = view.webContents;
-    const v = { view, wc, page: createPage(wc), pace: createPace(), loadTimer: null, lastReq: Date.now(), http: 0, agentInputAt: 0 };
+    const v = { view, wc, page: createPage(wc), pace: createPace(), loadTimer: null, lastReq: Date.now(), http: 0, agentInputAt: 0, navs: 0 };
     views.set(t.id, v); wcTab.set(wc.id, t.id);
     win.contentView.addChildView(view); park(v, views.size);
     wc.setAudioMuted(true);
+    // 空文件(下面的 priming)的事件不算這一格的載入:只認網址(空文件的 did-stop-loading 可能在 priming 收掉之後才到),分頁物件的其他事件照常
+    const priming = (u) => u === "about:blank" || (!!v.priming && !u);
     wc.setWindowOpenHandler(({ url }) => {
       // 稽核 S7:頁面自己開的 popup(不在 agent 動作窗口內、也不是用戶在操作)一律不開,不能拿來佔滿 8 格
       const by = agentActive(wc.id) ? "agent" : t.userControl ? "user" : null;
@@ -210,7 +234,7 @@ function createBrowser(o) {
     wc.on("login", (e, _d, _a, cb) => { e.preventDefault(); cb(); });
     wc.on("select-bluetooth-device", (e, _l, cb) => { e.preventDefault(); cb(""); });
     wc.on("did-start-navigation", (d) => {
-      if (!d.isMainFrame || d.isSameDocument) return;
+      if (priming(d.url) || !d.isMainFrame || d.isSameDocument) return;
       // 首次 park override 只能下在這裡:renderer 已經在了、文件還沒解析(createView 當下就下會
       // SIGSEGV——沒載過東西的 webContents 碰 emulation 會炸,實測;之後的 park() 再下都安全)
       if (!t.visible) parkEmulate(v);
@@ -221,18 +245,20 @@ function createBrowser(o) {
         v.loadTimer = setTimeout(() => { v.loadTimer = null; if (t.status === "loading") { t.partial = true; tabs.loaded(t.id, C.scrub(wc.getTitle(), 300)); emit("page_loaded", { id: t.id, title: t.title, partial: true }); } }, LOAD_TIMEOUT_MS);
       }
     });
-    wc.on("did-navigate", (_e, url, code) => { t.url = url; v.http = code || 0; emit("page_nav", { id: t.id, url: C.scrub(url, 2000), http: v.http }); });
-    wc.on("page-favicon-updated", (_e, favs) => { fetchFavicon(t, v, favs).catch(() => {}); });
-    wc.on("page-title-updated", (_e, title) => { t.title = C.scrub(title, 300); emit("page_title", { id: t.id, title: t.title }); });
+    wc.on("did-navigate", (_e, url, code) => { if (priming(url)) return; t.url = url; v.http = code || 0; v.navs++; emit("page_nav", { id: t.id, url: C.scrub(url, 2000), http: v.http }); early(t, v); });
+    wc.on("page-favicon-updated", (_e, favs) => { if (priming(wc.getURL())) return; fetchFavicon(t, v, favs).catch(() => {}); });
+    wc.on("page-title-updated", (_e, title) => { if (priming(wc.getURL())) return; t.title = C.scrub(title, 300); emit("page_title", { id: t.id, title: t.title }); });
     wc.on("did-stop-loading", () => {
+      if (priming(wc.getURL())) return;
       if (v.loadTimer) { clearTimeout(v.loadTimer); v.loadTimer = null; }
       if (wc.getURL()) t.hadDoc = true;
+      if (t.status === "ready" && t.early) { t.early = false; t.partial = false; }   // 提早算好的那一頁真的載完了
       if (t.status === "loading") { tabs.loaded(t.id, C.scrub(wc.getTitle(), 300)); emit("page_loaded", { id: t.id, title: t.title, url: C.scrub(wc.getURL(), 2000) }); }
       v.page.quiet().catch(() => {});
       fetchFavicon(t, v, []).catch(() => {});
     });
     wc.on("did-fail-load", (_e, code, _desc, url, isMain) => {
-      if (!isMain || code === -3) return;                          // -3 = 被新的導覽取代
+      if (priming(url) || !isMain || code === -3) return;                          // -3 = 被新的導覽取代
       if (code === -20 || code === -27) {                          // 我們自己取消的(網路層政策 / 後盾;已發 page_blocked 或由工具回報)
         if (v.loadTimer) { clearTimeout(v.loadTimer); v.loadTimer = null; }
         // 已經有一份文件(導覽被取消,原頁還在)→ 回到 ready;第一次載入就被擋 → 這一格是擋下頁
@@ -246,7 +272,8 @@ function createBrowser(o) {
     // 接手:用戶在展開的那一頁點或打字(agent 自己的輸入 300ms 內不算)
     wc.on("input-event", (_e, inp) => {
       if (v.agentInputting || Date.now() - v.agentInputAt < 600) return;
-      if (inp.type !== "mouseMove") v.userInputAt = Date.now();   // 用戶 3 秒內碰過這一頁 → 讀取帶不跟著捲
+      if (inp.type !== "mouseMove") { v.userInputAt = Date.now(); v.userInputs = (v.userInputs || 0) + 1; }   // 用戶 3 秒內碰過這一頁 → 讀取帶不跟著捲;計數給 autoHandback 比前後
+      if (inp.type === "keyDown" || inp.type === "rawKeyDown" || inp.type === "char") v.userKeyNav = v.navs;   // 用戶在這份文件裡打過字(unsaved)
       if (!t.visible || t.userControl) return;
       if (inp.type === "mouseDown" || inp.type === "rawKeyDown" || inp.type === "keyDown") takeover(t.id);
     });
@@ -254,8 +281,40 @@ function createBrowser(o) {
       v.loadTimer = null;
       if (t.status === "loading") { t.partial = true; tabs.loaded(t.id, C.scrub(wc.getTitle(), 300)); emit("page_loaded", { id: t.id, title: t.title, partial: true, url: C.scrub(wc.getURL(), 2000) }); }
     }, LOAD_TIMEOUT_MS);
-    v.page.attach().catch(() => {});
-    wc.loadURL(t.url).catch(() => { /* did-fail-load 會處理 */ });
+    // 先載一份空文件把 renderer 叫起來、把 debugger 掛好,再載真的網址:沒有 renderer 之前任何 CDP 指令都不回(實測),
+    // 而用戶改過欄位的紀錄(inpage.watchEdits,Page.addScriptToEvaluateOnNewDocument)要在第一份真文件建好之前登記完——
+    // 直接載真網址的話本機一類快的頁面一定搶先(實測登記在 loadURL 前、後、did-start-navigation 裡三種都輸)。
+    // 空文件的那幾個事件不算這一格的載入(v.priming);空文件約 40ms,最多等 1.5 秒
+    v.priming = true;
+    const primed = () => {
+      if (views.get(t.id) !== v) return;   // 等的期間被關掉了
+      v.priming = false;
+      try { wc.loadURL(t.url).catch(() => { /* did-fail-load 會處理 */ }); } catch (_) { tabs.failed(t.id, "network"); }
+    };
+    v.primed = new Promise((res) => { setTimeout(res, 1500); try { wc.loadURL("about:blank").then(res, res); } catch (_) { res(); } })
+      .then(() => v.page.attach().catch(() => {})).then(primed);
+  }
+  /* 還在載、但已經讀得到的頁提早算好(partial)。只管 agent 自己開的一般頁:搜尋分頁(可能是驗證頁)、用戶的頁、
+     用戶接手中的頁、agent 不能去的網址都不量——那些頁不在這裡跑任何東西 */
+  function early(t, v) {
+    if (t.by !== "agent" || t.searchTab) return;
+    const nav = v.navs; let last = -1;
+    const same = () => views.get(t.id) === v && v.navs === nav && t.status === "loading";
+    const tick = async () => {
+      if (!same()) return;
+      if (!t.userControl && !t.verify && !policy.agent(pageUrl(t, v))) {
+        let n = 0; try { n = Number(await within(v.page.run(IP.readable), 1500)) || 0; } catch (_) { n = 0; }
+        if (!same()) return;
+        if (n >= READY_TEXT_MIN && n === last) {
+          t.partial = true; t.early = true; tabs.loaded(t.id, C.scrub(v.wc.getTitle(), 300));
+          emit("page_loaded", { id: t.id, title: t.title, partial: true, url: C.scrub(v.wc.getURL(), 2000) });
+          return;
+        }
+        last = n;
+      }
+      setTimeout(tick, EARLY_EVERY_MS);
+    };
+    setTimeout(tick, EARLY_EVERY_MS);
   }
   function destroyView(t) {
     const v = views.get(t.id); if (!v) return;
@@ -271,15 +330,51 @@ function createBrowser(o) {
   // ── 接手 / 交還 / 請求卡 ──
   function takeover(id) {
     const t = tabs.get(id); if (!t || t.userControl) return;
-    t.userControl = true; emit("user_takeover", { id });
+    t.userControl = true; t.touchedAt = Date.now(); emit("user_takeover", { id });
     const v = views.get(id); if (v) v.page.run(IP.mark, ["clear"]).catch(() => {});
   }
-  function handback(id) {
+  function handback(id, auto) {
     const t = tabs.get(id); if (!t) return;
     t.userControl = false;
     if (t.need) { t.userDone = "done"; t.need = null; }
-    emit("handback", { id });
+    emit("handback", auto === true ? { id, auto: true } : { id });
   }
+  /* 用戶在聊天送出訊息 = 他接手過的那幾頁交回來了(Wei 2026-09-28):這個對話裡 agent 開的、他接手中的分頁自動交還。
+     只打開「你在操作」這一道鎖——網址政策、驗證頁、敏感欄位、送出類動作的守門都照舊由 tabFor 與各工具判。
+     留給用戶的:驗證頁、當下網址 agent 不能去的頁(登入後的帳戶頁:交還了縮圖就會開始拍)、焦點在敏感欄位或 iframe /
+     closed shadow root 裡(金流商的卡號欄在 iframe,看不進去)、問不到或判不出焦點的頁。別的對話的分頁、用戶自己開的分頁不在 reachable 裡。
+     判不出來一律不交還(稽核 P1-2 fail-closed):這一道是自動交還唯一的人工確認替代品,錯就錯在留給用戶那一邊 */
+  async function handable(t) {
+    const v = views.get(t.id); if (!v) return false;
+    const open = () => !verifying(t) && !policy.agent(pageUrl(t, v));
+    if (!open()) return false;
+    let f; try { f = await within(v.page.focused(), 1500); } catch (_) { return false; }
+    if (!f || !f.desc || !f.desc.tag) return false;   // 頁面沒有 activeElement / evaluate 沒回物件 / 描述是空的:判不出
+    if (f.desc.tag === "iframe" || f.desc.opaque || gate.sensitiveField(f.desc)) return false;
+    return open();
+  }
+  async function autoHandback(c) {
+    for (const t of tabs.reachable()) {
+      if (t.by !== "agent" || !t.userControl) continue;
+      const v = views.get(t.id); if (!v) continue;
+      const touched = v.userInputs || 0;
+      if (!(await handable(t))) continue;
+      // 等焦點的這段時間他又在這一頁動手了(輸入計數變了)→ 這一輪還是他的
+      if (cur === c && t.userControl && (v.userInputs || 0) === touched) handback(t.id, true);
+    }
+  }
+  /* 用戶在這份文件裡改過欄位(主行程看到他打字 userKeyNav,或頁內 watchEdits 記到貼上 / 拖放 / IME)、欄位裡還留著他改過的內容:
+     agent 在這一格導覽會把它沖掉。回 true = 不導覽(他打過字而問不到也當成有) */
+  async function unsaved(v) {
+    const typed = v.userKeyNav === v.navs;
+    let r; try { r = await within(v.page.run(IP.dirtyFields), 1500); } catch (_) { return typed; }
+    if (!typed && !(r && r.edited)) return false;
+    return (Number(r && r.n) || 0) > 0;
+  }
+  /* 這個欄位是用戶改過的(稽核 P2-3):fill 會蓋掉、type 會接在後面、按鍵會送出或改掉他寫到一半的東西。d = describe 的結果 */
+  const userField = (v, d) => !!(d && d.dirty && (v.userKeyNav === v.navs || d.pageEdited));
+  const UNSAVED_MSG = "the user typed into a form on this page and has not sent it; going to another address in this tab would throw that away. Read the page as it is, or open the address in a new tab (browser_open without `tab`)";
+  const UNSAVED_FIELD_MSG = "the user typed into this field and has not sent it; filling it, typing into it or pressing a key in it would change or send what they wrote. Leave it as it is: fill only fields the user has not touched, and ask them to finish or clear this one";
   function needUser(t, kind, ref, summary, box, url) {
     t.need = { kind, ref: ref || null, summary: summary || "" }; t.userDone = null;
     // url:確認網址那一態要顯示的是「被擋下的那個網址」,不是分頁現在的頁(用戶要看的就是它帶了什麼)
@@ -296,12 +391,17 @@ function createBrowser(o) {
       for (const [id] of views) {
         const t = tabs.get(id); if (!t || t.status !== "loading" && t.status !== "ready") continue;
         if (t.read && t.thumbDone) continue;   // 讀完、而且之後沒再動過的頁不再拍
+        if (!shootable(t)) continue;
         await captureThumb(id);
       }
     }, THUMB_EVERY_MS);
   }
+  /* 用戶的頁不拍:他自己開的分頁(開即時頁、送進 TradingView 貼完的那一頁),與他接手操作中的 agent 分頁。
+     交接卡寫的是「貼完之後這一頁不會再被讀取」——縮圖也是讀;接手之後頁面上可能是他的帳戶。
+     搜尋分頁也不拍:它不進清單(沒有地方放縮圖),而且它可能是一張驗證頁——那一頁是用戶的,在認出來之前也不能先拍到 */
+  const shootable = (t) => !!t && t.by === "agent" && !t.userControl && !t.searchTab && !t.verify;
   async function captureThumb(id) {
-    const t = tabs.get(id), v = views.get(id); if (!t || !v) return;
+    const t = tabs.get(id), v = views.get(id); if (!t || !v || !shootable(t)) return;
     t.thumbAt = Date.now();
     // 縮圖走 CDP Page.captureScreenshot:分頁停在視窗外、或視窗被別的 app 蓋住時,capturePage 回空圖 / UnknownVizError(實測),
     // CDP 仍拍得到。直接在 CDP 端縮到縮圖寬,不經過全尺寸 PNG。拍不到再退 capturePage。
@@ -344,33 +444,59 @@ function createBrowser(o) {
   const R = (obj, isError) => ({ content: [{ type: "text", text: JSON.stringify(obj) }], isError: !!isError });
   const ERR = (error, message, extra) => R(Object.assign({ ok: false, error, message }, extra || {}), error !== "needs_user" && error !== "still_waiting");
   const MSG = {
-    not_found: "no such tab in this turn; call browser_tabs",
-    user_in_control: "the user is operating this tab; wait for them to hand it back or work on another tab",
+    not_found: "no such tab; call browser_tabs to see the tabs you can use",
+    user_in_control: "the user is operating this tab: you cannot read or act on it until they press \"Hand back to agent\" (交還 agent) at the top of that page. Tell the user exactly that in your reply and give no other reason — the tab is still open and nothing was lost. Work on another tab meanwhile; use this one after they hand it back",
     stale_ref: "the ref is out of date; call browser_snapshot again",
     obscured: "the element is covered by another element (often a cookie banner or popup); close that first",
     browser_off: "the user turned the built-in browser off",
+    needs_user_verification: VF.REFUSED,
     confirm_url: "this address goes to a site not seen in this turn and carries a long query or text read from a page; the user must confirm it before it opens. Tell them what the link is for, then browser_wait until=user_done",
   };
-  const blockedMsg = (r) => ({ sensitive_domain: "exchange/broker account areas, banks and payment pages are off limits to the agent", blocklist: "this site does not allow AI agents", blave: "use lib/data.py for Blave data instead of the Blave website", private_address: "local and private network addresses are blocked", scheme: "only http(s) pages can be opened", port: "only ports 80/443 are allowed", credentials_in_url: "URLs with credentials are blocked", ads: "ad/tracking domains are blocked", lookalike: "this address imitates a protected site (possible phishing)", oauth: "sign-in and app-authorization pages are for the user to handle" }[r] || "blocked by policy");
+  const blockedMsg = (r) => ({ sensitive_domain: "exchange/broker account areas, banks and payment pages are off limits to the agent", blocklist: "this site is on the harmful-site list", blave: "use lib/data.py for Blave data instead of the Blave website", private_address: "local and private network addresses are blocked", scheme: "only http(s) pages can be opened", port: "only ports 80/443 are allowed", credentials_in_url: "URLs with credentials are blocked", ads: "ad/tracking domains are blocked", lookalike: "this address imitates a protected site (possible phishing)", oauth: "sign-in and app-authorization pages are for the user to handle" }[r] || "blocked by policy");
 
   /** 搜尋引擎的結果頁只能經 browser_search 開(它才有 Google 每分鐘 4 次的速率、驗證頁處理與退路) */
   function searchUrl(raw) {
     let u; try { u = new URL(String(raw || "")); } catch (_) { return false; }
-    const h = u.hostname.toLowerCase();
-    return (/(^|\.)google\.[a-z.]+$/.test(h) && /^\/(search|webhp)/.test(u.pathname)) || /(^|\.)duckduckgo\.com$/.test(h) || (/(^|\.)bing\.com$/.test(h) && u.pathname.startsWith("/search"));
+    const h = u.hostname.toLowerCase(), e = VF.engineOf(u.href, engines);
+    // 驗證頁的網址也算:那一頁只會由 browser_search 交給用戶,agent 不能自己開過去
+    return (!!e && (engines[e].search.test(u.pathname) || !!VF.verifyPage(u.href, engines))) || (/(^|\.)bing\.com$/.test(h) && u.pathname.startsWith("/search"));
+  }
+  /* 驗證頁:agent 的每一支工具都不碰(tabFor 是它們唯一的入口)。認定 = 搜尋時認出來的(t.verify,過了才清)、
+     正在等用戶過驗證、或分頁當下的網址就是驗證頁(agent 自己開到、被轉過去的) */
+  function verifying(t) {
+    if (!t) return false;
+    if (t.verify || (t.need && t.need.kind === "captcha")) return true;
+    const v = views.get(t.id); let url = t.url;
+    try { if (v && !v.wc.isDestroyed()) url = pageUrl(t, v); } catch (_) { /* 已關 */ }
+    return !!VF.verifyPage(url, engines);
   }
   function tabFor(alias) {
     const t = tabs.byAlias(alias);
     if (!t) return { e: ERR("not_found", MSG.not_found) };
-    if (t.userControl) return { e: ERR("user_in_control", MSG.user_in_control, { tab: t.alias }) };
+    if (verifying(t)) return { e: ERR("needs_user_verification", MSG.needs_user_verification, { tab: t.alias }) };
+    if (t.userControl) {
+      // 他停在 agent 不能去的網址(登入後的帳戶頁):叫他按「交還 agent」也沒用,照實回被擋(只帶主機名,跟 browser_tabs 一樣)
+      const uv = views.get(t.id), ua = uv ? policy.agent(pageUrl(t, uv)) : null;
+      if (ua) return { e: ERR("blocked_policy", blockedMsg(ua.reason), { tab: t.alias, reason: ua.reason, host: ua.host }) };
+      return { e: ERR("user_in_control", MSG.user_in_control, { tab: t.alias }) };
+    }
     if (t.status === "blocked") return { e: ERR("blocked_policy", blockedMsg(t.reason), { tab: t.alias, reason: t.reason }) };
     if (t.status === "failed") return { e: ERR("load_failed", "the page could not be opened", { tab: t.alias, reason: t.reason }) };
     if (t.status === "discarded" || t.status === "queued") return { e: ERR("not_found", t.status === "queued" ? "the tab is still queued; call browser_wait" : "the tab was closed to free memory; open the URL again", { tab: t.alias }) };
     const v = views.get(t.id); if (!v) return { e: ERR("not_found", MSG.not_found) };
-    const a = policy.agent(v.wc.getURL() || t.url);
+    const a = policy.agent(pageUrl(t, v));
     if (a) return { e: ERR("blocked_policy", blockedMsg(a.reason), { tab: t.alias, reason: a.reason, host: a.host }) };
+    tabs.use(t.id);   // 前面回合留下來的分頁:過了上面每一關(照當下的網址與狀態判)才算這一輪接上
     return { t, v };
   }
+  /* 進門判過之後又過了一段時間(browser_read 的短等、擷取等圖載完、動作後的落定、讀頁面本身)才把內容交出去:
+     交出去之前用當下的狀態把 tabFor 的判斷整組重跑一次(稽核 P1-1)。這段時間裡轉址落到 agent 不能去的網址或驗證頁、
+     用戶接手、分頁被擋或關掉,都照進門就被擋的那個回應回。回 null = 還是可以交 */
+  function recheck(t, v) {
+    const x = tabFor(t.alias);
+    return x.e || (x.t === t && x.v === v ? null : ERR("not_found", MSG.not_found));
+  }
+  const primedOf = (t) => { const v = t && views.get(t.id); return v && v.primed ? v.primed : Promise.resolve(); };
   function firstUse() {
     if (cur && !cur.used) { cur.used = true; cur.usedAt = Date.now(); emit("block_open", { anchor: "turn" }); if (o.track) o.track("browser_agent"); }
   }
@@ -404,6 +530,9 @@ function createBrowser(o) {
     // 稽核 S5b:動作後以「當下」網址重判——SPA pushState 進後台、bfcache 回到後台都沒有網路請求,只有這裡接得到
     const now = policy.agent(url);
     if (now) return ERR("blocked_policy", blockedMsg(now.reason), { tab: t.alias, reason: now.reason, host: now.host });
+    // 動作把頁面帶到驗證頁、或落定的這段時間用戶接手了:那一頁的內容不回
+    if (verifying(t)) return ERR("needs_user_verification", MSG.needs_user_verification, { tab: t.alias });
+    if (t.userControl) return ERR("user_in_control", MSG.user_in_control, { tab: t.alias });
     let snap = null; try { const s = await v.page.snapshot({ interactive_only: true }, gate.sensitiveField); snap = s.text ? s.text.slice(0, 4000) : ""; } catch (_) { /* 還在載 */ }
     return R(C.envelope(url, v.wc.getTitle(), snap || "", { tab: t.alias, url: C.scrub(url, 2000), navigated: url !== before }));
   }
@@ -418,54 +547,114 @@ function createBrowser(o) {
   }
   // 稽核 S9:用戶接手中、或當下網址被政策擋的分頁,只回主機名、不回標題
   const tabInfo = (t) => {
-    const v = views.get(t.id), url = v ? v.wc.getURL() || t.url : t.url;
-    const hide = t.userControl || !!policy.agent(url);
+    const v = views.get(t.id), url = v ? pageUrl(t, v) : t.url;
+    const hide = t.userControl || !!policy.agent(url) || verifying(t);
     let host = ""; try { host = new URL(url).hostname; } catch (_) { /* 不是網址 */ }
-    return { tab: t.alias, status: status(t), url: hide ? host : C.scrub(url, 2000), title: hide ? "" : C.scrub(t.title, 300), partial: !!t.partial, http_status: v && v.http >= 400 ? v.http : undefined, reason: t.reason || undefined };
+    return { tab: t.alias, status: status(t), url: hide ? host : C.scrub(url, 2000), title: hide ? "" : C.scrub(t.title, 300), partial: !!t.partial, http_status: v && v.http >= 400 ? v.http : undefined, reason: t.reason || undefined,
+      from_previous_turn: t.turn !== tabs.turn() || undefined, note: t.userControl && !verifying(t) ? MSG.user_in_control : undefined };
   };
+  const TABS_NOTE = "tabs marked from_previous_turn were opened in an earlier turn and are still open: keep using them by the same id (browser_read, browser_snapshot, browser_click) instead of opening the same address again";
 
-  async function doSearch(args) {
+  /* 人在不在:視窗在畫面上(沒縮到 Dock、沒藏起來),而且這一輪不是從雲端視角送出的。不在就不問,直接走退路 */
+  function present() {
+    if (!cur || cur.noUser) return false;
+    if (o.userPresent) return !!o.userPresent();
+    const w = o.getWin && o.getWin();
+    try { return !!w && !w.isDestroyed() && w.isVisible() && !w.isMinimized(); } catch (_) { return false; }
+  }
+  /* 搜尋分頁落在驗證頁:標成「要你操作」交給用戶,等它離開。這裡不對那一頁做任何事(verify.js 檔頭的紅線)。
+     回 verify.waitVerify 的結果。這一輪怎麼收場記在 c.verifyEnd(稽核 P2-4,分開記):"declined" 用戶跳過(按出口 / 交還後還在驗證頁 /
+     關掉那一格)、"timeout" 逾時、"absent" 人不在——記了就不再問,回的值讓 searchOnce 對模型講對的原因;
+     "closed"(引擎斷線、回合結束、分頁壞掉)不是用戶的決定,不記,下一次搜尋照樣問 */
+  async function handVerify(t, engine, c, asked, deadline, here) {
+    t.verify = engine;
+    const v = views.get(t.id); if (!v) return "closed";
+    if (asked) return "declined";
+    if (c.verifyEnd) return c.verifyEnd === "declined" ? "declined" : c.verifyEnd;
+    if (!present()) { c.verifyEnd = "absent"; return "absent"; }
+    if (deadline - Date.now() < VF.VERIFY_MIN_MS) return "timeout";   // 這次呼叫快到期了:不問(下一次搜尋還可以問)
+    needUser(t, "captcha", null, engines[engine].name);
+    if (o.notify) { try { o.notify("captcha"); } catch (_) { /* 通知發不出去不影響流程 */ } }
+    const vf = VF.marks(engine, engines);
+    let seen = v.navs;
+    let got = await VF.waitVerify({
+      now: () => Date.now(), sleep, deadline,
+      alive: () => cur === c && here() && views.get(t.id) === v && t.status !== "closed" && t.status !== "failed",
+      present, choice: () => t.userDone || null, touchedAt: () => (t.userControl ? t.touchedAt || 0 : 0),
+      loading: () => t.status === "loading",
+      // 只在「導覽走了、載完了、網址是這個引擎的搜尋頁」之後才看一次頁面(跟每一張搜尋結果頁同一支只讀的判別);網址還是驗證頁時什麼都不跑
+      left: async () => {
+        if (v.navs === seen || t.status === "loading") return false;
+        seen = v.navs;
+        if (!VF.searchPage(v.wc.getURL(), engine, engines)) return false;
+        try { const r = await v.page.serp(engine, vf); return !!r && !r.captcha; } catch (_) { return false; }
+      },
+    });
+    t.need = null; t.userDone = null; emit("need_clear", { id: t.id });
+    if (got === "passed") {
+      t.verify = null;
+      if (t.userControl) { t.userControl = false; emit("handback", { id: t.id, auto: true }); }   // 過了就自動接續,用戶不用按「交還 agent」
+    } else if (got === "closed") {
+      if (t.status === "closed") { got = "exit"; c.verifyEnd = "declined"; }   // 他把驗證頁那一格關掉了 = 這次不做
+    } else {
+      c.verifyEnd = got === "timeout" ? "timeout" : got === "absent" ? "absent" : "declined";
+      if (got === "exit" || got === "gave_up") t.userControl = false;   // 按了出口 / 交還:那一格還給 agent(逾時的話用戶可能還在操作,留給他——稽核 B3)
+    }
+    return got;
+  }
+  /* 一次搜尋最晚什麼時候一定要回:SEARCH_CALL_MAX_MS 是「等驗證」的期限(在排隊之前就起算),過了之後還要載入、讀結果;
+     排在驗證後面的搜尋開始時可能只剩幾十秒(稽核 P2-13)。過了期限 SEARCH_TAIL_MS 就不再開新的一輪,直接回 search_unavailable;
+     連這樣都沒回的(某一輪卡住)由 mcp.js 在 SEARCH_HARD_MAX_MS 收掉 */
+  const SEARCH_TAIL_MS = 30000, SEARCH_HARD_MAX_MS = VF.SEARCH_CALL_MAX_MS + 60000;
+  async function doSearch(args, ctx) {
+    const here = () => !ctx || !ctx.connected || ctx.connected();   // 呼叫的那一端還在等(引擎沒有先斷線)
     const query = String(args.query || "").trim().slice(0, 500);
     if (!query) return ERR("invalid_args", "query is required");
     const count = Math.max(1, Math.min(10, Math.floor(Number(args.count) || 5)));
-    let engine = cur.skipGoogle ? "ddg" : "google", fallback = cur.skipGoogle ? "captcha_twice" : null;
+    const c = cur, deadline = Date.now() + VF.SEARCH_CALL_MAX_MS;
+    // 同一輪的搜尋一個一個來、兩次之間留間隔(verify.js SEARCH_GAP_MS):平行連發就是被要求驗證的原因
+    return searchGate.run(() => (cur === c && c ? searchOnce(c, query, count, deadline, here) : ERR("browser_off", "this turn has ended")));
+  }
+  async function searchOnce(c, query, count, deadline, here) {
+    if (!here()) return ERR("cancelled", "the engine stopped waiting for this search");
+    let engine = c.skipGoogle ? "ddg" : "google", fallback = c.skipGoogle ? "captcha_twice" : null;
     const lim = tabs.search(engine);
     if (lim && lim.scope === "turn") return ERR("rate_limited", "search limit for this turn reached", { retry_in_s: 0 });
     if (lim) { engine = "ddg"; fallback = "google_rate"; tabs.search("ddg"); }
     const hl = o.uiLang() === "zh" ? "zh-TW" : "en";
-    const urlFor = (e) => e === "google" ? "https://www.google.com/search?hl=" + hl + "&num=" + Math.min(10, count + 3) + "&q=" + encodeURIComponent(query) : "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+    const urlFor = (e) => engines[e].url(query, hl, Math.min(10, count + 3));
     const r = openUrl(urlFor(engine), "agent");
     if (r.error) return ERR(r.error, "search could not open a tab", { retry_in_s: r.retry_in_s });
-    let t = r.tab;
+    let t = r.tab; t.searchTab = true;
     await waitLoaded(t, SEARCH_LOAD_MS);
-    let raw = null;
-    for (let round = 0; round < 3; round++) {
+    let raw = null, why = "failed", asked = false;
+    for (let round = 0; round < 4; round++) {
+      if (!here()) return ERR("cancelled", "the engine stopped waiting for this search");
+      if (Date.now() > deadline + SEARCH_TAIL_MS) { if (why === "failed") why = "timeout"; raw = null; break; }
       const v = views.get(t.id);
       if (!v || t.status === "failed" || t.status === "blocked") { raw = null; break; }
-      try { raw = await v.page.serp(engine); } catch (_) { raw = null; }
+      try { raw = await v.page.serp(engine, VF.marks(engine, engines)); } catch (_) { raw = null; }
       if (raw && engine === "google" && raw.consent) {
         // 同意頁:只按「全部拒絕」(spec §3.2 允許的 cookie 橫幅動作);找不到 → 交給用戶
         const ok = await v.page.run(function () { const b = Array.from(document.querySelectorAll("button,input[type=submit]")).find((x) => /reject all|全部拒絕|全部拒绝|alle ablehnen|tout refuser/i.test(x.innerText || x.value || "")); if (!b) return false; b.click(); return true; }).catch(() => false);
         if (ok) { t.status = "loading"; await sleep(500); await waitLoaded(t, SEARCH_LOAD_MS); t.status = "ready"; continue; }
       }
       if (raw && raw.captcha) {
-        if (engine === "google") { cur.captchas = (cur.captchas || 0) + 1; if (cur.captchas >= 2) cur.skipGoogle = true; }
-        needUser(t, "captcha", null, engine === "google" ? "Google" : "DuckDuckGo");
-        const end = Date.now() + CAPTCHA_WAIT_MS;
-        while (Date.now() < end && !t.userDone) await sleep(250);
-        // 稽核 B3:逾時只收掉請求卡;用戶若已經在那一格操作,接手狀態留給他自己交還
-        const choice = t.userDone; t.need = null; t.userDone = null;
-        emit("need_clear", { id: t.id });
-        if (choice === "done") { await waitLoaded(t, SEARCH_LOAD_MS); continue; }
-        if (engine === "google") {
-          engine = "ddg"; fallback = cur.skipGoogle ? "captcha_twice" : "captcha";
-          if (t.userControl) {   // 那一格是用戶的了:退路另開一格,不動他正在操作的頁
-            const r2 = openUrl(urlFor("ddg"), "agent"); if (r2.error || r2.blocked) { raw = null; break; }
-            t = r2.tab;
-          } else { t.status = "loading"; v.wc.loadURL(urlFor("ddg")).catch(() => {}); }
-          await waitLoaded(t, SEARCH_LOAD_MS); continue;
-        }
-        raw = null; break;
+        const got = await handVerify(t, engine, c, asked, deadline, here); asked = true;
+        if (cur !== c) return ERR("browser_off", "this turn has ended");
+        if (got === "passed") { await waitLoaded(t, SEARCH_LOAD_MS); continue; }   // 分頁已經在搜尋結果上:照常讀
+        if (why === "failed") why = got === "declined" ? "captcha" : got === "closed" ? "failed" : VF.reasonOf(got);   // 留第一個原因:Google 那一次逾時、退路又是驗證頁 → 原因是逾時;closed = 分頁壞掉,不是沒人
+        if (engine === "google") { c.captchas = (c.captchas || 0) + 1; if (c.captchas >= 2) c.skipGoogle = true; }
+        // 沒交到用戶手上的驗證頁(沒問、或問了但他沒在看也沒接手)收掉,不佔 8 格名額;他在看 / 在操作的留給他
+        if (!t.visible && !t.userControl) { tabs.close(t.id); emit("page_closed", { id: t.id }); }
+        if (!here()) return ERR("cancelled", "the engine stopped waiting for this search");   // 沒有人在等結果了:不往退路搜
+        const next = VF.nextEngine(engine);
+        if (!next) { raw = null; break; }
+        engine = next; fallback = c.skipGoogle ? "captcha_twice" : "captcha"; asked = false;
+        // 驗證頁那一格留著不動(它是用戶的):退路一律另開一格
+        const r2 = openUrl(urlFor(engine), "agent"); if (r2.error || r2.blocked) { raw = null; break; }
+        t = r2.tab; t.searchTab = true;
+        await waitLoaded(t, SEARCH_LOAD_MS); continue;
       }
       if (raw && engine === "google") await resolveGoto(raw.items, count);   // 只解要回的那幾筆:每一筆都是一次 google.com 請求
       const res = C.normalizeSerp(raw, count);
@@ -476,7 +665,8 @@ function createBrowser(o) {
       emit("page_done", { id: t.id, snapshot_id: null });
       return R(C.envelope(v.wc.getURL(), v.wc.getTitle(), { results: res }, { source: engine, tab: t.alias, fallback_reason: fallback }));
     }
-    return ERR("search_unavailable", "web search is not available right now (Google and DuckDuckGo both failed or asked for a robot check)");
+    const u = VF.unavailable(why);
+    return ERR("search_unavailable", u.message, { reason: u.reason });
   }
 
   /* Google 結果連結現在是不透明的 /goto?url=…(真網址不在 DOM 裡,只有 cite 的主機名)。用同一個 session 問一次它的轉址目標,
@@ -499,9 +689,13 @@ function createBrowser(o) {
 
   async function doWait(args) {
     const ids = Array.isArray(args.tabs) ? args.tabs : args.tab ? [args.tab] : tabs.thisTurn().map((t) => t.alias);
-    const list = ids.map((a) => tabs.byAlias(a)).filter(Boolean);
-    if (!list.length) return ERR("not_found", MSG.not_found);
     const until = args.until || "load";
+    // 驗證頁那一格的按鈕結果是 browser_search 在等的:until=user_done 不讀也不清它(稽核 P2-7——並行的這一支先看到就把
+    // userDone 清掉,搜尋那邊空等到逾時),當作不在清單裡;指名只等它的,照其他工具的說法拒絕
+    const all = ids.map((a) => tabs.byAlias(a)).filter(Boolean);
+    const list = until === "user_done" ? all.filter((t) => !verifying(t)) : all;
+    if (all.length && !list.length) return ERR("needs_user_verification", MSG.needs_user_verification, { tab: all[0].alias });
+    if (!list.length) return ERR("not_found", MSG.not_found);
     const ms = Math.min(WAIT_MAX_MS, Math.max(1000, (Number(args.timeout_s) || 20) * 1000));
     if (until === "ms") { await sleep(Math.min(WAIT_MAX_MS, Math.max(0, Number(args.value) || 1000))); return R({ ok: true, tabs: list.map(tabInfo) }); }
     const end = Date.now() + ms;
@@ -513,25 +707,39 @@ function createBrowser(o) {
       if (until === "networkidle") { const v = views.get(t.id); return !v || Date.now() - v.lastReq > 500; }
       if (until === "text") {
         const v = views.get(t.id);
-        if (!v || policy.agent(v.wc.getURL())) return true;   // 被擋的頁不拿來逐字試探(稽核 S5b)
+        if (!v || policy.agent(v.wc.getURL()) || verifying(t)) return true;   // 被擋的頁、驗證頁不拿來逐字試探(稽核 S5b)
         try { return await v.page.hasText(String(args.value || "")); } catch (_) { return false; }
       }
       return true;
     };
+    let firstAt = 0;
     while (Date.now() < end) {
-      let all = true; for (const t of list) if (!(await done(t))) { all = false; break; }
-      if (all) {
+      let n = 0; for (const t of list) if (await done(t)) n++;
+      if (n === list.length) {
         const out = list.map(tabInfo);
         for (const t of list) if (until === "user_done" && t.userDone) { if (t.userDone === "skip") out.find((x) => x.tab === t.alias).status = "skipped"; t.userDone = null; t.need = null; }
         return R({ ok: true, tabs: out });
       }
+      // 等好幾頁載入:有頁好了就不讓最慢的那一頁拖到逾時——再等其他頁一下就先回,哪幾頁還在載講清楚
+      if (until === "load" && list.some((t) => t.status === "ready" && !t.userControl)) {
+        if (!firstAt) firstAt = Date.now();
+        if (Date.now() - firstAt >= WAIT_STRAGGLER_MS) {
+          const out = list.map(tabInfo), slow = out.filter((x) => x.status === "loading" || x.status === "queued").map((x) => x.tab);
+          return R({ ok: true, tabs: out, still_loading: slow, note: "read the tabs that are ready now. " + slow.join(", ") + " still loading: read them after the others (browser_read waits a few seconds by itself), and do not call browser_wait again for them" });
+        }
+      }
       await sleep(250);
     }
-    return ERR("still_waiting", "not done yet; call browser_wait again", { tabs: list.map(tabInfo) });
+    return ERR("still_waiting", "not done yet; read the tabs that are ready, and wait once more at most", { tabs: list.map(tabInfo) });
   }
 
   async function doRead(t, v, args) {
+    // 還在載的頁:自己短等(讀得到就走),不用 agent 另外呼叫 browser_wait;等不到就照舊讀現在有的
+    if (t.status === "loading") await waitLoaded(t, READ_WAIT_MS);
+    // 等完重判一次才進頁面(驗證頁裡不跑任何東西);讀完再判一次才交出去、才存快照
+    const gone = recheck(t, v); if (gone) return gone;
     let ex; try { ex = await v.page.extract(); } catch (_) { return ERR("load_failed", "could not read the page", { tab: t.alias, reason: "network" }); }
+    const late = recheck(t, v); if (late) return late;
     const r = C.readPart(ex, args, (n) => tabs.readBudget(n));
     if (cur && r && typeof r.content === "string") cur.readText = (cur.readText + "\n" + r.content).slice(-READ_TEXT_MAX);
     if (r.error) return ERR(r.error, r.message, { tab: t.alias });
@@ -566,9 +774,14 @@ function createBrowser(o) {
       if (t.visible) v.page.run(IP.mark, ["frames", { rects: ex.linkRects || [], stagger: 0, hold: 600 }, reduced]).catch(() => {});
     } else if (part === "meta") emit("page_act", { id: t.id, kind: "meta" });
     bumpThumb(t);
-    // 任何一種 browser_read 都算「讀了」:存快照、進這一輪的來源清單——「讀了 N 頁」跟來源卡同一個口徑
-    if (!t.snapshotId) await saveSnapshot(t, v, ex);
-    const relay = C.isRelay(ex, v.wc.getTitle());   // 只停在中繼頁:不進來源、不算讀過(回合紀錄也不記 done)
+    await noteRead(t, v, ex);
+    return R(C.envelope(v.wc.getURL(), ex.meta.title || v.wc.getTitle(), r.content, { tab: t.alias, part, next_offset: r.next_offset === undefined ? undefined : r.next_offset, total_chars: r.total_chars }));
+  }
+  // 任何一種 browser_read(與 browser_capture:引用圖的出處頁)都算「讀了」:存快照、進這一輪的來源清單——摘要列的「讀了 N 頁」就是數這份清單(renderer brTakeSources)
+  async function noteRead(t, v, ex) {
+    if (!t.snapshotId || (cur && t.snapTurn !== cur.turnKey)) await saveSnapshot(t, v, ex);   // 前面回合存的快照是那一輪看到的樣子:這一輪讀就另存一份
+    // 只停在中繼頁:不進來源、不算讀過(回合紀錄也不記 done)。settled = 這一頁載完了、之後沒再走(還在載 / 逾時算好的 partial 都不算)
+    const relay = C.isRelay(ex, v.wc.getTitle(), t.status === "ready" && !t.partial);
     if (!relay) t.readEver = true;   // 讀過就算,之後這一格再導覽也不收回
     if (cur && !relay && t.snapshotId && !cur.sources.some((x) => x.snapshot_id === t.snapshotId)) {
       const src = { id: t.id, url: C.scrub(v.wc.getURL(), 2000), title: C.scrub(ex.meta.title || v.wc.getTitle(), 300), snapshot_id: t.snapshotId };
@@ -576,8 +789,13 @@ function createBrowser(o) {
     }
     tabs.markRead(t.id);
     emit("page_done", Object.assign({ id: t.id, snapshot_id: t.snapshotId || null, read: true }, relay ? { relay: true } : {}));
-    return R(C.envelope(v.wc.getURL(), ex.meta.title || v.wc.getTitle(), r.content, { tab: t.alias, part, next_offset: r.next_offset === undefined ? undefined : r.next_offset, total_chars: r.total_chars }));
   }
+
+  // 報告引用圖(browser_capture):流程在 capture.js
+  const doCapture = createCapture({
+    nativeImage: E.nativeImage, reportsDir: o.reportsDir, getWin: () => o.getWin && o.getWin(), uiLang: () => o.uiLang(), reducedMotion: () => (o.reducedMotion ? o.reducedMotion() : false),
+    ERR, R, MSG, blockedMsg, emit, viewSize, withMask, noteRead, recheck, cur: () => cur, expanded: () => expanded,
+  }).doCapture;
   // 截圖一律 best-effort:拍不到就只留文字,絕不擋工具結果(分級與網域規則才是不能壞的)
   const within = (p, ms) => Promise.race([p, sleep(ms).then(() => { throw new Error("timeout"); })]);
   /* 稽核 S2:截圖前把有值的敏感欄位(同 fill 拒填那份判定)與金流商 iframe 蓋掉,拍完拿掉。
@@ -606,7 +824,7 @@ function createBrowser(o) {
   async function saveSnapshot(t, v, ex) {
     if (!cur) return;
     const image = await withMask(v, () => captureSnapshotImage(v));
-    t.snapshotId = snaps.save(cur.sessionId, { url: v.wc.getURL(), title: ex.meta.title || v.wc.getTitle(), markdown: ex.markdown, image, turn: cur.turnKey });
+    t.snapshotId = snaps.save(cur.sessionId, { url: v.wc.getURL(), title: ex.meta.title || v.wc.getTitle(), markdown: ex.markdown, image, turn: cur.turnKey }); t.snapTurn = cur.turnKey;
   }
   async function captureSnapshotImage(v, full) {
     // 操作中(browser_read 存快照)只拍當下視口:captureBeyondViewport 會動 viewport、整頁 reflow,
@@ -633,6 +851,15 @@ function createBrowser(o) {
     return { x: 0, y: 0, width: Math.min(cs.width, 1600), height: Math.min(cs.height, 12000), scale: 1 };
   }
 
+  /* 動手前最後一刻再判一次:進門之後(量位置、滑游標、開守門)用戶點了這一頁 = 他接手了,這個動作不做。
+     已經開的守門與 agent 窗口一起收掉——不然接下來 3 秒內他自己按的送出會被當成 agent 觸發而取消 */
+  async function stillMine(t, v) {
+    const gone = recheck(t, v); if (!gone) return null;
+    agentUntil.delete(v.wc.id); backstop.delete(v.wc.id); v.pace.end();
+    await v.page.disarm().catch(() => {});
+    await v.page.run(IP.mark, ["clear"]).catch(() => {});
+    return gone;
+  }
   async function doAct(name, t, v, args) {
     const w = tabs.action(); if (w) return ERR("rate_limited", "too many actions; slow down", { retry_in_s: w });
     const before = v.wc.getURL();
@@ -648,7 +875,9 @@ function createBrowser(o) {
     }
     if (name === "browser_back") {
       if (!v.wc.navigationHistory.canGoBack()) return ERR("invalid_args", "no page to go back to");
+      if (await unsaved(v)) return ERR("needs_user", UNSAVED_MSG, { kind: "unsaved_input", tab: t.alias });
       if (!(await markAgent(t))) return ERR("internal", "could not arm the navigation guard; try again");
+      { const gone = await stillMine(t, v); if (gone) return gone; }
       v.wc.navigationHistory.goBack(); await waitNav(v);
       return afterAction(t, v, before);
     }
@@ -657,12 +886,14 @@ function createBrowser(o) {
       const f = await v.page.focused().catch(() => null);
       const g = gate.classify("press", f ? f.desc : { inForm: false }, key);
       if (!g.ok) { needUser(t, g.kind, null, "Enter"); return ERR("needs_user", "pressing Enter here submits a form; the user must do it", { kind: g.kind, tab: t.alias }); }
+      if (f && userField(v, f.desc)) return ERR("needs_user", UNSAVED_FIELD_MSG, { kind: "unsaved_input", tab: t.alias });
       if (!(await markAgent(t))) return ERR("internal", "could not arm the navigation guard; try again");
       emit("page_act", { id: t.id, kind: "press", text: key });
       if (t.visible && f && f.backendNodeId !== undefined) {   // 焦點欄位框一下
         try { const q = await v.page.center(f.backendNodeId, false); if (!q.error) await v.page.run(IP.mark, ["ref", { box: q.box, label: key, tag: true }, false]); } catch (_) { /* 看不到就不框 */ }   // 按鍵小標(「Enter」)照常顯示:那是給用戶看的動作,不是 @eN 內部代號(canon 第 4 條裁定)
       }
       const onScreenK = await pageVisible(t, v);
+      { const gone = await stillMine(t, v); if (gone) return gone; }
       const r = await agentInput(v, () => v.page.press(key, onScreenK));
       bumpThumb(t);
       if (r.error) return ERR("invalid_args", "unsupported key");
@@ -681,6 +912,7 @@ function createBrowser(o) {
       needUser(t, g.kind, args.ref, d.name || d.label || "", pos && !pos.error ? pos.box : null);
       return ERR("needs_user", g.kind === "file" ? "uploads are done by the user" : "the user must press this themselves; tell them what you filled in and what to check, then browser_wait until=user_done", { kind: g.kind, tab: t.alias, ref: args.ref });
     }
+    if (action !== "click" && userField(v, d)) return ERR("needs_user", UNSAVED_FIELD_MSG, { kind: "unsaved_input", tab: t.alias, ref: args.ref });
     // 打字不走座標(Input.insertText 打進焦點),量不到中心點不擋:Monaco / CodeMirror 的
     // 打字入口是 1px 隱藏 textarea,center() 對它一定 not_visible / obscured——只有點擊真的要座標
     if (pos.error && action === "click") return ERR(pos.error === "not_visible" ? "invalid_args" : "obscured", pos.error === "not_visible" ? "the element is not visible" : MSG.obscured, { tab: t.alias });
@@ -701,6 +933,7 @@ function createBrowser(o) {
     }
     emit("page_act", Object.assign({ id: t.id, kind: action === "click" ? "click" : "type", ref: label, text: action === "click" ? C.scrub(d.name || d.text, 80) : C.scrub(text, 80), box: pos ? pos.box : null }, viewSize(v)));
     if (!(await markAgent(t))) return ERR("internal", "could not arm the navigation guard; try again");
+    { const gone = await stillMine(t, v); if (gone) return gone; }
     if (action === "click") {
       const c = await agentInput(v, () => v.page.click(b, pos, glide));
       v.pace.end();   // 點擊落地=結束(不含環的 0.45s;沒按下去也算收掉)
@@ -724,10 +957,12 @@ function createBrowser(o) {
     bumpThumb(t);
     return afterAction(t, v, before);
   }
-  /** agent 自己送的輸入在送出期間與之後 600ms 不算用戶接手(CDP 的輸入也會觸發 input-event,而且可能晚到)。 */
+  /** agent 自己送的輸入在送出期間與之後 600ms 不算用戶接手(CDP 的輸入也會觸發 input-event,而且可能晚到);
+      頁內的 watchEdits 同一個窗口內也不記(不然 agent 自己填的欄位會被當成用戶改過的)。 */
   async function agentInput(v, fn) {
     v.agentInputting = true;
-    try { return await fn(); } finally { v.agentInputting = false; v.agentInputAt = Date.now(); }
+    await v.page.run(IP.agentInput, [true]).catch(() => {});
+    try { return await fn(); } finally { v.agentInputting = false; v.agentInputAt = Date.now(); v.page.run(IP.agentInput, [false]).catch(() => {}); }
   }
   async function pageVisible(t, v) {
     if (!t.visible) return false;
@@ -739,18 +974,21 @@ function createBrowser(o) {
     if (!cur || !ctx.live()) return ERR("browser_off", "this turn has ended");
     if (!prefs.enabled) return ERR("browser_off", MSG.browser_off);
     firstUse();
-    if (name === "browser_search") return doSearch(args);
+    if (name === "browser_search") return doSearch(args, ctx);
     if (name === "browser_open") {
       if (searchUrl(args.url)) return ERR("invalid_args", "use browser_search for web searches");
       if (args.tab) {
         const x = tabFor(args.tab); if (x.e) return x.e;
         const a = policy.agent(String(args.url || "")); if (a) return ERR("blocked_policy", blockedMsg(a.reason), { reason: a.reason, host: a.host, like: a.like });
         let host = ""; try { host = policy.registrable(new URL(String(args.url)).hostname); } catch (_) { return ERR("invalid_args", "url must be an absolute http(s) URL"); }
+        if (await unsaved(x.v)) return ERR("needs_user", UNSAVED_MSG, { kind: "unsaved_input", tab: x.t.alias });
+        const gone = recheck(x.t, x.v); if (gone) return gone;
         const w = tabs.chargePage(host); if (w) return ERR(w.error, "too many pages opened; slow down", { retry_in_s: w.retry_in_s });   // 稽核 S6:在既有分頁導覽也扣開頁速率
         x.t.status = "loading"; x.v.wc.loadURL(String(args.url)).catch(() => {});
         return R({ ok: true, tab: x.t.alias, url: C.scrub(args.url, 2000), status: "loading" });
       }
       const r = openUrl(args.url, "agent");
+      await primedOf(r.tab);   // 空文件那 ~40ms 過了才回:回來之後的第一個工具看到的是真網址
       if (r.error === "invalid_args") return ERR("invalid_args", "url must be an absolute http(s) URL");
       if (r.error) return ERR(r.error, "too many pages opened; slow down", { retry_in_s: r.retry_in_s });
       if (r.blocked) return ERR("blocked_policy", blockedMsg(r.blocked.reason), { tab: r.tab.alias, reason: r.blocked.reason, host: r.blocked.host, like: r.blocked.like });
@@ -763,6 +1001,7 @@ function createBrowser(o) {
       const out = [];
       for (const u of urls) {
         const r = openUrl(u, "agent");
+        await primedOf(r.tab);
         if (r.error) out.push({ url: C.scrub(u, 2000), status: "blocked", error: r.error, retry_in_s: r.retry_in_s });
         else if (r.blocked) out.push({ tab: r.tab.alias, url: C.scrub(u, 2000), status: "blocked", error: "blocked_policy", reason: r.blocked.reason });
         else out.push({ tab: r.tab.alias, url: C.scrub(r.tab.url, 2000), status: r.tab.status === "queued" ? "queued" : "loading" });
@@ -770,14 +1009,15 @@ function createBrowser(o) {
       return R({ ok: true, tabs: out });
     }
     if (name === "browser_wait") return doWait(args);
-    if (name === "browser_tabs") return R({ ok: true, tabs: tabs.thisTurn().map(tabInfo), queued: tabs.queued() });
-    if (name === "browser_close") { const t = tabs.byAlias(args.tab); if (!t) return ERR("not_found", MSG.not_found); if (t.userControl) return ERR("user_in_control", MSG.user_in_control, { tab: t.alias }); tabs.close(t.id); emit("page_closed", { id: t.id }); return R({ ok: true }); }
+    if (name === "browser_tabs") { const list = tabs.reachable().map(tabInfo); return R({ ok: true, tabs: list, queued: tabs.queued(), note: list.some((x) => x.from_previous_turn) ? TABS_NOTE : undefined }); }
+    if (name === "browser_close") { const t = tabs.byAlias(args.tab); if (!t) return ERR("not_found", MSG.not_found); if (verifying(t)) return ERR("needs_user_verification", MSG.needs_user_verification, { tab: t.alias }); if (t.userControl) return ERR("user_in_control", MSG.user_in_control, { tab: t.alias }); tabs.close(t.id); emit("page_closed", { id: t.id }); return R({ ok: true }); }
     const x = tabFor(args.tab); if (x.e) return x.e;
     const { t, v } = x;
     if (name === "browser_snapshot") {
       emit("page_act", { id: t.id, kind: "snapshot" });
       const s = await v.page.snapshot({ scope: args.scope, interactive_only: !!args.interactive_only }, gate.sensitiveField);
       if (s.error) return ERR(s.error, MSG[s.error], { tab: t.alias });
+      const late = recheck(t, v); if (late) return late;
       return R(C.envelope(v.wc.getURL(), v.wc.getTitle(), s.text, { tab: t.alias, refs: s.refs, truncated: s.truncated }));
     }
     if (name === "browser_read") return doRead(t, v, args);
@@ -794,6 +1034,7 @@ function createBrowser(o) {
         else if (what === "attr" && /^(value)$/i.test(String(args.name || "")) && gate.sensitiveField(d)) val = "";
         else val = await v.page.callOn(b, function (w, n) { if (w === "text") return String(this.innerText || this.textContent || "").slice(0, 12000); if (w === "value") return String(this.value == null ? "" : this.value).slice(0, 12000); return String(this.getAttribute(String(n)) || "").slice(0, 12000); }, [what, String(args.name || "")]);
       }
+      const late = recheck(t, v); if (late) return late;
       const n = tabs.readBudget(String(val).length); if (String(val).length && !n) return ERR("budget_exhausted", "read budget used up");
       return R(C.envelope(v.wc.getURL(), v.wc.getTitle(), String(val).slice(0, n), { tab: t.alias }));
     }
@@ -803,6 +1044,7 @@ function createBrowser(o) {
         if (!d) { try { const img = await within(v.wc.capturePage(undefined, { stayHidden: true }), 5000); if (!img.isEmpty()) d = img.toPNG().toString("base64"); } catch (_) { /* 拍不到 */ } }
         return { d };
       });
+      const late = recheck(t, v); if (late) return late;
       if (!got) return ERR("sensitive_field", "a password / card / code field on this page has a value that could not be hidden, so no screenshot was taken; use browser_snapshot or browser_read", { tab: t.alias });
       let data = got.d;
       if (!data) return ERR("screenshot_failed", "could not capture this tab right now; use browser_snapshot or browser_read instead", { tab: t.alias });
@@ -810,6 +1052,7 @@ function createBrowser(o) {
       const meta = C.envelope(v.wc.getURL(), v.wc.getTitle(), "", { tab: t.alias });
       return { content: [{ type: "text", text: JSON.stringify(meta) }, { type: "image", mimeType: "image/png", data }], isError: false };
     }
+    if (name === "browser_capture") return doCapture(t, v, args);
     if (["browser_click", "browser_fill", "browser_type", "browser_press", "browser_scroll", "browser_back"].includes(name)) return doAct(name, t, v, args);
     return ERR("invalid_args", "unknown tool");
   }
@@ -837,7 +1080,7 @@ function createBrowser(o) {
   const favCache = new Map(), favPending = new Map(), favTried = new Map();
   const FAV_MIME = /^image\/(png|x-icon|vnd\.microsoft\.icon|jpeg|gif|webp|svg\+xml|avif|bmp)$/i;
   async function fetchFavicon(t, v, favs) {
-    let host; try { host = new URL(v.wc.getURL() || t.url).host; } catch (_) { return; }
+    let host; try { host = new URL(pageUrl(t, v)).host; } catch (_) { return; }
     const known = favCache.get(host);
     if (known) { emit("page_favicon", { id: t.id, dataURI: known.data, plate: known.plate }); return; }
     if (!FAVICON_FETCH || favPending.has(host) || favTried.get(host) >= 2) return;
@@ -847,7 +1090,7 @@ function createBrowser(o) {
     let declared = []; try { declared = await v.page.run(function () { return Array.from(document.querySelectorAll('link[rel~="icon" i], link[rel="shortcut icon" i], link[rel="apple-touch-icon" i]')).map((l) => ({ href: l.href, dark: /prefers-color-scheme\s*:\s*dark/i.test(l.media || "") })).slice(0, 8); }); } catch (_) { /* 讀不到就用候選 */ }
     declared = (declared || []).sort((a, b) => (b.dark ? 1 : 0) - (a.dark ? 1 : 0)).map((d) => d.href);
     // 稽核 R8:只抓跟頁面同一個可註冊網域的 icon(頁面可以在 <link> 寫任何第三方網址——不能讓網頁指使 app 替用戶打別人);agent 不能去的網址也不抓
-    const pageReg = policy.registrable(new URL(v.wc.getURL() || t.url).hostname);
+    const pageReg = policy.registrable(new URL(pageUrl(t, v)).hostname);
     const sameSite = (f) => { try { const u = new URL(f); return policy.registrable(u.hostname) === pageReg; } catch (_) { return false; } };
     const cands = [...new Set((declared || []).concat(favs || []))].filter((f) => /^https?:\/\//i.test(String(f)) && sameSite(f) && !policy.network(f, "sub") && !policy.agent(f));
     try {
@@ -916,19 +1159,51 @@ function createBrowser(o) {
     } catch (_) { return null; } finally { clearTimeout(timer); }   // 拿不到就畫字母格
   }
 
+  // 「送進 TradingView」的診斷 log:一次結果一行 JSON;超過 256KB 換檔(留一份 .1)。寫不進去就算了
+  function pineLog(entry) {
+    if (!o.pineLog) return;
+    const fs = require("fs");
+    try {
+      fs.mkdirSync(require("path").dirname(o.pineLog), { recursive: true });
+      try { if (fs.statSync(o.pineLog).size > 256 * 1024) fs.renameSync(o.pineLog, o.pineLog + ".1"); } catch (_) { /* 還沒有檔 */ }
+      fs.appendFileSync(o.pineLog, JSON.stringify(entry) + "\n", { mode: 0o600 });
+    } catch (_) { /* 唯讀磁碟、沒權限 */ }
+  }
+  /* 「送進 TradingView」(pine.js):外殼自己的確定性流程,不經 agent 工具、不佔 agent 的 alias 與速率。
+     分頁是 user 分頁;動手前照樣開導覽守門(動作後 3 秒內的文件層送出一律取消),交接時收掉——
+     之後用戶自己按的送出與登入子視窗才不會被當成程式觸發 */
+  const pineLayout = {
+    width: (t, v) => { try { return t.visible && expanded === t.id ? v.view.getBounds().width : 0; } catch (_) { return 0; } },
+    widen: async (t, v, w) => { v.wide = w; const ok = await wideEmulate(v); if (!ok) v.wide = 0; return ok; },
+    narrow: async (t, v) => { v.wide = 0; if (t.visible) unEmulate(v); else parkEmulate(v); await sleep(150); },
+  };
+  const pine = require("./pine").createPine({
+    open: (url) => openUrl(url, "user"), tab: (id) => tabs.get(id), view: (id) => views.get(id) || null,
+    waitLoaded, visible: pageVisible, input: agentInput, arm: markAgent,
+    disarm: (t) => { const v = views.get(t.id); if (!v) return null; agentUntil.delete(v.wc.id); backstop.delete(v.wc.id); return v.page.disarm(); },
+    emit, sensitive: gate.sensitiveField, enabled: () => !!prefs.enabled, lang: () => o.uiLang(), reduced: () => (o.reducedMotion ? o.reducedMotion() : false), sleep,
+    log: pineLog,
+    width: (t, v) => pineLayout.width(t, v), widen: (t, v, w) => pineLayout.widen(t, v, w), narrow: (t, v) => pineLayout.narrow(t, v),
+  });
+
   // ── 對外 ──
   return {
     PARTITION,
+    pineInstall: (job) => { win = o.getWin() || win; return pine.install(job); },
     enabled: () => !!prefs.enabled,
     /** 回合開始:設定開著才回 { url, token };主行程把它寫進單次設定檔 / Codex 環境。 */
-    async beginTurn(w, sessionId) {
+    async beginTurn(w, sessionId, opts) {
       if (!prefs.enabled) return null;
       win = w;
-      if (!mcp) { mcp = createMcpServer({ tools: TOOLS, call, instructions: INSTRUCTIONS, version: o.version }); await mcp.start(); }
+      if (!mcp) { mcp = createMcpServer({ tools: TOOLS, call, instructions: INSTRUCTIONS, version: o.version, maxMs: (name) => (name === "browser_search" ? SEARCH_HARD_MAX_MS : 0) }); await mcp.start(); }
       const turnKey = Date.now();
       // seen / readText:外送檢查用(policy.exfilRisk)——這一輪開過的網域、讀過的字
-      cur = { sessionId, turnKey, used: false, captchas: 0, skipGoogle: false, sources: [], seen: new Set(), readText: "" };
-      tabs.newTurn();
+      // noUser:這一輪是從雲端視角送出的(畫面上不是這台電腦的對話)→ 遇到驗證頁不問,直接走退路
+      cur = { sessionId, turnKey, used: false, captchas: 0, skipGoogle: false, verifyEnd: null, noUser: !!(opts && opts.noUser), sources: [], seen: new Set(), readText: "" };
+      tabs.newTurn(sessionId);
+      // userSent:這一輪是用戶在這台電腦的聊天送出的(main.js send-message)。沒帶的、從雲端視角送的都不交還
+      if (opts && opts.userSent === true && !cur.noUser) await autoHandback(cur);
+      for (const v of views.values()) v.pace.newTurn();   // 跨回合重置:每回合第一動作完整效果(canon 第 9 條)
       watchReports(cur);
       return { url: mcp.url(), token: mcp.beginTurn(turnKey) };
     },
@@ -938,6 +1213,7 @@ function createBrowser(o) {
       if (reportWatch) { try { reportWatch.close(); } catch (_) { /* 已關 */ } reportWatch = null; }
       if (!cur) return;
       const c = cur; cur = null;
+      try { sweepCites(o.reportsDir, c.cites); } catch (_) { /* 清不掉:留著,不擋回合收尾 */ }
       if (!c.used) return;
       const favOf = (u) => { try { return favCache.get(new URL(u).host) || null; } catch (_) { return null; } };
       const rows = tabs.thisTurnAll().filter((t) => t.status !== "closed" || t.readEver).map((t) => ({ id: t.id, url: C.scrub(t.url, 2000), title: C.scrub(t.title, 300), status: t.status === "blocked" ? "blocked" : t.status === "failed" ? "failed" : t.readEver ? "done" : "open", snapshot_id: t.snapshotId || null, search: !!t.isSearch }));
@@ -947,12 +1223,15 @@ function createBrowser(o) {
       snaps.logTurn(c.sessionId, { ts: (c.usedAt || c.turnKey) / 1000, end: Date.now() / 1000, tabs: rows, sources });
       const withFav = (a) => a.map((r) => { const f = favOf(r.url); return Object.assign({}, r, { fav: f ? f.data : null, plate: !!(f && f.plate) }); });
       emit("turn_sources", { session_id: c.sessionId, sources: withFav(sources), tabs: withFav(rows) });
-      for (const t of tabs.thisTurn()) { if (t.need && !t.userDone) { t.need = null; emit("need_clear", { id: t.id }); } }
+      for (const t of tabs.reachable()) { if (t.need && !t.userDone) { t.need = null; emit("need_clear", { id: t.id }); } }
+      // 驗證頁那一格:回合結束就沒有 agent 在等它了,「你在操作／交還 agent」收掉(e2e 0.1.8 #198)。頁面留著,用戶照樣可以繼續按;
+      // 那一格仍然是驗證頁(t.verify 不清),agent 的工具照樣碰不到
+      for (const t of tabs.reachable()) { if (t.verify && t.userControl) { t.userControl = false; emit("handback", { id: t.id, auto: true }); } }
       // 快照圖升級成整頁版(beyond-viewport 只在這裡做:一輪一次;操作中存的是視口版,見 captureSnapshotImage)
       (async () => {
         for (const r of rows) {
           if (!r.snapshot_id) continue;
-          const v = views.get(r.id); if (!v) continue;
+          const v = views.get(r.id); if (!v || !shootable(tabs.get(r.id))) continue;   // 讀過之後被用戶接手的頁:快照留著 agent 讀的那一版,不再拍
           const image = await withMask(v, () => captureSnapshotImage(v, true), true);
           if (image) snaps.updateImage(c.sessionId, r.snapshot_id, image);
           if (expanded !== r.id) parkEmulate(v);   // 整頁擷取的 unEmulate 也清掉 park override,補回去(不然頁面回到 0 寬行動版)
@@ -966,9 +1245,9 @@ function createBrowser(o) {
       if (expanded && expanded !== t.id) { const pv = views.get(expanded); if (pv) park(pv, 0); }
       tabs.setVisible(t.id, true); expanded = t.id;
       const v = views.get(t.id);
-      if (!v) return { id: t.id, live: false, status: t.status, url: C.scrub(t.url, 2000), title: t.title, snapshot_id: t.snapshotId || null, reason: t.reason || null };
+      if (!v) return { id: t.id, live: false, by: t.by, status: t.status, url: C.scrub(t.url, 2000), title: t.title, snapshot_id: t.snapshotId || null, reason: t.reason || null };
       this.bounds(bounds);
-      return { id: t.id, live: true, status: status(t), url: C.scrub(v.wc.getURL() || t.url, 2000), title: t.title, user: !!t.userControl, need: t.need ? { kind: t.need.kind, summary: C.scrub(t.need.summary, 300) } : null };
+      return { id: t.id, live: true, by: t.by, status: status(t), url: C.scrub(pageUrl(t, v), 2000), title: t.title, user: !!t.userControl, need: t.need ? { kind: t.need.kind, summary: C.scrub(t.need.summary, 300) } : null };
     },
     bounds(b) {
       if (!expanded) return;
@@ -1024,7 +1303,13 @@ function createBrowser(o) {
       return snaps.turns(sessionId).map((r) => Object.assign({}, r, { tabs: (r.tabs || []).map(add), sources: (r.sources || []).map(add) }));
     },
     removeSession: (sessionId) => snaps.removeSession(sessionId),
-    externalUrl(id) { const t = tabs.get(String(id || "")); return t ? t.url : null; },
+    /** 「用系統瀏覽器開」:只收分頁 id;網址由這裡從分頁自己拿、自己檢查(policy.externalUrl)。回網址或 null */
+    externalUrl(id) {
+      const t = typeof id === "string" ? tabs.get(id) : null; if (!t) return null;
+      const v = views.get(t.id); let live = "";
+      try { live = v && !v.wc.isDestroyed() ? String(v.wc.getURL() || "") : ""; } catch (_) { live = ""; }
+      return policy.externalUrl(t, live);
+    },
     setBlockVisible(on) { blockVisible = !!on; if (on) thumbs(); },
     _captureThumb: (id) => captureThumb(id),
     prefs: () => ({ enabled: !!prefs.enabled }),
@@ -1036,10 +1321,11 @@ function createBrowser(o) {
       favCache.clear(); favTried.clear();   // 看過哪些網站也是瀏覽資料
       return true;
     },
-    _tabs: tabs, _call: call, _oauth: oauth,   // 測試用
+    _tabs: tabs, _call: call, _cur: () => cur, _oauth: oauth, _verifying: (alias) => verifying(tabs.byAlias(alias)),   // 測試用
     _agentActive: (id) => { const v = views.get(id); return !!v && agentActive(v.wc.id); },
     _imageSize: (b) => imageSize(b), _needsPlate: (d) => needsPlate(d),
     _viewBounds: (id) => { const v = views.get(id); return v ? v.view.getBounds() : null; },
+    _pineLayout: (id) => { const t = tabs.get(id), v = views.get(id); return t && v ? { width: () => pineLayout.width(t, v), widen: (w) => pineLayout.widen(t, v, w), narrow: () => pineLayout.narrow(t, v) } : null; },
     _maskProbe: async (alias) => {
       const t = tabs.byAlias(alias), v = t && views.get(t.id); if (!v) return null;
       let inside = null;

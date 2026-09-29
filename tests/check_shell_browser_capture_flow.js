@@ -1,0 +1,218 @@
+// browser_capture 的流程(shell/browser/capture.js)與它用的純函式,不開 Electron:頁面、view、nativeImage 都是假的。
+// 釘住 0.1.8 稽核那幾條:拍前重量外框(B1)、出處網址剝 token(S1)、reports/<id>.files 是 symlink 不寫(S2)、
+// 拍完用當下網址重判(S3)、「整個畫面」加面積比(B2)、平行呼叫不超過 10 張(B3)、被遮住不拍(B4)、
+// 沒有盒子不回 stale_ref(B5)、叫不醒合成器不拍(B7)。真 Electron 的端到端在 check_shell_browser_capture.js。
+// e2e 0.1.8(引用圖只拍到上半、下半整片深色):元素裡的圖沒載完先等、等不到不拍;拍到空的 / 被切斷的圖重拍一次、還是一樣就不存。
+// 0.1.8 稽核 P1-1(第十批 #1):等外框停住、等圖載完的那幾秒裡頁面換了、變成驗證頁、被用戶接手 → 不拍、不存快照、不寫檔。
+// 跑法:node tests/check_shell_browser_capture_flow.js
+const path = require("path"), fs = require("fs"), os = require("os");
+const B = path.join(__dirname, "..", "shell", "browser");
+const policy = require(path.join(B, "policy")), gate = require(path.join(B, "gate"));
+const { createCapture, saveCite, citeSlot, sweepCites, CITES_PER_TURN } = require(path.join(B, "capture"));
+const IP = require(path.join(B, "inpage"));
+let red = 0; const t = (n, ok, got) => { console.log((ok ? "PASS  " : "FAIL  ") + n); if (!ok) { red++; if (got !== undefined) console.log("      got: " + JSON.stringify(got).slice(0, 400)); } };
+
+// ── S1:出處網址 ──
+for (const [u, want] of [
+  ["https://a.com/chart?id=7&token=SECRET&sig=1", "https://a.com/chart?id=7"],
+  ["https://a.com/x#access_token=abc&expires_in=3600", "https://a.com/x"],
+  ["https://s3.amazonaws.com/b/k.png?X-Amz-Signature=ab&X-Amz-Credential=c&v=2", "https://s3.amazonaws.com/b/k.png?v=2"],
+  ["https://a.com/d?api_key=K&apiKey=K2&authToken=T&client_secret=S", "https://a.com/d"],
+  ["https://a.com/d?KEY=abc&page=2", "https://a.com/d?page=2"],
+  ["https://a.com/stock?code=2330&state=open", "https://a.com/stock?code=2330&state=open"],
+  ["https://a.com/doc#section-2", "https://a.com/doc#section-2"],
+  ["https://a.com/app#/view?session=zz", "https://a.com/app"],
+  ["https://glassnode.com/charts/x?a=1", "https://glassnode.com/charts/x?a=1"],
+  ["not a url", "not a url"],
+]) { const got = policy.citeUrl(u); t("citeUrl " + u.slice(0, 50) + " → " + want.slice(0, 50), got === want, got); }
+
+// ── B2 / B1 / B4 純函式 ──
+const V = { w: 1280, h: 800, px: 0, py: 0 };
+for (const [box, want, n] of [
+  [{ x: 100, y: 100, w: 600, h: 300 }, null, "一般圖表"], [{ x: 0, y: 50, w: 1280, h: 560 }, null, "滿版寬、高 70%"],
+  [{ x: 0, y: 0, w: 1280, h: 679 }, "too_large", "寬 100% × 高 84.9%(舊規則放行)"], [{ x: 0, y: 0, w: 1150, h: 800 }, "too_large", "寬 89.8% × 高 100%(舊規則放行)"],
+  [{ x: 20, y: 20, w: 1160, h: 690 }, "too_large", "90%×85%"], [{ x: 10, y: 10, w: 60, h: 300 }, "too_small", "太窄"],
+  [{ x: -200, y: 10, w: 400, h: 300 }, "not_visible", "一半在可視區外"],
+]) { const got = gate.captureFit(box, V); t("captureFit " + n + " → " + want, got === want, got); }
+const at = (x, y, w, h, py) => ({ box: { x, y, w: w || 600, h: h || 300 }, view: { w: 1280, h: 800, px: 0, py: py || 0 } });
+t("captureDrift:同一個位置 = 0;頁面捲了但元素在文件裡沒動 = 0", gate.captureDrift(at(10, 100), at(10, 100)) === 0 && gate.captureDrift(at(10, 400, 0, 0, 0), at(10, 100, 0, 0, 300)) === 0);
+t("captureDrift:往下推 300 = 300;大小變了也算", gate.captureDrift(at(10, 100), at(10, 400)) === 300 && gate.captureDrift(at(10, 100, 600, 300), at(10, 100, 600, 340)) === 40);
+t("captureCovered:中心被遮 / 兩個角被遮 → 擋;一個角、查不出來 → 不擋",
+  gate.captureCovered([true, false, false, false, false]) && gate.captureCovered([false, true, true, false, false])
+  && !gate.captureCovered([false, true, false, false, false]) && !gate.captureCovered([null, null, null, null, null]) && !gate.captureCovered([]));
+{ const p = gate.capturePoints({ x: 100, y: 100, w: 600, h: 300 }); t("capturePoints:中心 + 四角,全部落在框內", p.length === 5 && p[0].x === 400 && p[0].y === 250 && p.every((q) => q.x > 100 && q.x < 700 && q.y > 100 && q.y < 400), p); }
+
+// ── 拍到的圖是不是空的 / 被切斷(gate.captureBlank)。假圖:w × h 的 BGRA,paint(x, y) 回 [r, g, b] ──
+const bitmap = (w, h, paint) => { const bm = Buffer.alloc(w * h * 4); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const c = paint(x, y), i = (y * w + x) * 4; bm[i] = c[2]; bm[i + 1] = c[1]; bm[i + 2] = c[0]; bm[i + 3] = 255; } return bm; };
+const LIGHT = [232, 232, 232], DARK = [21, 23, 25], LINE = [95, 86, 149];
+const line = (bg) => (x, y) => (Math.abs(y - (60 + Math.round(40 * Math.sin(x / 15)))) < 2 ? LINE : bg);   // 一條在上半部起伏的線
+const shots = {
+  good_light: bitmap(340, 210, (x, y) => (y > 190 && x % 40 < 12 ? [90, 90, 90] : line(LIGHT)(x, y))),                 // 淺底、底部有座標軸的字
+  good_dark: bitmap(340, 120, line(DARK)),                                                                             // 深色底的圖表:底部一半是空的,但跟底色同色
+  good_dark_noisy: bitmap(340, 120, (x, y) => line([DARK[0] + ((x * 7 + y * 3) % 5), DARK[1] + ((x + y) % 4), DARK[2]])(x, y)),   // 同上,帶壓縮雜訊
+  good_footer: bitmap(340, 210, (x, y) => (y >= 170 ? [40, 44, 52] : line(LIGHT)(x, y))),                               // 底部 19% 的色帶(圖例底):不到 1/4
+  cut_half: bitmap(340, 210, (x, y) => (y >= 104 ? DARK : y === 103 ? [75, 77, 78] : line(LIGHT)(x, y))),              // e2e 那一張:上半淺底的圖、下半整片深色
+  cut_quarter: bitmap(340, 210, (x, y) => (y >= 150 ? DARK : line(LIGHT)(x, y))),                                       // 下面 29%
+  blank_dark: bitmap(340, 210, () => DARK), blank_white: bitmap(340, 210, () => [255, 255, 255]),
+  blank_edged: bitmap(340, 210, (x, y) => (y >= 208 || x >= 338 ? [120, 20, 130] : [255, 0, 255])),                    // 整張同色,但最外圈兩列是跟隔壁混出來的顏色
+  cut_edged: bitmap(340, 210, (x, y) => (y >= 209 ? [60, 60, 60] : y >= 104 ? DARK : line(LIGHT)(x, y))),
+};
+for (const [k, want, w, h] of [["good_light", null, 340, 210], ["good_dark", null, 340, 120], ["good_dark_noisy", null, 340, 120], ["good_footer", null, 340, 210],
+  ["cut_half", "cut", 340, 210], ["cut_quarter", "cut", 340, 210], ["blank_dark", "blank", 340, 210], ["blank_white", "blank", 340, 210],
+  ["blank_edged", "blank", 340, 210], ["cut_edged", "cut", 340, 210]]) {
+  const got = gate.captureBlank(shots[k], w, h); t("captureBlank " + k + " → " + want, got === want, got);
+}
+t("captureBlank:讀不到像素(空的、長度不對)→ null,不因為檢查壞掉而拒拍", gate.captureBlank(null, 10, 10) === null && gate.captureBlank(Buffer.alloc(8), 10, 10) === null && gate.captureBlank(shots.good_light, 0, 0) === null
+  && gate.captureBlank(Buffer.alloc(10 * 10 * 4), 10, 10) === null);
+
+// ── S2:寫檔 ──
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "blave-capflow-"));
+const reports = path.join(tmp, "ws", "reports"), outside = path.join(tmp, "outside");
+fs.mkdirSync(outside);
+{
+  saveCite(reports, "r1", "cite-a.png", Buffer.from("x"));
+  t("saveCite:一般情況寫進 reports/<id>.files/", fs.readFileSync(path.join(reports, "r1.files", "cite-a.png"), "utf8") === "x");
+  let threw = false; try { saveCite(reports, "r1", "cite-a.png", Buffer.from("y")); } catch (_) { threw = true; }
+  t("saveCite:不覆蓋既有檔", threw && fs.readFileSync(path.join(reports, "r1.files", "cite-a.png"), "utf8") === "x");
+  fs.symlinkSync(outside, path.join(reports, "evil.files"));
+  threw = false; try { saveCite(reports, "evil", "cite-b.png", Buffer.from("x")); } catch (_) { threw = true; }
+  t("saveCite:<id>.files 是 symlink → 不寫,外面的目錄沒有多檔", threw && fs.readdirSync(outside).length === 0, fs.readdirSync(outside));
+  fs.writeFileSync(path.join(reports, "plain.files"), "");
+  threw = false; try { saveCite(reports, "plain", "cite-c.png", Buffer.from("x")); } catch (_) { threw = true; }
+  t("saveCite:<id>.files 是一般檔 → 不寫", threw);
+  fs.mkdirSync(path.join(reports, "r2.files"));
+  fs.symlinkSync(path.join(outside, "leak.png"), path.join(reports, "r2.files", "cite-d.png"));
+  threw = false; try { saveCite(reports, "r2", "cite-d.png", Buffer.from("x")); } catch (_) { threw = true; }
+  t("saveCite:檔名已經是(懸空的)symlink → 不跟過去寫", threw && !fs.existsSync(path.join(outside, "leak.png")));
+  // 報告不覆寫:id 已經有報告 → 圖進下一個空 id 的資料夾,舊報告的資料夾不進新圖(lib/report.py 寫報告時用同一條規則找圖)
+  fs.writeFileSync(path.join(reports, "r1.json"), "{}");
+  saveCite(reports, "r1", "cite-new.png", Buffer.from("n"));
+  t("saveCite:r1 已有報告 → 新圖進 r1-2.files/,r1.files/ 原封不動", fs.readFileSync(path.join(reports, "r1-2.files", "cite-new.png"), "utf8") === "n" && fs.readdirSync(path.join(reports, "r1.files")).join() === "cite-a.png", fs.readdirSync(reports));
+  fs.mkdirSync(path.join(reports, "sent"), { recursive: true });
+  fs.writeFileSync(path.join(reports, "sent", "r1-2.json"), "{}");
+  t("citeSlot:sent/ 裡的也算有報告;-auto 的序號排在字尾前;超過 64 字從主幹截", citeSlot(reports, "r1") === "r1-3" && citeSlot(reports, "fresh") === "fresh"
+    && (fs.writeFileSync(path.join(reports, "d-auto.json"), "{}"), citeSlot(reports, "d-auto")) === "d-2-auto"
+    && (fs.writeFileSync(path.join(reports, "x".repeat(64) + ".json"), "{}"), citeSlot(reports, "x".repeat(64))) === "x".repeat(62) + "-2", [citeSlot(reports, "r1"), citeSlot(reports, "d-auto")]);
+}
+
+// ── 回合結束:沒被任何報告收下的擷取檔清掉(實機:先用 research-btc 擷取、後來改用別的 id 發佈,留下孤兒 research-btc-2.files/)──
+{
+  const rp = path.join(tmp, "sweep", "reports"); fs.mkdirSync(rp, { recursive: true });
+  const ls = (d) => { try { return fs.readdirSync(path.join(rp, d)).sort().join(); } catch (_) { return null; } };
+  fs.writeFileSync(path.join(rp, "old.json"), "{}"); fs.mkdirSync(path.join(rp, "old.files")); fs.writeFileSync(path.join(rp, "old.files", "cite-kept.png"), "k");
+  const a = { dir: saveCite(rp, "old", "cite-orphan.png", Buffer.from("o")), file: "cite-orphan.png" };              // old 已有報告 → old-2.files/
+  const b = { dir: saveCite(rp, "taken", "cite-used.png", Buffer.from("u")), file: "cite-used.png" };               // 之後 taken 發佈了
+  fs.writeFileSync(path.join(rp, "taken.json"), "{}"); fs.writeFileSync(path.join(rp, "taken.files", "cite-unref.png"), "x");
+  const c = { dir: saveCite(rp, "mixed", "cite-mine.png", Buffer.from("m")), file: "cite-mine.png" };                // 同資料夾有別人(上一輪)的檔
+  fs.writeFileSync(path.join(rp, "mixed.files", "cite-earlier.png"), "e");
+  const d = { dir: saveCite(rp, "moved", "cite-gone.png", Buffer.from("g")), file: "cite-gone.png" };                // lib 已經把它搬到實際 id 的資料夾
+  fs.unlinkSync(path.join(rp, "moved.files", "cite-gone.png"));
+  t("saveCite 回它寫進去的資料夾", a.dir === path.join(rp, "old-2.files") && b.dir === path.join(rp, "taken.files"));
+  const n = sweepCites(rp, [a, b, c, d, null, { dir: path.join(tmp, "x.files"), file: "cite-a.png" }, { dir: path.join(rp, "old.files"), file: "cite-kept.png" }, { dir: a.dir, file: "../old.json" }]);
+  t("孤兒(那個 id 到回合結束都沒有報告):檔清掉、空資料夾收掉", n === 2 && ls("old-2.files") === null && ls("moved.files") === null, n + " " + ls("old-2.files"));
+  t("有報告的資料夾一個字都不碰:這一輪擷取、報告收下的圖留著,連沒被引用的也不由這裡清;既有報告的圖原封不動", ls("taken.files") === "cite-unref.png,cite-used.png" && ls("old.files") === "cite-kept.png" && fs.existsSync(path.join(rp, "old.json")));
+  t("只刪這一輪自己寫的那個檔:同資料夾別的檔留著、資料夾不收", ls("mixed.files") === "cite-earlier.png");
+  const out2 = path.join(tmp, "outside2"); fs.mkdirSync(out2);
+  fs.symlinkSync(out2, path.join(rp, "link.files")); fs.writeFileSync(path.join(out2, "cite-out.png"), "z");
+  t("資料夾是 symlink / 在 reports 以外 / 檔名帶路徑:不動", sweepCites(rp, [{ dir: path.join(rp, "link.files"), file: "cite-out.png" }]) === 0 && fs.existsSync(path.join(out2, "cite-out.png")) && sweepCites(rp, "x") === 0 && sweepCites(null, [a]) === 0);
+  const idx = fs.readFileSync(path.join(B, "index.js"), "utf8");
+  t("接線:doCapture 把存好的檔記在這一輪的狀態;endTurn 清(在 used 判斷之前,清不掉不擋收尾)", /\(cur\.cites \|\| \(cur\.cites = \[\]\)\)\.push\(\{ dir: saveCite\(d\.reportsDir, report, file, buf\), file \}\);/.test(fs.readFileSync(path.join(B, "capture.js"), "utf8"))
+    && /const c = cur; cur = null;\s*try \{ sweepCites\(o\.reportsDir, c\.cites\); \} catch \(_\) \{[^}]*\}\s*if \(!c\.used\) return;/.test(idx));
+}
+
+// ── 流程 ──
+const J = (r) => JSON.parse(r.content[0].text);
+const R = (obj, isError) => ({ content: [{ type: "text", text: JSON.stringify(obj) }], isError: !!isError });
+const ERR = (error, message, extra) => R(Object.assign({ ok: false, error, message }, extra || {}), true);
+const BOX = at(100, 100);
+function rig(over) {
+  const x = Object.assign({ url: "https://charts.test/funding?id=7&token=SECRET", urlAfter: null, clips: [BOX], covered: [false, false, false, false, false], alive: true, clipThrows: false, boundsThrow: false, clipped: [], masked: 0, cur: { captures: 0 }, pending: [0], asked: 0, shots: ["good_light"], deny: null, noted: 0, tab: {} }, over || {});
+  let shot = false, nclip = 0;
+  const v = {
+    wc: { getURL: () => (shot && x.urlAfter ? x.urlAfter : x.url), getTitle: () => "Funding weekly" },
+    view: { getBounds: () => { if (x.boundsThrow) throw new Error("closing"); return { x: 20000, y: 0, width: 1280, height: 800 }; }, setBounds: () => {} },
+    pace: { arrive: () => ({}), end: () => {} },
+    page: {
+      node: (ref) => (ref === "e1" ? 11 : null),
+      callOn: async (_b, fn) => {
+        if (fn === IP.pendingPictures) { x.asked++; if (x.pending === "throws") throw new Error("no node"); return x.pending.length > 1 ? x.pending.shift() : x.pending[0]; }
+        if (x.alive === "gone") throw new Error("no node"); return x.alive; },
+      clipOf: async () => { if (x.clipThrows) throw new Error("no box"); const c = x.clips[Math.min(nclip, x.clips.length - 1)]; nclip++; return c; },
+      covered: async () => x.covered,
+      captureClip: async (box) => { x.clipped.push(box); shot = true; return Buffer.from("img").toString("base64"); },
+      run: async () => "Chart Weekly", extract: async () => ({ meta: {} }),
+    },
+  };
+  // 第 n 次拍到的是 x.shots[n](用完停在最後一張);像素是上面那幾張假圖
+  const mkImg = (k) => { const h = /dark$|noisy$/.test(k) && !/^blank|^cut/.test(k) ? 120 : 210; const img = { getSize: () => ({ width: 340, height: h }), toBitmap: () => shots[k], resize: () => img, toPNG: () => Buffer.from("png-bytes"), toJPEG: () => Buffer.from("jpg") }; return img; };
+  let nshot = 0;
+  const cap = createCapture({
+    nativeImage: { createFromBuffer: () => mkImg(x.shots[Math.min(nshot++, x.shots.length - 1)]) }, reportsDir: reports, getWin: () => ({ isDestroyed: () => false, isMinimized: () => false, getContentBounds: () => ({ width: 1200, height: 800 }) }),
+    uiLang: () => "zh", reducedMotion: () => true, ERR, R, MSG: { stale_ref: "stale", obscured: "covered" }, blockedMsg: (r) => "blocked " + r, emit: () => {}, viewSize: () => ({ vw: 1280, vh: 800 }),
+    withMask: async (_v, fn) => { x.masked++; return fn(); }, noteRead: async () => { x.noted++; }, cur: () => x.cur, expanded: () => null,
+    // index.js 的 recheck = 進門那組判斷重跑一次:當下網址的政策、驗證頁、用戶接手(x.deny(已經問過圖幾次) 回被擋的原因)
+    recheck: () => { const a = policy.agent(v.wc.getURL()), why = a ? "blocked_policy" : x.deny ? x.deny(x.asked) : null; return why ? ERR(why, a ? "blocked " + a.reason : why, { tab: "t1" }) : null; },
+  });
+  const files = (id) => { try { return fs.readdirSync(path.join(reports, id + ".files")); } catch (_) { return []; } };
+  return { x, files, go: (id, ref) => cap.doCapture(Object.assign({ id: 1, alias: "t1", visible: false, snapshotId: "s", readEver: true }, x.tab), v, { ref: ref || "e1", report: id }) };
+}
+(async () => {
+  { const g = rig(), r = J(await g.go("ok1"));
+    t("一般情況:存檔、回 {file, source},遮罩有過", r.ok === true && g.files("ok1").length === 1 && g.files("ok1")[0] === r.file && r.source.name === "Chart Weekly" && g.x.masked === 1 && g.x.cur.captures === 1, r);
+    t("S1:source.url 與 source_url 都不帶 token", r.source.url === "https://charts.test/funding?id=7" && r.source_url === r.source.url && !JSON.stringify(r).includes("SECRET"), r); }
+  { const moved = at(100, 400), g = rig({ clips: [BOX, moved, moved] }), r = J(await g.go("b1a"));
+    t("B1:上遮罩之後外框被往下推 300 → 重量、停住了,用新位置拍", r.ok === true && g.x.clipped.length === 1 && g.x.clipped[0].y === 400, [r, g.x.clipped]); }
+  { const g = rig({ clips: [BOX, at(100, 400), at(100, 460)] }), r = J(await g.go("b1b"));
+    t("B1:一直在動 → capture_refused / unstable,不拍、不寫檔", r.error === "capture_refused" && r.reason === "unstable" && g.x.clipped.length === 0 && g.files("b1b").length === 0, r); }
+  { const g = rig({ clips: [BOX, at(100, 100, 1280, 700)] }), r = J(await g.go("b1c"));
+    t("B1:重量之後變成整個畫面大 → too_large,不拍", r.error === "capture_refused" && r.reason === "too_large" && g.x.clipped.length === 0, r); }
+  { const g = rig({ urlAfter: "https://charts.test/funding?id=8" }), r = J(await g.go("s3a"));
+    t("S3:拍的期間網址換了 → capture_refused / page_changed,圖丟掉", r.error === "capture_refused" && r.reason === "page_changed" && g.files("s3a").length === 0, r); }
+  { const g = rig({ url: "https://www.binance.com/en/support/announcement", urlAfter: "https://www.binance.com/en/my/wallet/account/main" }), r = J(await g.go("s3b"));
+    t("S3:拍的期間頁面 pushState 進交易所後台 → blocked_policy,圖丟掉", r.error === "blocked_policy" && g.files("s3b").length === 0, r); }
+  { const g = rig(), rs = (await Promise.all(Array.from({ length: 12 }, () => g.go("b3")))).map(J);
+    t("B3:平行 12 次 → 剛好 " + CITES_PER_TURN + " 張,其餘 rate_limited", rs.filter((r) => r.ok).length === CITES_PER_TURN && rs.filter((r) => r.error === "rate_limited").length === 2 && g.files("b3").length === CITES_PER_TURN, rs.map((r) => r.error || "ok")); }
+  { const g = rig({ clips: [at(10, 10, 60, 30)] }); const rs = []; for (let i = 0; i < 12; i++) rs.push(J(await g.go("b3r")));
+    t("B3:還沒拍就被拒的(太小)不吃名額", rs.every((r) => r.reason === "too_small") && g.x.cur.captures === 0, g.x.cur); }
+  { const g = rig({ covered: [true, true, true, false, false] }), r = J(await g.go("b4"));
+    t("B4:圖表上面蓋著別的元素 → obscured,不拍", r.error === "obscured" && g.x.clipped.length === 0 && g.files("b4").length === 0, r); }
+  { const g = rig({ clipThrows: true }), r = J(await g.go("b5a"));
+    t("B5:節點還在但沒有盒子 → capture_refused / not_visible(不是 stale_ref)", r.error === "capture_refused" && r.reason === "not_visible", r); }
+  { const g = rig({ alive: "gone" }), r = J(await g.go("b5b")), r2 = J(await rig({ alive: false }).go("b5c")), r3 = J(await rig().go("b5d", "e9"));
+    t("B5:節點不在了 / 沒有這個 ref → stale_ref", r.error === "stale_ref" && r2.error === "stale_ref" && r3.error === "stale_ref", [r, r2, r3]); }
+  // e2e 0.1.8:loading="lazy" 的圖捲進畫面才開始抓
+  { const g = rig({ pending: [2, 1, 0] }), t0 = Date.now(), r = J(await g.go("m1"));
+    t("圖還在載:等到載完才拍(問了 3 次)、外框重量過、只拍一張", r.ok === true && g.x.asked === 3 && g.x.clipped.length === 1 && g.files("m1").length === 1 && Date.now() - t0 >= 400, [r, g.x.asked]); }
+  { const g = rig({ pending: [1] }), t0 = Date.now(), r = J(await g.go("m2"));
+    t("圖一直沒載完 → capture_refused / incomplete,不拍、不寫檔、不吃名額以外的東西", r.error === "capture_refused" && r.reason === "incomplete" && g.x.clipped.length === 0 && g.files("m2").length === 0 && Date.now() - t0 >= 3900, r); }
+  { const g = rig({ pending: "throws" }), r = J(await g.go("m3"));
+    t("查不出圖載完沒(頁面腳本失敗)→ 不擋,照拍(事後還有像素那一道)", r.ok === true && g.x.clipped.length === 1, r); }
+  // 稽核 P1-1:等圖載完的那幾秒(這裡等了兩輪)裡變了 → 不拍
+  for (const why of ["needs_user_verification", "user_in_control"]) {
+    const g = rig({ pending: [2, 1, 0], deny: (asked) => (asked >= 3 ? why : null), tab: { snapshotId: null, readEver: false } }), r = J(await g.go("p11-" + why.slice(0, 5)));
+    t("P1-1:進門時合格、等圖載完之後變成 " + why + " → 照那個回應回;沒拍、沒存快照、沒寫檔", r.ok === false && r.error === why && g.x.asked === 3 && g.x.clipped.length === 0 && g.x.noted === 0 && g.files("p11-" + why.slice(0, 5)).length === 0, [r, g.x]);
+  }
+  { const g = rig({ url: "https://www.binance.com/en/support/announcement", urlAfter: "https://www.binance.com/en/my/wallet/account/main", tab: { snapshotId: null, readEver: false } }), r = J(await g.go("p11-snap"));
+    t("P1-1:拍的那一下頁面進了交易所後台 → blocked_policy;圖丟掉,那一頁也不進快照與來源", r.error === "blocked_policy" && g.x.noted === 0 && g.files("p11-snap").length === 0, [r, g.x.noted]); }
+  { const g = rig({ tab: { snapshotId: null, readEver: false } }), r = J(await g.go("p11-ok"));
+    t("對照:頁面沒變、還沒讀過的出處頁 → 照常拍、照常記成讀過", r.ok === true && g.x.noted === 1 && g.files("p11-ok").length === 1, [r, g.x.noted]); }
+  // 事後檢查:壞圖不進報告
+  { const g = rig({ shots: ["cut_half", "good_light"] }), r = J(await g.go("m4"));
+    t("拍到被切斷的圖:重拍一次,第二張是好的 → 存第二張(只有一個檔)", r.ok === true && g.x.clipped.length === 2 && g.files("m4").length === 1, [r, g.x.clipped.length]); }
+  { const g = rig({ shots: ["cut_half"] }), r = J(await g.go("m5")), g2 = rig({ shots: ["blank_dark"] }), r2 = J(await g2.go("m6"));
+    t("重拍還是被切斷 / 整張空白 → capture_refused / incomplete,不寫檔", r.reason === "incomplete" && r.error === "capture_refused" && g.x.clipped.length === 2 && g.files("m5").length === 0
+      && r2.reason === "incomplete" && g2.files("m6").length === 0, [r, r2]); }
+  { const g = rig({ shots: ["good_dark"] }), r = J(await g.go("m7"));
+    t("深色底的圖表(底部空白跟底色同色)照拍,不重拍", r.ok === true && g.x.clipped.length === 1 && g.files("m7").length === 1, r); }
+  { const g = rig({ shots: ["blank_dark", "good_light"] }), r = J(await g.go("m8"));
+    t("重拍走同一條路:遮罩兩次都有上", r.ok === true && g.x.masked === 2, [r, g.x.masked]); }
+  { const g = rig({ boundsThrow: true }), r = J(await g.go("b7"));
+    t("B7:叫不醒合成器(視窗正在關)→ screenshot_failed,不拍", r.error === "screenshot_failed" && g.x.clipped.length === 0 && g.files("b7").length === 0, r); }
+  { const r = J(await rig().go("../x")), g = rig(), r2 = J(await g.go("evil"));
+    t("壞報告 id → invalid_args;<id>.files 是 symlink → internal、外面沒有多檔", r.error === "invalid_args" && r2.error === "internal" && fs.readdirSync(outside).length === 0, [r, r2]); }
+  // index.js 真的走這一支(不是留著舊的那份)
+  const idx = fs.readFileSync(path.join(B, "index.js"), "utf8");
+  t("index.js 的 browser_capture 接的是 capture.js,自己不再有 captureClip 呼叫", /createCapture\(\{/.test(idx) && /name === "browser_capture"\) return doCapture\(t, v, args\)/.test(idx) && !/captureClip\(/.test(idx));
+  fs.rmSync(tmp, { recursive: true, force: true });
+  console.log(red ? `\n${red} FAILED` : "\nALL PASS"); process.exit(red ? 1 : 0);
+})();

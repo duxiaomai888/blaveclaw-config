@@ -144,7 +144,7 @@ html.ws-sc .side-gate { display: none; }
 .main-head { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-16); align-items: start; padding: var(--space-16) var(--space-24) var(--space-12); }
 .main-head:not(:has(.act)) { grid-template-columns: minmax(0, 1fr); column-gap: 0; }
 .main-head > .txt { display: contents; }
-.main-head-name { grid-column: 1; grid-row: 1; }
+.main-head-name { grid-column: 1; grid-row: 1; align-self: center; }   /* 標題與 32 高的主鈕共用一條中線;沒有鈕的標頭列高就是標題,無影響 */
 /* 啟動在途時主鈕右邊多一顆「暫停下單」文字鈕(#tr-go-stop),間距 8 */
 .main-head .act { grid-column: 2; grid-row: 1; justify-self: end; display: flex; align-items: center; gap: var(--space-8); }
 /* `.txt` 底下其餘的孩子(狀態句、原因行、更新入口、唯讀說明、停機區塊、紅字)一律跨滿寬,自己一列 */
@@ -155,6 +155,8 @@ html.ws-sc .side-gate { display: none; }
 .main-head-name { margin: 0; font-size: 17px; font-weight: 600; color: var(--ink); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main-head-desc { margin-top: var(--space-4); font-size: 12px; color: var(--ink-2); line-height: 1.5; min-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main-head-desc.wrap { white-space: normal; overflow: visible; }
+/* 有鈕時狀態句量的是「鈕底」:4 的話字面只剩約 7px、鈕的 44 熱區還蓋到字 3px(點那行字的上緣會按到「啟動下單」);12 → 字面約 15、熱區不碰字 */
+.main-head:has(.act > button:not([hidden])) .main-head-desc { margin-top: var(--space-12); }
 .main-head-desc .up { color: var(--ink); font-weight: 600; }
 .main-head-desc .ink { color: var(--ink); }   /* 已暫停的「重開過」原因行:正文墨色,不用紅、不加粗 */
 .main-head-desc .danger { color: var(--color-redText); }   /* 「可能仍在下單」的原因行:紅字只給錢還在外面暴露的時刻;不加粗、不鋪底 */
@@ -354,7 +356,7 @@ html.ws-sc .side-gate { display: none; }
   /* V2b:中欄窄到這一階、而且動作槽有**兩顆**鈕時,鈕自己一列、各佔一半——不然標題會被截成「Auto …」。
      只有一顆鈕時留在標題那一列、靠右、自然寬:無條件換行會讓最常見的 running(只有「暫停下單」)憑空多一列,
      那顆鈕還會浮在標題與狀態句之間的空白裡(spec §12-4 第 3、4 條) */
-  .main-head:has(.act button + button) .act { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; margin-top: var(--space-12); margin-bottom: var(--space-4); }
+  .main-head:has(.act button + button) .act { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; margin-top: var(--space-12); margin-bottom: 0; }   /* 鈕底到狀態句由狀態句的 12 負責,換列時也是同一個 12 */
   .main-head:has(.act button + button) .act > button { flex: 1; }
   .main-tabs { padding: 0 var(--space-16); gap: var(--space-16); }
   .pf { padding: var(--space-16); }
@@ -381,17 +383,12 @@ html.ws-sc .side-gate { display: none; }
   .ov-stats .stat.hero .sv { font-size: 22px; }
 }
 
-/* ---- 確認框:第二動作(雲端 .cf-alt 的紅字;shell 的框是 .btn-out 底)、「在這台電腦上跑,代表:」那一塊 ---- */
+/* ---- 確認框:第二動作(雲端 .cf-alt 的紅字;shell 的框是 .btn-out 底)。啟動框的選項 / 常駐句 / 細節在 app.css 的 .cf-* ---- */
 #del-alt[hidden] { display: none; }
 .btn-out.cf-alt-danger { color: var(--color-redText); }
 .del-modal .modal-foot { flex-wrap: wrap; }
 /* 三顆鈕的框(啟動 / 暫停)放寬到 520:英文版 440 會折成兩列、主要鈕自己一列 */
 .del-modal.has-alt { width: min(520px, 92vw); }
-.means { margin: var(--space-12) 0 0; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--surface-field); }
-.means .lbl { display: block; margin-bottom: var(--space-4); color: var(--ink-2); font-weight: 600; }
-.means ul { margin: 0; padding: 0; list-style: none; }
-.means li { position: relative; padding-left: var(--space-16); font-size: 12px; line-height: 1.7; color: var(--ink-2); }
-.means li::before { content: ""; position: absolute; left: 2px; top: 10px; width: 6px; height: 1px; background: var(--ink-3); }
 
 /* ---- 連接交易所的框(#cx-modal,寬 480)+ 設定分頁的帳戶列 ---- */
 .cx-modal { width: min(480px, 92vw); }
@@ -437,17 +434,19 @@ html.ws-sc .side-gate { display: none; }
 /* inline-block:長名填滿一行時整段註記一起換行,不會第一個字掛在名字尾(設計稽核 should-fix) */
 .ps-gone { display: inline-block; margin-left: var(--space-8); font-size: 11px; color: var(--ink-2); }
 .ps-note { display: inline-block; margin-left: var(--space-8); font-size: 11px; color: var(--ink-3); }
-/* checkbox(canon › Components › Checkbox):18 方、--radius-micro;off = 透明底 + frame 框;checked = 橘底白勾(表單選取指示,不是 CTA);
+/* checkbox(canon › Components › Checkbox):18 方、--radius-micro;off = 透明底 + frame 框;checked = 墨色底、勾號取 --control-fill-text(同分享框的 radio;勾的形狀拿 --check-indicator 當遮罩,data-URI 裡的色換不了主題);
    disabled 未勾 = card 底 + hairline 框、已勾 = muted 底 + greyDark 勾(勾號兩個變數在 tokens.css) */
 .ps-cb {
   width: 18px; height: 18px; flex: none; margin: 0; appearance: none; -webkit-appearance: none;
   border-radius: var(--radius-micro); cursor: pointer; background: transparent; border: 1px solid var(--border-frame);
-  background-position: center; background-size: contain; background-repeat: no-repeat;
+  background-position: center; background-size: contain; background-repeat: no-repeat; position: relative;
 }
-.ps-cb:checked { background-color: var(--color-primary); border-color: var(--color-primary); background-image: var(--check-indicator); }
+.ps-cb:checked { background-color: var(--control-fill); border-color: var(--control-fill); }
+.ps-cb:checked::after { content: ""; position: absolute; inset: 0; background: var(--control-fill-text); -webkit-mask: var(--check-indicator) center / contain no-repeat; mask: var(--check-indicator) center / contain no-repeat; }
 .ps-cb:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .ps-cb:disabled { cursor: not-allowed; background-color: var(--surface-card); border-color: var(--border-hairline); }
 .ps-cb:disabled:checked { background-color: var(--surface-muted); border-color: var(--surface-muted); background-image: var(--check-indicator-disabled); }
+.ps-cb:disabled:checked::after { content: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .run-dot.live { animation: none; }
@@ -491,6 +490,7 @@ html.ws-sc .side-gate { display: none; }
 .f-input[readonly] { color: var(--ink-3); }
 /* 沒有策略設金額時鈕旁的原因行(§8):狀態行下面自己一行,--ink-3 12px;「部位」是切分頁的文字連結 */
 .main-head .tr-noamt { margin: var(--space-4) 0 0; font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+.main-head .tr-noamt { min-height: 18px; }   /* 常駐佔位:沒有原因時是空的一行,頁首高度不跳(#108) */
 .main-head .tr-noamt-link { font-size: inherit; vertical-align: baseline; }
 /* 等回報那一句:spinner 在句首(§2-3c)。.cx-wait 本身是 flex + gap,這裡只補「句子會換行」那一點——
    原因行是整段話,不像連接框那兩行只有一行高 */

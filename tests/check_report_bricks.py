@@ -96,18 +96,18 @@ ITEM2 = {"title": "聯準會理事:降息仍需更多數據", "title_orig": "Fed
 ITEM3 = {"title": "美光財報優於預期", "summary": "營收與毛利率都高於市場預期。", "tag": "neutral",
          "sources": [("CNBC", "https://www.cnbc.com/b")], "published_at": NOW - 5000}
 b = doc(pub(tw, {"no_extra": "測試:不加做", "few_sources": "測試", "news": [ITEM, ITEM2, ITEM3]}, report_id="n1"))["blocks"]
-nb = [x for x in b if x["type"] == "news" and x.get("title", "").startswith("綜合")]
+nb = [x for x in b if x["type"] == "news" and x.get("title", "").startswith("新聞 · 綜合")]
 types = [x["type"] for x in b]
-check(len(nb) == 1 and nb[0]["title"] == "綜合 4 家" and nb[0]["items"][0]["summary"] == "月營收創單月新高，年增近四成。"
+check(len(nb) == 1 and nb[0]["title"] == "新聞 · 綜合 4 家" and nb[0]["items"][0]["summary"] == "月營收創單月新高，年增近四成。"
       and nb[0]["items"][1]["title_orig"] == "Fed governor says more data needed" and nb[0]["items"][1]["title_orig_lang"] == "en" and nb[0]["items"][0]["channel"] == "web"
       and nb[0]["items"][0]["published_at"] == int(pd.Timestamp("2026-09-01 18:30", tz="Asia/Taipei").timestamp()),
-      "agent 填的新聞:≥3 家寫「綜合 N 家」、摘要轉全形、title_orig 帶著、台北時間字串轉 unix 秒")
+      "agent 填的新聞:≥3 家寫「新聞 · 綜合 N 家」(區塊名在前,#59)、摘要轉全形、title_orig 帶著、台北時間字串轉 unix 秒")
 check(types.index("news") < max(i for i, x in enumerate(b) if x["type"] == "table" and "事件" in (x.get("title") or "")),
       "新聞 block 落在配方的位置(事件表之前),不是整份最後")
 check(doc(os.path.join(R.REPORTS_DIR, "n1.json"))["schema_version"] == "1.4" and any(i["id"] == "news" and "agent 於 09:00 蒐集整理" in i["text"] for i in b[-1]["items"]),
       "有 news block → 1.4;尾註固定一行寫蒐集時間與標籤依據")
 auto = doc(pub(tw))["blocks"]
-lic = [x for x in auto if x["type"] == "news" and x.get("title") == "Anue鉅亨"]
+lic = [x for x in auto if x["type"] == "news" and x.get("title") == "新聞 · Anue鉅亨"]
 check(len(lic) == 1 and all("summary" not in i and "tag" not in i and i["channel"] == "licensed" for i in lic[0]["items"])
       and any("鉅亨網授權標題" in i["text"] for i in auto[-1]["items"]),
       "排程(無敘事):只放鉅亨授權標題,不帶摘要與標籤,尾註講明未經整理")
@@ -135,6 +135,9 @@ cb = doc(pub(crypto, {"lead": "BTC 現貨撐盤,槓桿正在退場。", "few_sou
 check(not any(x["type"] == "news" for x in cb) and any(i["id"] == "news" and "沒有附新聞" in i["text"] for i in cb[-1]["items"]),
       "有說明為什麼沒新聞(few_sources):照發,不出 news block,尾註一句")
 check("先上網查:至少 3 個不同網站" in T.tw_market_brief("2026-09-02", H).describe(), "台股晨報 describe 第一句要求先上網查 3 個網站")
+_nd = "\n".join(T._news_describe({"candidates": [], "market": "crypto"}))
+check("其他新聞站都可以用" in _nd and "標明來源" in _nd and not any(w in _nd for w in ("robots", "禁令", "條款")),
+      "新聞來源:不以對方條款 / robots 禁 AI 為由排除任何站(Wei 09-28);標來源、不照抄的品質規則還在")
 check(not any(i["id"] == "news" for i in doc(pub(crypto))["blocks"][-1]["items"]), "加密晨報排程:沒有新聞、也不多一行尾註")
 sym = T.symbol_brief("BTC", "2026-09-02", H)
 sb = doc(pub(sym, {"lead": "BTC 現貨撐盤,槓桿正在退場。", "no_extra": "測試:不加做", "few_sources": "測試", "news": [dict(ITEM, symbols=["BTC"])]}, report_id="symnews"))["blocks"]

@@ -1,14 +1,15 @@
 // 內建瀏覽器端到端(真 Electron、真 WebContentsView、真 CDP;頁面是本機 fixture,用測試行程自己的 protocol.handle 供應,
 // production code 沒有任何測試開關)。釘住 spec §3.2 分級真的做在工具裡:
 //   密碼欄 fill 被拒且 snapshot 讀不到值、POST 送出鈕 needs_user、「下一步」其實用 JS 送 POST 被網路層後盾取消(伺服器沒收到)、
-//   透明覆蓋層擋點擊、agent 點到交易所後台的連結被取消、直接開交易所後台 / The Block 被擋、下載被擋、
+//   透明覆蓋層擋點擊、agent 點到交易所後台的連結被取消、直接開交易所後台被擋、下載被擋、
 //   上傳 needs_user、GET 搜尋框可以送出、接手期間工具回 user_in_control、read 的 meta / outline / section、8 頁上限第 9 頁排隊。
 // 跑法:node tests/check_shell_browser_e2e.js(找不到 shell/node_modules 的 Electron 就 SKIP)
 const path = require("path"), fs = require("fs"), os = require("os");
 const SHELL = path.join(__dirname, "..", "shell");
+const GATE = require("./_electron_gate");
 if (!process.versions.electron) {
-  const bin = path.join(SHELL, "node_modules", ".bin", "electron");
-  if (!fs.existsSync(bin)) { console.log("SKIP  找不到 shell/node_modules 的 Electron"); process.exit(0); }
+  const bin = GATE.bin(SHELL);
+  if (!bin) { process.exit(0); }
   const r = require("child_process").spawnSync(bin, [__filename], { stdio: "inherit", env: { ...process.env, ELECTRON_ENABLE_LOGGING: "" } });
   process.exit(r.status == null ? 1 : r.status);
 }
@@ -151,8 +152,6 @@ app.whenReady().then(async () => {
 
   r = J(await call("browser_open", { url: "https://www.binance.com/en/my/wallet" }));
   t("直接開交易所後台 → blocked_policy(有一格,不佔名額)", !r.ok && r.error === "blocked_policy" && r.reason === "sensitive_domain" && !hits.some((h) => h.includes("binance")));
-  r = J(await call("browser_open", { url: "https://www.theblock.co/post/1" }));
-  t("The Block → blocked_policy blocklist", !r.ok && r.reason === "blocklist");
   r = J(await call("browser_open", { url: "http://127.0.0.1:" + new URL(m.url).port + "/mcp" }));
   t("打回本機 MCP → blocked_policy private_address", !r.ok && r.reason === "private_address");
 
@@ -216,8 +215,12 @@ app.whenReady().then(async () => {
   r = J(await call("browser_press", { tab: eb, key: "Enter" }));
   t("R4 視窗外:焦點在 type=button 上按 Enter = 點它(不 requestSubmit 整張表單)", r.ok && wcOf("fx9.test/enterbtn") && wcOf("fx9.test/enterbtn").getTitle() === "tb-clicked" && !hits.some((h) => h.includes("fx9.test/find")));
   REDUCED = true;
+  // 這條驗的是 reduced-motion 不關逐字,不是密集判定:等 ≥8s(密集門檻)讓 type 回完整效果——
+  // 沿用舊分頁緊接著 type 會落在前一動作 8s 內、被判密集收成一次填入。不走 endTurn/beginTurn 重置:
+  // 換回合會改掉 thisTurn() 的分頁歸屬與 8 格名額算術,打壞後面 S7 / favicon 那批斷言
+  await new Promise((res) => setTimeout(res, 8100));
   r = J(await call("browser_type", { tab: ty, ref: qRef, text: "abcd" }));
-  const vTy2 = await (async () => { const wc = require("electron").webContents.getAllWebContents().find((w) => w.getURL().includes("fx7.test/typing")); return wc; })();
+  const vTy2 = wcOf("fx7.test/typing");
   t("減少動態開著時 browser_type 照樣逐字送(4 個字 = 4 次 input 事件):逐字是功能,減少動態只關視覺", r.ok && (await vTy2.executeJavaScript("window.__in")) === 4);
   REDUCED = false;
   r = J(await call("browser_open", { url: "http://fx.test/cc" })); const cc = r.tab; await call("browser_wait", { tab: cc });
@@ -328,8 +331,8 @@ app.whenReady().then(async () => {
   t("B1 畫面送 bounds 只有 brSendBounds 一個出口(直接送 null 也更新去重快取)", (rSrc.match(/window\.blave\.browserBounds\(/g) || []).length === 1 && /function brSendBounds\(b\) \{ const key = JSON\.stringify\(b\); if \(key === brLastBounds\) return; brLastBounds = key; window\.blave\.browserBounds\(b\); \}/.test(rSrc));
   const ts3 = sent.filter((e) => e.type === "turn_sources" && e.session_id === "desktop-e2etest3").pop();
   const fpRow = ts3 && ts3.tabs.find((x) => x.url.includes("fa1.test"));
-  t("讀過之後這一格又導覽走了:這一格照樣算讀了(done),來源卡留著讀的那一頁", fpRow && fpRow.status === "done" && ts3.sources.some((x) => x.url === "http://fa1.test/favpage"));
-  t("「讀了 N 頁」與來源卡同口徑:status=done 的格數(扣掉搜尋頁)= 來源數", ts3 && ts3.tabs.filter((x) => x.status === "done" && !x.search).length === ts3.sources.length);
+  t("讀過之後這一格又導覽走了:這一格照樣算讀了(done),來源紀錄留著讀的那一頁", fpRow && fpRow.status === "done" && ts3.sources.some((x) => x.url === "http://fa1.test/favpage"));
+  t("「讀了 N 頁」與來源紀錄同口徑:status=done 的格數(扣掉搜尋頁)= 來源數", ts3 && ts3.tabs.filter((x) => x.status === "done" && !x.search).length === ts3.sources.length);
   const hist = B.history("desktop-e2etest3").pop();
   t("重開 app 的歷史:來源與分頁帶著存下來的 favicon(data URL)", hist && hist.sources.some((x) => x.url.includes("fa1.test") && /^data:image\/png;base64,/.test(x.fav || "")));
   const favDir = path.join(tmp, "snaps", "desktop-e2etest3", "favicons");

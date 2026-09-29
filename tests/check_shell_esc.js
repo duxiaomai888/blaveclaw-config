@@ -5,10 +5,11 @@
 // 跑法:node tests/check_shell_esc.js(找不到 shell/node_modules 的 Electron 就 SKIP)
 const path = require("path"), fs = require("fs");
 const SHELL = path.join(__dirname, "..", "shell");
+const GATE = require("./_electron_gate");
 
 if (!process.versions.electron) {
-  const bin = path.join(SHELL, "node_modules", ".bin", "electron");
-  if (!fs.existsSync(bin)) { console.log("SKIP  找不到 shell/node_modules 的 Electron(先 cd shell && npm install)"); process.exit(0); }
+  const bin = GATE.bin(SHELL);
+  if (!bin) { process.exit(0); }
   const r = require("child_process").spawnSync(bin, [__filename], { stdio: "inherit" });
   process.exit(r.status == null ? 1 : r.status);
 }
@@ -33,8 +34,13 @@ const MODALS = [
   // 0.1.6 的兩個表單 modal(欄位可聚焦:焦點在框裡那一格會落在描述欄 / 名稱欄上)
   { name: "新增策略", open: `(running = false, nsOpen($("strat-add")))`, isOpen: `!$("ns-scrim").hidden`, text: "#ns-modal .ns-hint" },
   { name: "新增報告", open: `(running = false, rptNewOpen($("rpt-ask")))`, isOpen: `!$("rpn-scrim").hidden`, text: "#rpn-honest" },
+  // 0.1.8 報告分享確認框(焦點在框裡那一格落在「匿名」radio 上)
+  { name: "報告分享", open: `(hasToken = true, shrOpen({ env: "local", id: "x", rep: { type: "research", title: "t", blocks: [] }, host: $("rpt-read"), share: null, name: null }, "new", $("rpt-share")))`, isOpen: `!$("shr-scrim").hidden`, text: "#shr-must" },
   // 模型選單沒有型錄時整塊沒有版面(量到 0×0),點不到字;它的點擊路徑跟「焦點在 body」同一條(document 層),由那一格代表
   { name: "模型選單", open: `mpOpen(false)`, isOpen: `!$("mp-panel").hidden`, text: null },
+  // 0.1.8 策略版本(versions.js 自己的 capture 層 Esc):比較框、版本選單(同模型選單:觸發器藏著時沒有版面,點不到字)
+  { name: "比較版本", open: `(VS.local.data = { counter: 2, current: 2, items: [{ n: 1, at: 1757000000 }, { n: 2, at: 1757100000 }] }, VS.local.name = "x", vcOpen())`, isOpen: `!$("vc-scrim").hidden`, text: "#vc-title" },
+  { name: "版本選單", open: `(VS.local.data = { counter: 2, current: 2, items: [{ n: 1, at: 1757000000 }, { n: 2, at: 1757100000 }] }, verMenuOpen(false))`, isOpen: `!$("ver-menu").hidden`, text: null },
 ];
 
 app.whenReady().then(async () => {

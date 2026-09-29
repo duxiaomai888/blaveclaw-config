@@ -8,6 +8,109 @@ miss it. (Channel rules: `.claude/docs/blave-agent-update-channels.md`.)
 
 ## Unreleased
 
+(none)
+
+## 1.1.102 — 2026-09-28(desktop 0.1.8)
+
+- **停止那一句的「下單」改成「執行下單指令」(0.1.8 e2e,第十六批 #2)**:`_STOP_STEP_TEXT["order"]` 原本是「下單 / 下单 / placing an order」,
+  但這一種涵蓋下單、撤單、TWAP、平倉、改槓桿、對帳,停在撤單時會寫成「中斷的步驟：下單」。改成跟狀態列(`act.order`,第十四批定稿)同一套字:
+  「執行下單指令 / 执行下单指令 / running an order command」。背景腳本那句的「下單腳本」不變。測試 `tests/check_stop_note_steps.py`。
+- **一份報告出事不再卡住整輪上傳(0.1.8 稽核 P2-12,第十批 #7)**:尾註某一列的 `id` 是陣列或物件、而且同一個 block 裡另有重複 id 要改名時,
+  `unique_footnotes` 丟 `TypeError: unhashable type`;`upload_one` 沒接,整輪中斷、`_save_state` 沒跑,下一輪同一份再炸一次,排在後面的報告都送不出去。
+  ① 改名時只拿字串 id 比對(跟 api 的 `unique_footnotes`、外殼的 `uniqueFootnotes` 同一個答案),那一列原樣留著由驗證器拒收;
+  ② `upload_one` 裡正規化失敗就原樣送(api 會講哪裡錯);③ `run_once` 接住單份報告的任何例外:記 log、照退避(`_defer`)、繼續下一份。
+  測試 `tests/check_report_footnotes.py`。
+- **排程守門認得自然的寫法(0.1.8 稽核 P1-3,第十批 #3)**:`if crontab -l …; then`、`for …; do crontab $f; done`、`while …; do launchctl list; done`、
+  `{ crontab -l; }`、`! crontab -l`、`sudo -u root crontab`、`env -i crontab`、`command -p` / `time -p` / `nice crontab`、`… | xargs crontab`、
+  `find … -exec crontab {} \;` 原本都放行,macOS 的系統框照樣會掛住回合。`_SCHED_CMD_RE` 的指令位置多認 shell 關鍵字之後、find 的 `-exec` / `-ok` 之後;
+  前綴指令連同它自己的選項一起認(`_prefix_re`)。送給 ssh 的 heredoc **沒加引號**而且內文的 `$( )` / 反引號裡叫排程器(這台電腦的 shell 先展開)→ 擋,
+  理由是「寫法」那一條;加引號的、沒加引號但展開的部分跟排程器無關的照放行,雲端主機上裝排程那條路不變。
+  順帶少誤擋:`echo` / `printf` / `grep` / `rg` / `cat` / `sed` / `awk` / `man` / `git` 的引號參數只是字(`echo "crontab -l 可以列出排程"`),不算指令位置。
+  這道守門防的是自然寫出來的指令,不是安全邊界:拆字拼回去、`eval`、直譯器裡拼字、symlink、寫進檔案的腳本照舊只有規則層,測試裡列成 `KNOWN_GAPS`。
+  Codex 引擎沒有對應的攔截點(hook 只掛在 Claude SDK),那條路照舊只有規則層。測試 `tests/check_desktop_sched_guard.py`(列舉)。
+- **電腦版用 Codex 引擎時,Codex 自己的 web search 也關掉(0.1.8 稽核 P1-2,第十批 #2)**:Codex 的 `web_search` 沒設時是 `cached`(開著),
+  用戶在設定 › 隱私關掉內建瀏覽器後,Codex 引擎照樣能用它自己的搜尋上網,查到的東西不出現在聊天裡、也不過網域政策;Claude 那條早就把
+  WebSearch / WebFetch 關了。`codex_engine.build_args(..., web_search_off=True)` 多帶 `-c web_search="disabled"`;要不要關跟 Claude 那條
+  同一個判斷(`web_tools_off()` 不是空的:電腦版三種狀態都關,舊外殼只在掛了瀏覽器時關),雲端機的 argv 逐字不變。鍵名與值對過實際的執行檔
+  (0.155.0-alpha.9.2 對不認得的值回「expected one of `disabled`, `cached`, `indexed`, `live` in `web_search`」)與 0.146.0 / 0.155 的原始碼。
+  管不到的:管理者的 requirements 不准 `disabled` 時以管理者為準;用戶自己 `~/.codex/config.toml` 裡掛的 MCP 照舊只有規則層。
+  測試 `tests/check_codex_engine.py`。
+- **沒有建議時回覆就此結束,不交代「沒有建議」(0.1.8 e2e,第九批 #3)**:改報告標題的回覆正文之後多了兩行——
+  「これ以上の提案は不要 — 純修改，不附建議。」與為那句日文道歉的一行。來源是 `_SUGGEST_RULE`(每輪接在 system prompt 最後):它只寫了
+  「命中時怎麼寫」與「純寒暄直接收尾」,沒寫「沒有要提議時什麼都不寫」,模型把檢查結果寫進了正文。規則最後補一段:沒有要提議 → 正文寫完就結束;
+  不交代沒有建議、不說明為什麼沒有 `<suggest>`、不提這一節;不評論、不更正自己前面的句子。不做回覆後處理(濾句子)。測試 `tests/check_reply_rules_018.py`。
+- **電腦版的排程守門分得出「這台電腦」與「雲端主機」(0.1.8 開發版;Wei 09-28:雲端主機可以裝,先確認、只裝被要求的那一條)**:
+  雲端視角下 `ssh … blaveagent@<host> "(crontab -l; …) | crontab -"` 被當成本機擋下,理由還寫「這是電腦版…macOS 會跳系統框」。
+  `sched_verdict(cmd)`:一行指令**整行**只有一個送到別台主機的 `ssh <選項> <user>@<host> <遠端指令>`(可帶一段 heredoc 當輸入)才放行;
+  行上有管線、轉向、`;` `&&` `||`、括號、`$( )`、反引號、第二個指令,目的地是 localhost / 127.* / 本機主機名 / 沒有 `user@`,
+  選項帶 ProxyCommand / LocalCommand / KnownHostsCommand,引號沒收尾——一律照擋。餵給本機直譯器的 heredoc 腳本裡提到排程器也擋(原本擋不到)。
+  拒絕理由分兩條:`SCHED_DENY_REASON`(這台電腦不排程)、`SCHED_DENY_REASON_FORM`(寫法讓 runtime 分不出來:講認得的寫法,不是的話照實講並停手)。
+  擋不到的照舊只有規則層:寫進檔案再執行的腳本、把字拆開拼回去。規則在 `references/cloud-handoff.md` › *A schedule on the cloud machine*。
+  `mcp_rule` 補一句「回覆第一句講用戶要的事」。測試 `tests/check_desktop_sched_guard.py`(列舉)。
+- **雲端連線的收尾不進回覆(0.1.8 e2e #44,第三次)**:雲端相關的回合仍以「清理完成，tmp/cloud-handoff 已刪除。」開頭或收尾。`mcp_rule` 那句
+  「delete that folder before the turn ends」後面補「回覆裡不提那個資料夾、連線與清理」——這一句每輪都在 system prompt 裡,是 agent 覺得要交代的來源之一。
+  不做回覆後處理(濾句子):以規則為準。測試 `tests/check_local_mcp_config.py`。
+- **等背景工作的輸出時,狀態列講的是那支指令在做的事(0.1.8 e2e #134)**:回測被逾時移到背景後,agent 用 `TaskOutput` 在回合內等,
+  狀態列寫「正在委派研究」(`TaskOutput` 被歸在 delegate)。子代理在這個 runtime 是關掉的,`TaskOutput` 等的一定是指令:tool chunk 的
+  `kind` / `kind_obj` 改成這一輪上一個 Bash 指令的分類(「正在跑回測 …」),沒有就 `unknown`(「正在處理」)。三個表面共用。測試 `tests/check_tool_kind.py`。
+- **外殼給這一輪的指示不進用戶的訊息(0.1.8 e2e #131)**:電腦版「新增報告」原本把「這份只要產出一次，不用建立排程。…」接在用戶寫的需求後面
+  一起當訊息送,泡泡與對話存檔裡就是用戶「說了」他沒說過的話。外殼改成只送「幫我建立報告：「…」。」,指示用環境變數
+  `BLAVE_TURN_NOTE`(代號:`report_once` / `report_recur`)分開帶;`turn_note_rule` 把代號換成規則接進這一輪的提示(Claude 的 system prompt、
+  Codex 的前置規則),不寫進歷史。只有電腦版(LocalSink)認、只認 `TURN_NOTES` 表上的代號。測試 `tests/check_local_mcp_config.py`。
+- **電腦版上網只有內建瀏覽器一條路(0.1.8 e2e #125;Wei 09-28)**:設定 › 隱私把內建瀏覽器關掉後,agent 改用引擎自己的
+  WebSearch 照樣上網,畫面上沒有瀏覽摘要列、來源裡還有內建瀏覽器會擋的網域。外殼每一輪帶 `BLAVE_BROWSER`(`on` / `off` /
+  `unavailable`);電腦版回合(LocalSink)看到這個變數就把 `WebSearch`、`WebFetch` 都放進 `disallowed_tools`——**開著時也關**
+  (原本只關 WebFetch、留 WebSearch:spec desktop-browser-agent-tools D1 的預設值,改掉),搜尋走 `browser_search`。沒掛瀏覽器時
+  `browser_rule` 換成「這一輪不上網」那一段:被要求上網時第一句講明、給兩條路、不把記憶講成剛查到的、不附來源清單;報告不帶網路新聞。
+  `curl` / `wget` / 腳本抓網頁只在規則層禁(指令層分不出網頁與行情 API,硬擋會擋到 `lib/data.py` 以外的交易所呼叫)。
+  Codex 引擎沒有關內建搜尋的通道(本機沒有 codex 可驗旗標,沒驗過的旗標不送),只有規則。不帶 `BLAVE_BROWSER` 的舊外殼、雲端:行為不變。
+  測試 `tests/check_local_mcp_config.py`。
+- **停止的回合一定有「已停止。」(0.1.8 e2e #87)**:停在兩個工具之間(沒有工具在跑)時 `_stop_note` 回空字串,
+  `finalize` 拿最後一句過場旁白補位,聊天裡最後一則是「Coinbase 被封鎖，改開 calquify…」,看起來像正式回答。
+  `_stop_note` 不再有「都沒有就不說話」:沒有步驟、沒有背景腳本時回「已停止。」/ "Stopped.",run_turn 一律接上。
+  句框與英文用詞照設計師第四批:zh「已停止。中斷的步驟：搜尋。」、cn「已停止。中断的步骤：搜索。」、en "Stopped. Interrupted: searching the web.";
+  en 步驟一律動名詞(searching the web / running a backtest / running a strategy / scanning parameters / delegating research)。
+  三個表面(電腦版、web、TG)共用。測試 `tests/check_stop_note_steps.py`。
+- **本機對帳程式離開時 log 寫得出原因(0.1.8 e2e #110)**:`state/reconciler.log` 原本只有一行沒有時間的
+  `reconciler leaving`,分不出是 daemon 叫它停、app 沒了、還是別的行程送的 SIGTERM。那一晚四次「無故結束」是
+  `tests/check_turn_stop.py` 結尾的 `pkill -f manager/reconciler.py`——全機依名稱殺,同一台電腦上正在跑的電腦版對帳程式
+  每跑一次測試就被停 10 秒(離開時還會撤自己的掛單)。測試改成只殺自己起的那個 pid,並檢查 tests/ 沒有任何 pkill / killall。
+  log:對帳程式寫 `<時間> reconciler leaving (pid N): SIGTERM | parent closed stdin | parent process is gone`;
+  daemon(`ReconcilerSupervisor._note`)在自己動手前寫 `stopping the reconciler (pid N): <原因>`(指令重啟帶最後一個指令、
+  daemon 收工帶收工原因、收孤兒),沒叫它停卻結束的寫 `exited (code X) without this daemon stopping it`。
+  「leaving: SIGTERM」上面沒有 daemon 那一行 = 外面送的。行為不變(照舊 10 秒後拉起)。測試 `tests/check_local_daemon_chain.py`。
+- **電腦版的 agent 不碰系統排程器(0.1.8 e2e #64 #75)**:用戶回 YES 要上線 Type B,agent 照雲端文件跑 `crontab`;
+  macOS 跳系統框「想要管理你的電腦」,指令掛 4 分 33 秒,agent 接著建議用戶開完整磁碟取用權限。電腦版回合(LocalSink)多掛一個
+  PreToolUse hook(`_sched_guard_hooks`,只對 Bash):指令位置上的 `crontab` / `launchctl` / `schtasks` 一律 deny,理由回給模型
+  (不換方法重試、不叫用戶改系統權限、Type A/C 指到自動下單頁、Type B 這台不能定時跑+兩個出口)。讀文件的 `grep crontab …` 不擋;
+  agent 自己寫的腳本裡呼叫、Codex 引擎(沒有 hook 通道)擋不到,靠 AGENTS.md 與 references/deployment.md › Desktop app。
+  機隊不掛。測試 `tests/check_desktop_sched_guard.py`、`tests/check_reply_lang_rule.py`。
+- **回一句「YES」不再把整則回覆變成英文(0.1.8 e2e #65)**:回覆語言的判定只看當則訊息,中文對話裡回「YES」確認 →
+  訊息尾端的錨、系統層規則、PostToolUse 提醒三處一起點名 English(逐字稿裡每一則提醒都寫 in English,不是 hook 沒觸發)。
+  `_lang_basis(message, recent)`:當則看不出語言(沒有非 ASCII 的字、自己打的英文字 ≤ 2 個且沒有文法字)就沿用最近一則看得出來的
+  用戶訊息;其餘照舊。有回覆語言設定 / ui_lang 的回合不受影響。兩條引擎、機隊與電腦版共用。測試 `tests/check_reply_lang_rule.py`。
+- **模型漏寫 `<export …/>` 標記時轉出卡照出(0.1.8 e2e #49)**:同一則對話第二次轉出(Pine)回覆結尾是 `<suggest>` 區塊、
+  標記不見了——「回覆必須以 <suggest> 結尾」跟 references 的「標記放最後、後面不准有字」搶同一個位置。檔案與 lint sidecar
+  都在,runtime 沒東西可送,聊天沒有卡。兩道:① `_SUGGEST_RULE` 與三份轉出 reference 寫明兩者並存時標記在前、不准省;
+  ② `WebSink.finalize` 在回覆完全沒有標記時呼叫 `unmarked_exports(started_at, touched)`——這一輪工具碰過的策略裡,
+  lint sidecar 的 `exported_at` 落在這一輪之內的轉出檔各送一個 chunk(形狀同標記路徑)。回覆有標記(含讀不到)照舊只走標記;
+  被停止的回合不送。測試 `tests/check_export_unmarked.py`。
+- **停止那一句不露內部工具名(0.1.8 e2e #28)**:「停止時還在跑的步驟：mcp__blave_browser__browser_search。」→「…：搜尋。」。
+  `_tool_t0` 多記一格 kind,`_stop_note` 的 `in_flight` 改收 kind、經 `_STOP_STEP_TEXT`(zh / cn / en)換成人話;
+  對不到的(unknown、silent、新 kind)不列,只剩「已停止。」/ "Stopped."。測試 `tests/check_stop_note_steps.py`。
+- **上網查資料不再以對方條款 / robots 禁 AI 為由排除網站(Wei 09-28 拍板,取代 1.1.101 兩條「固定新聞站」)**:
+  DeepSeek 排程 prompt(`report_runner.scheduled_prompt`)拿掉「other news sites' terms forbid automated AI
+  access, do not fetch them」;鉅亨列表頁+TWSE/TAIFEX/Binance/OKX 公告頁改成優先清單(實測抓得到的起點),
+  1.1.101 撤下的五站(經濟日報、MoneyDJ、CoinDesk、Cointelegraph、Decrypt)以 `_OTHER_NEWS_PAGES` 列在後面當備援。
+  `_news_describe`、references/reports.md、references/browser.md、AGENTS.md 同步;電腦版瀏覽器的 agent 黑名單
+  清空(The Block 放行),名單只留給有危害的網站。內網、相似網域、交易所/券商後台、銀行、金流、授權頁、
+  blave.org、動作分級、下載、速率上限都不動。測試 `tests/check_report_runner_agent.py`、
+  `tests/check_report_bricks.py`、`tests/check_shell_browser_policy.js`。
+- **轉出檔讀不到那一句跟著回覆語言(spec-desktop-strategy-export-0.1.8 §6-3)**:`_EXPORT_FAIL_NOTE` 原本只有繁中,
+  英文介面叫 agent 轉 Pine 讀檔失敗也拿到中文。`_export_fail_note(message, reply_lang)` 同 `_fault_message` 的解析
+  (設定 > 看用戶打的字;zh / cn / 其餘一律英文),run_turn 在 finalize 前掛到 sink 上;`extract_exports` 多一個
+  `note=` 參數,不給仍是繁中(api `tests/check_export_marker.py` 不受影響)。測試 `tests/check_export_fail_note_lang.py`。
+
 ## 1.1.101 — 2026-09-27
 
 - **DeepSeek 排程的固定來源加回鉅亨列表頁+官方公告頁(Wei 09-27 拍板)**:鉅亨授權涵蓋抓其網站

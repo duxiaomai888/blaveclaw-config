@@ -261,11 +261,26 @@ def browser_server(codex_bin, cwd, env):
     return url
 
 
-def build_args(codex_bin, cwd, model=None, effort=None, mcp_url=None, browser_url=None):
+# Codex's own web search is ON when nothing is set (`web_search` defaults to "cached"), so the
+# desktop rule "the built-in browser is the only way to the web" needs it switched off here.
+# Key and value checked against the binary and its source, not the docs alone: 0.155.0-alpha.9.2
+# answers `-c 'web_search="bogus"'` with "unknown variant `bogus`, expected one of `disabled`,
+# `cached`, `indexed`, `live` in `web_search`"; in the source of 0.146.0 (our floor) and 0.155
+# the top-level key wins over the deprecated features (core/src/config/mod.rs
+# resolve_web_search_mode) and Disabled yields no tool (core/src/tools/hosted_spec.rs
+# create_web_search_tool). A managed requirements file that forbids "disabled"
+# (allowed_web_search_modes) still overrides a `-c`; that is the administrator's call.
+_WEB_SEARCH_OFF = ("-c", 'web_search="disabled"')
+
+
+def build_args(codex_bin, cwd, model=None, effort=None, mcp_url=None, browser_url=None,
+               web_search_off=False):
     """model / effort are forwarded only when the user picked them in the shell (which
     guarantees a slug from Codex's own catalog and an effort that model supports); absent,
     Codex uses the user's own defaults and the argv is unchanged. mcp_url comes from
-    mcp_server(); the token itself is never an argument."""
+    mcp_server(); the token itself is never an argument. web_search_off is the caller's
+    agent_turn.web_tools_off() answer: the same turns that lose WebSearch / WebFetch on the
+    Claude path."""
     picked = []
     if model:
         picked += ["-m", model]
@@ -282,15 +297,18 @@ def build_args(codex_bin, cwd, model=None, effort=None, mcp_url=None, browser_ur
                    "-c", 'mcp_servers.blave.default_tools_approval_mode="approve"',
                    *_MCP_ENV_FLAGS]
     if browser_url:
-        # browser_search can wait on a robot check and a fallback engine (~45 s worst case):
-        # raise this server's per-call timeout above that. Other servers keep Codex's default.
+        # browser_search hands a robot check to the user and waits for them (shell/browser/verify.js:
+        # up to 240 s, plus a search queued behind it and the fallback engine): this server's
+        # per-call timeout sits above that. Other servers keep Codex's default.
         picked += ["-c", f'mcp_servers.blave_browser.url="{browser_url}"',
                    "-c", f'mcp_servers.blave_browser.bearer_token_env_var="{BROWSER_TOKEN_ENV}"',
                    "-c", 'mcp_servers.blave_browser.default_tools_approval_mode="approve"',
-                   "-c", "mcp_servers.blave_browser.tool_timeout_sec=120",
+                   "-c", "mcp_servers.blave_browser.tool_timeout_sec=600",
                    *_BROWSER_ENV_FLAGS]
         if not mcp_url:
             picked += list(_MCP_ENV_FLAGS[2:])
+    if web_search_off:
+        picked += list(_WEB_SEARCH_OFF)
     return [
         codex_bin, "exec", "--json", "--ephemeral", "--skip-git-repo-check", *picked,
         # exec's default sandbox is read-only, and workspace-write has the network OFF by
@@ -441,7 +459,7 @@ class CodexTranslator:
 
 
 async def run(codex_bin, prompt, cwd, env, sink, on_tool_start=None, on_tool_done=None,
-              model=None, effort=None, mcp_url=None, browser_url=None):
+              model=None, effort=None, mcp_url=None, browser_url=None, web_search_off=False):
     """One Codex turn. Returns the translator (usage, thread_id); raises CodexTurnFailed
     when the turn did not complete, so the caller's existing fault path classifies it.
     mcp_url is the caller's mcp_server() result — the caller decides once so the prompt's
@@ -455,7 +473,7 @@ async def run(codex_bin, prompt, cwd, env, sink, on_tool_start=None, on_tool_don
     if not browser_url:
         env = {k: v for k, v in env.items() if k not in (BROWSER_TOKEN_ENV, "BLAVE_BROWSER_URL")}
     proc = await asyncio.create_subprocess_exec(
-        *build_args(codex_bin, cwd, model, effort, mcp_url, browser_url),
+        *build_args(codex_bin, cwd, model, effort, mcp_url, browser_url, web_search_off),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=None,  # Codex's own log goes straight to this process's stderr
         cwd=cwd, env=env, limit=_LINE_LIMIT,

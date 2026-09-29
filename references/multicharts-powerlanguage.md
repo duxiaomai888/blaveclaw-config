@@ -15,7 +15,8 @@ exists because the only check we have is a static one.
    `examples/exports/mc/` (see its `README.md`), copy it, change Inputs / indicator lines /
    conditions. Keep the section markers `// --- indicators ---`, `// --- signal ---`,
    `// --- orders ---`. Header comment: what it does, which Blave strategy it came from,
-   symbol / interval, the Blave→MC caveats that apply.
+   symbol / interval, the Blave→MC caveats that apply — and the `Template :` line kept as
+   it is (lint refuses an export whose header does not name its template).
 3. **Lint until clean:** `python lib/lint_export.py --target mc strategies/<name>/exports/mc.txt`.
    Fix and rerun until it exits 0. Lint output is for you only — NEVER paste lint errors,
    warnings, or "the linter said…" to the user.
@@ -23,6 +24,8 @@ exists because the only check we have is a static one.
    PowerLanguage Editor › File › New › Signal).
 5. **End the reply with the delivery marker on its own line, nothing after it:**
    `<export target="mc" path="strategies/<name>/exports/mc.txt" />`
+
+   A `<suggest>` block, when the reply carries one, goes on the lines after the marker — never drop the marker to make room for it.
 
    **After the marker, call no tool** — the marker must sit in your final message, not in
    a paragraph followed by `ls`/`cat` verification (the runtime only reads the last

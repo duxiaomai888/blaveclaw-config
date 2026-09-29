@@ -17,6 +17,12 @@ the order the contract requires), and the three-directory status check.
 
 Block types and their fields: `references/reports.md`.
 
+A report is never overwritten: when the id is taken, the report is written under the next
+free one (`<id>-2`, `-3`, …) and the earlier report and its pictures stay as they were.
+`write_report` returns the path it wrote. Two exceptions, both narrow: `replace=True`
+rewrites what THIS turn wrote under that id (correcting your own report), and `edit_report`
+changes the one report the user named, where it is (its title, a paragraph, a typo).
+
 Usage:
     from lib.report import write_report
 
@@ -70,6 +76,176 @@ _FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 FILES_SUFFIX = ".files"
 # ≈ 40 CJK / 80 Latin: the public share page cuts a title at ~50 CJK, so this leaves a margin.
 RESEARCH_TITLE_WIDTH = 80
+# Cited web images (an `image` block with `source`, references/reports.md › Citing an image
+# from the web). The api sets no cap on purpose: a 400 files the whole report as failed, and a
+# third citation is not a broken document — so the cap lives here, where the agent can fix it.
+CITED_IMAGES_MAX = 2
+# What the desktop's browser_capture names the files it drops into <id>.files/ (shell/browser/capture.js).
+CAPTURE_PREFIX = "cite-"
+
+
+# Every id write_report has used on this machine, one JSON line each {id, asked, turn, at}. Two
+# jobs: on a cloud machine the uploader keeps only the last ~20 files in sent/, so the files alone
+# forget which ids are taken; and `replace=True` finds what this turn wrote through it.
+# edit_report adds a line too, {…, "edited": true, "at": when it was changed}: a record of the
+# change, never a claim on the report — changing a title does not make an earlier turn's report
+# this turn's to rewrite with replace=True.
+LEDGER = os.path.join(REPORTS_DIR, ".written.jsonl")
+LEDGER_KEEP = 5000
+# publish()'s data-only suffix. The runtime tells a data-only report by an id ENDING in it
+# (report_runner._published), so a serial number goes in front of it, never after.
+AUTO_SUFFIX = "-auto"
+_ID_MAX = 64
+
+
+def _ledger():
+    """[(id, asked, turn)] oldest first; unreadable lines are skipped. An edit's line carries
+    no turn: the id is taken, and nobody owns the report through it. A line whose id is not a
+    report id (a number, a list, a path) is skipped like an unreadable one: callers put these
+    ids in sets and file names, and one such line used to fail every write_report after it."""
+    out = []
+    try:
+        with open(LEDGER, encoding="utf-8") as f:
+            for ln in f:
+                try:
+                    d = json.loads(ln)
+                    rid, asked, turn = d["id"], d.get("asked"), d.get("turn")
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    continue
+                if not isinstance(rid, str) or not _ID_RE.fullmatch(rid):
+                    continue
+                out.append((rid, asked if isinstance(asked, str) and asked else rid,
+                            turn if isinstance(turn, str) and not d.get("edited") else None))
+    except OSError:
+        pass
+    return out
+
+
+def _note_written(report_id, asked, at, edited=False):
+    """Best-effort: the report itself is already on disk."""
+    try:
+        line = json.dumps(dict({"id": report_id, "asked": asked, "turn": os.environ.get("BLAVE_TURN_ID") or None, "at": at},
+                               **({"edited": True} if edited else {})))
+        with open(LEDGER, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        with open(LEDGER, encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) > LEDGER_KEEP:
+            _write_text_atomic(LEDGER, "".join(lines[-LEDGER_KEEP:]))
+    except OSError:
+        pass
+
+
+def _on_disk(report_id):
+    return any(os.path.exists(os.path.join(d, report_id + ".json")) for d in (REPORTS_DIR, SENT_DIR))
+
+
+def _serial(report_id, n):
+    """The n-th id of `report_id`: itself, then `-2`, `-3`, … — in front of a trailing `-auto`,
+    and cut to fit the 64 characters an id may have."""
+    if n < 2:
+        return report_id
+    tail = AUTO_SUFFIX if report_id.endswith(AUTO_SUFFIX) and len(report_id) > len(AUTO_SUFFIX) else ""
+    suffix = f"-{n}{tail}"
+    return report_id[:len(report_id) - len(tail)][:_ID_MAX - len(suffix)] + suffix
+
+
+def _free_id(report_id, taken=()):
+    """First id of the series with no report file in reports/ or reports/sent/ (and not in
+    `taken`). With `taken` empty this is, rule for rule, where the desktop's browser_capture
+    puts a picture (shell/browser/capture.js citeSlot) — change both or neither."""
+    n = 1
+    while _serial(report_id, n) in taken or _on_disk(_serial(report_id, n)):
+        n += 1
+    return _serial(report_id, n)
+
+
+def _own(report_id):
+    """The id this turn wrote when it asked for (or was given) `report_id`, or None. No turn id
+    (a scheduled run.py, a script outside a turn) = nothing is ever its own."""
+    turn = os.environ.get("BLAVE_TURN_ID")
+    hit = None
+    for rid, asked, t in _ledger() if turn else ():
+        if t == turn and report_id in (rid, asked):
+            hit = rid
+    return hit
+
+
+def target_id(report_id, replace=False):
+    """The id `write_report(report_id, replace=replace)` writes to right now. An id whose only
+    copy sits in reports/failed/ is free: the platform never took that report, and writing the
+    id again is how it is fixed (the uploader then clears the refused copy)."""
+    own = _own(report_id) if replace else None
+    return own or _free_id(report_id, {rid for rid, _, _ in _ledger()
+                                        if not os.path.exists(os.path.join(FAILED_DIR, rid + ".json"))})
+
+
+def _capture_dirs(asked, final):
+    """Sidecar directories that can hold this report's captures, the report's own first. None of
+    them belongs to a report written in an earlier turn: each id is either free or this turn's."""
+    ids = dict.fromkeys((final, _free_id(asked), _free_id(final)))
+    return [os.path.join(REPORTS_DIR, i + FILES_SUFFIX) for i in ids]
+
+
+def _captures_in(d):
+    try:
+        return sorted(n for n in os.listdir(d) if n.startswith(CAPTURE_PREFIX) and _FILE_RE.fullmatch(n))
+    except OSError:
+        return []
+
+
+def captured_files(report_id, replace=False):
+    """File names browser_capture left for the report `write_report(report_id, replace=replace)`
+    is about to write, sorted."""
+    final = target_id(report_id, replace)
+    return sorted({n for d in _capture_dirs(report_id, final) for n in _captures_in(d)})
+
+
+def _gather_files(asked, final, blocks):
+    """Bring every picture the blocks name into `<final>.files/`. A capture waiting in another
+    of this report's directories is moved; a picture the producer put into `<asked>.files/` by
+    hand is copied, because that directory may belong to an earlier report."""
+    home = os.path.join(REPORTS_DIR, final + FILES_SUFFIX)
+    moves = [d for d in _capture_dirs(asked, final) if d != home]
+    copies = [os.path.join(REPORTS_DIR, asked + FILES_SUFFIX)] if asked != final else []
+    for name in {b.get("file") for b in blocks if isinstance(b, dict) and b.get("type") == "image"}:
+        if not isinstance(name, str) or not _FILE_RE.fullmatch(name) or os.path.exists(os.path.join(home, name)):
+            continue
+        capture = name.startswith(CAPTURE_PREFIX)
+        for d in (moves if capture else []) + copies:
+            src = os.path.join(d, name)
+            if not os.path.isfile(src) or os.path.islink(src):
+                continue
+            os.makedirs(home, exist_ok=True)
+            if capture and d in moves:
+                os.replace(src, os.path.join(home, name))
+            else:
+                shutil.copyfile(src, os.path.join(home, name))
+            break
+
+
+def _sweep_captures(asked, final, blocks):
+    """Delete the captured pictures no image block of the report just written refers to — a
+    capture that was tried and not used would otherwise sit in the sidecar for good. Only
+    browser_capture's own files; pictures handed to `write_report(images=…)` are never touched."""
+    used = {b.get("file") for b in blocks if isinstance(b, dict) and b.get("type") == "image"}
+    home = os.path.join(REPORTS_DIR, final + FILES_SUFFIX)
+    gone = []
+    for d in _capture_dirs(asked, final):
+        for name in _captures_in(d):
+            if d == home and name in used:
+                continue
+            try:
+                os.remove(os.path.join(d, name))
+                gone.append(name)
+            except OSError as e:
+                print(f"WARNING: unused capture {name} not removed: {e}")
+        if d != home:
+            try:
+                os.rmdir(d)   # only when empty
+            except OSError:
+                pass
+    return gone
 
 
 def _research_warnings(title, blocks):
@@ -113,6 +289,67 @@ def _shareable_only(type, meta):
     return []
 
 
+_FN_TEXT_MAX = 1000    # = api report_blocks_validate._v_footnote
+_FN_ID_MAX = 32
+_CLOSERS = ")）」』】》”’\"'"
+
+
+def join_notes(texts):
+    """Footnote fragments as one line: a fragment that does not end in punctuation gets a full
+    stop first (a fragment ending in ";" is carrying on into the next one and stays as it is)."""
+    out = ""
+    for t in texts:
+        t = t.strip()
+        core = t.rstrip(_CLOSERS)
+        if core and not unicodedata.category(core[-1]).startswith("P"):
+            t += "。" if re.search("[\u3400-\u9fff]", t) else "."
+        out += t
+    return out
+
+
+def unique_footnotes(blocks):
+    """(blocks, the ids that were repeated). The api refuses a footnote block whose item ids
+    repeat, and `[^id]` in the text resolves to the first row with that id — so a repeated id
+    is joined into that first row (the reference then reaches all of it). Only when the two
+    cannot be one row (different links, or over the text cap) does the later one get a new id
+    (`src-2`). Mirrored in runtime/report_uploader.py and shell/reportshare.js;
+    tests/check_report_footnotes.py runs the three on the same cases."""
+    fixed, out = [], []
+    for b in blocks:
+        if not (isinstance(b, dict) and b.get("type") == "footnote" and isinstance(b.get("items"), list)):
+            out.append(b)
+            continue
+        rows, first = [], {}
+        for it in b["items"]:
+            if not (isinstance(it, dict) and isinstance(it.get("id"), str) and isinstance(it.get("text"), str)):
+                rows.append(it)
+                continue
+            head = first.get(it["id"])
+            if head is None:
+                it = dict(it)
+                first[it["id"]] = it
+                rows.append(it)
+                continue
+            fixed.append(it["id"])
+            if head.get("url") == it.get("url"):
+                if it["text"].strip() in head["text"]:
+                    continue
+                joined = join_notes([head["text"], it["text"]])
+                if len(joined) <= _FN_TEXT_MAX:
+                    head["text"] = joined
+                    continue
+            # only string ids can clash with the new name; an id that is a list or an object is
+            # not hashable, and is the validator's to refuse, not a reason to raise here
+            n, taken = 2, {r["id"] for r in b["items"] if isinstance(r, dict) and isinstance(r.get("id"), str)} | set(first)
+            while f"{it['id'][:_FN_ID_MAX - 4]}-{n}" in taken:
+                n += 1
+            it = dict(it, id=f"{it['id'][:_FN_ID_MAX - 4]}-{n}")
+            first[it["id"]] = it
+            rows.append(it)
+        out.append(dict(b, items=rows))
+    return out, sorted(set(fixed))
+
+
 def _write_bytes(path, data):
     """One sidecar picture, written the way the report itself is: into a `.tmp` the
     uploader's scan ignores, then `os.replace()` so it appears whole or not at all."""
@@ -147,14 +384,20 @@ def _mark_scheduled(report_id):
 
 
 def write_report(report_id, title, blocks, type="research", report_type=None,
-                 created_at=None, meta=None, images=None):
-    """Write one report into the drop directory. Returns the file path.
+                 created_at=None, meta=None, images=None, replace=False):
+    """Write one report into the drop directory. Returns the path of the file written.
 
-    report_id   `[A-Za-z0-9_-]{1,64}`; it is the file name AND the report id, and
-                re-using it overwrites that report on the platform — so a
-                deterministic id makes a re-run idempotent, and a per-run id
-                (a date, a timestamp) keeps every run. Do NOT use the runtime's
-                own ids (`daily-YYYY-MM-DD`, `wk-YYYY-MM-DD`).
+    report_id   `[A-Za-z0-9_-]{1,64}`; the id you ask for. When no report has it, it is
+                the file name and the report id. When one has, this report gets the
+                next free id (`<id>-2`, `-3`, …; `<id>-2-auto` for an id ending in
+                `-auto`) and the earlier report and its pictures are left as they are:
+                every run is kept, nothing is ever overwritten by default. Do NOT use
+                the runtime's own ids (`daily-YYYY-MM-DD`, `wk-YYYY-MM-DD`).
+    replace     True = rewrite the report THIS turn wrote under `report_id` (the id you
+                asked for then, or the one it got) — for correcting your own report
+                before you reply. Anything written in an earlier turn, by a scheduled
+                run or by another process is never replaced: the report is then
+                written as a new one, as if `replace` were not given.
     title       1–200 chars; shown in the report list and the push notification.
     blocks      the block list (see `references/reports.md`). A `meta` block is
                 prepended unless blocks[0] already is one.
@@ -173,8 +416,10 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
                 figure out of a scheduled run, where the machine token is stripped
                 from the environment. png / jpg / jpeg / webp / gif, ≤2MB each.
 
-    Nothing here is validated beyond the report id and the image file names (a name
-    becomes a path on this disk, so it may not be one): the api is the only validator,
+    A footnote id used more than once is joined into one footnote line (`unique_footnotes`).
+    Nothing else here is validated beyond the report id, the image file names (a name
+    becomes a path on this disk, so it may not be one) and the cap of CITED_IMAGES_MAX
+    image blocks carrying `source` (the api has no such cap): the api is the only validator,
     and a second copy of the rules on this side would drift and start refusing reports
     the platform accepts. A rejected report lands in `reports/failed/` with the
     api's message (it names the offending field path) in `upload_errors.log`.
@@ -185,13 +430,29 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
     """
     if not isinstance(report_id, str) or not _ID_RE.fullmatch(report_id):
         raise ValueError(f"report id {report_id!r} must match [A-Za-z0-9_-]{{1,64}}")
+    return _write(report_id, target_id(report_id, replace), title, blocks, type, report_type,
+                  created_at, meta, images)
+
+
+def _write(asked, report_id, title, blocks, type, report_type, created_at, meta, images, edited=False):
+    """The one place a report file is written. `asked` is the id the caller named, `report_id`
+    the id it is written under; `edited` = the user's own report changed in place."""
     # Check every name before writing any of them: a bad one halfway through would
     # otherwise leave a sidecar holding some of the pictures and raise anyway.
     for name in images or {}:
         if not isinstance(name, str) or not _FILE_RE.fullmatch(name):
             raise ValueError(f"image name {name!r} must be a plain file name "
                              "matching [A-Za-z0-9][A-Za-z0-9._-]{0,79}, not a path")
-    blocks = list(blocks)
+    # The api refuses repeated footnote ids, on a cloud upload and on a public link alike:
+    # put right here, where every report is written, not found out when the user shares it.
+    blocks, repeated = unique_footnotes(list(blocks))
+    cited = [i for i, b in enumerate(blocks)
+             if isinstance(b, dict) and b.get("type") == "image" and "source" in b]
+    if len(cited) > CITED_IMAGES_MAX:
+        raise ValueError(f"{len(cited)} cited images (image blocks with source) at blocks "
+                         f"{cited}; at most {CITED_IMAGES_MAX} per report. Keep the ones a claim "
+                         f"in the text rests on and drop blocks {cited[CITED_IMAGES_MAX:]} "
+                         "(references/reports.md > Citing an image from the web)")
     created_at = int(created_at if created_at is not None else time.time())
     if not blocks or not (isinstance(blocks[0], dict) and blocks[0].get("type") == "meta"):
         head = {"type": "meta", "title": title,
@@ -201,7 +462,9 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
     # Each bump only when its content is present, so a report without it is still accepted
     # by an api one version behind. 1.4 = a news block, a `private` block or a footnote link. The 1.3 meta flags count by presence: an explicit false
     # is still a prop a 1.1/1.2 validator refuses.
-    if any(isinstance(b, dict) and b.get("type") == "bar_chart" and b.get("variant") == "profile" for b in blocks):
+    if cited:
+        version = "1.6"   # image 的引用來源;1.6 是 1.5 的超集
+    elif any(isinstance(b, dict) and b.get("type") == "bar_chart" and b.get("variant") == "profile" for b in blocks):
         version = "1.5"   # 連續數值軸剖面(爆倉地圖);1.5 是 1.4 的超集
     elif any(isinstance(b, dict) and (b.get("type") == "news" or "private" in b
                                       or (b.get("type") == "footnote"
@@ -221,6 +484,7 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
     # Pictures first, JSON last — the report landing is what makes the set visible to
     # the uploader, so everything it references must already be on disk. Raising here
     # leaves a sidecar with no report, which the uploader sweeps after a day.
+    _gather_files(asked, report_id, blocks)
     for name, data in (images or {}).items():
         _write_bytes(os.path.join(REPORTS_DIR, report_id + FILES_SUFFIX, name), data)
     path = os.path.join(REPORTS_DIR, report_id + ".json")
@@ -242,20 +506,37 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
         except OSError:
             pass
         raise
+    _sweep_captures(asked, report_id, blocks)
+    if edited:
+        _note_written(report_id, asked, int(time.time()), edited=True)   # created_at is the report's, kept as it was
+    elif _own(report_id) != report_id:
+        _note_written(report_id, asked, created_at)
     # ASCII only: a report job's stdout goes to run.log in the Windows locale codec (cp950),
     # and an unencodable advisory line would fail a run whose report is already written.
     _mark_scheduled(report_id)
+    if repeated:
+        print(f"[report] footnote id(s) {', '.join(repeated)} were used more than once: each is now one footnote "
+              "line. Next time give every footnote item its own id.")
     warnings = _research_warnings(title, blocks) if type == "research" else []
     warnings += _shareable_warnings(type, blocks[0])
     for w in warnings:
         print(f"WARNING: {w}")
+    if report_id != asked:
+        print(f"[report] {asked} was already a report, so this one is a NEW report, written as {report_id}; "
+              "the earlier one is untouched. Nothing to fix, and nothing to tell the user about ids or numbers.")
+    if edited:
+        print(f"[report] {report_id} changed in place: the same report, in the same place in the list. A public "
+              "link to it keeps showing the version that was shared until the user updates it from the report's "
+              "title bar; say so only if the user asks about the link.")
+    elif os.environ.get("BLAVE_TURN_ID"):
+        print("[report] To correct THIS report before you reply, write it again with the same id and replace=True; "
+              "without it the correction becomes one more report.")
     # Agents re-read reports/<id>.json to "verify" and hit FileNotFoundError once the uploader
     # has moved it (uid=1: five times in three turns) — say where the file goes before they try.
     if os.environ.get("BLAVE_AGENT_LOCAL") == "1":
-        # 電腦版:只有用戶正看著「這台電腦」時 app 才會自己打開;雲端視角送出的那一輪寫在這裡,講「已打開」就是謊報
+        # 電腦版:app 不自己打開報告,回覆底下出一張結果卡讓人點開——講「已打開」就是謊報
         print(f"[report] {report_id}.json written to This computer > Reports (not the cloud machine). The app "
-              "opens it by itself only while the user is viewing This computer. If this turn was sent from the "
-              "cloud-machine view, say the report was saved on this computer and do not say it is open. "
+              "shows a card under your reply that opens it: say the report is ready and do not say it is open. "
               "Do not read it back and do not poll its status; reply now.")
     else:
         print(f"[report] {report_id}.json written. The uploader moves it to reports/sent/, so do not "
@@ -265,8 +546,60 @@ def write_report(report_id, title, blocks, type="research", report_type=None,
     # 報告已經打開(或在清單裡)了:聊天只講結論,不把報告再念一遍(設計稽核 B6;canon Copy › 文案密度)
     print("[report] Chat reply: one or two sentences after the one saying where the report is - ONE conclusion and "
           "ONE thing to watch. Do not restate the report: no heading, no bold label, no list, no figure it "
-          "already shows.")
+          "already shows, and no status line about this run (such as 'Published successfully.').")
     return path
+
+
+def edit_report(report_id, title=None, change=None, images=None):
+    """Change the ONE report the user named, where it is. Returns the path written.
+
+    For 「把這份報告的標題改成…」, a paragraph to rewrite, a typo: the report keeps its id,
+    its `created_at` (so its place in the list) and its pictures. Never for a report the
+    user did not name, and never for 「再做一份」 / 「重做」 — that is a new report
+    (`write_report` / `publish`). Do not edit the JSON file yourself: that skips the checks,
+    the schema version, the sweep of unused captures and the ledger.
+
+    report_id   the id of the report to change; it must be on this machine (`reports/`, or
+                `reports/sent/` on a cloud machine, which keeps the last ~20).
+    title       the new title, when the title changes.
+    change      a function that takes the report's block list (a copy) and edits it in place
+                or returns a new list: `lambda blocks: blocks[3].update(markdown="…")`.
+    images      `{file name: bytes}` to add to (or replace in) the picture sidecar.
+
+    A report that is shared by public link keeps showing the version that was shared; only the
+    user can update the public version (a button in the report's title bar).
+    """
+    if not isinstance(report_id, str) or not _ID_RE.fullmatch(report_id):
+        raise ValueError(f"report id {report_id!r} must match [A-Za-z0-9_-]{{1,64}}")
+    if title is None and change is None and not images:
+        raise ValueError("edit_report needs something to change: title=, change= or images=")
+    home = next((d for d in (REPORTS_DIR, SENT_DIR) if os.path.isfile(os.path.join(d, report_id + ".json"))), None)
+    if home is None:
+        raise FileNotFoundError(f"no report {report_id!r} on this machine (reports/ and reports/sent/), so it cannot "
+                                "be changed here. Do not write a new report under that id: tell the user this one "
+                                "cannot be changed from here and offer to make a new one.")
+    with open(os.path.join(home, report_id + ".json"), encoding="utf-8") as f:
+        doc = json.load(f)
+    if not isinstance(doc, dict) or not isinstance(doc.get("blocks"), list):
+        raise ValueError(f"report {report_id!r} is not a report document (no block list)")
+    blocks = json.loads(json.dumps(doc["blocks"]))
+    if change is not None:
+        out = change(blocks)
+        blocks = blocks if out is None else list(out)
+    if title is not None:
+        if blocks and isinstance(blocks[0], dict) and blocks[0].get("type") == "meta":
+            blocks[0]["title"] = title
+    # A report already uploaded sits in sent/ with its pictures: the rewritten one goes back
+    # into the drop directory, so the pictures its blocks still name come back with it.
+    if home == SENT_DIR:
+        side = os.path.join(SENT_DIR, report_id + FILES_SUFFIX)
+        for name in {b.get("file") for b in blocks if isinstance(b, dict) and b.get("type") == "image"}:
+            src = os.path.join(side, name) if isinstance(name, str) and _FILE_RE.fullmatch(name) else None
+            if src and os.path.isfile(src) and not os.path.islink(src) and name not in (images or {}):
+                with open(src, "rb") as f:
+                    _write_bytes(os.path.join(REPORTS_DIR, report_id + FILES_SUFFIX, name), f.read())
+    return _write(report_id, report_id, doc.get("title") if title is None else title, blocks,
+                  doc.get("type", "research"), None, doc.get("created_at"), None, images, edited=True)
 
 
 JOBS_DIR = os.path.join(WORKSPACE, "report_jobs")

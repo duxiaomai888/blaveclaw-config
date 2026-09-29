@@ -15,6 +15,7 @@ Prints the assistant's reply text to stdout; everything else goes to stderr.
 """
 import argparse
 import asyncio
+import calendar
 import http.client
 import json
 import os
@@ -73,6 +74,14 @@ ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 # on purpose (user-built exchange helpers live there). A single leading slash anchors at
 # cwd=WORKSPACE. 2026-09-11 an agent added an `anchored` option to lib/walk_forward.py
 # because the user asked; the web then showed that run as rolling.
+# Engine tools that deliver after the turn: the CLI is closed when the turn ends, so a Monitor
+# event or a session cron reaches no one. e2e 0.1.8 #127 — the agent armed a Monitor on
+# stats.json, wrote 「等它完成後我會回報」 and ended the turn; nothing ever reported.
+NO_LATER_TOOLS = ["Monitor", "CronCreate"]
+# Desktop: the built-in browser is the only way to the web (e2e 0.1.8 #125 — with the browser
+# switched off the agent searched with the engine's own tool, and the chat showed none of what
+# it read). The shell names the state in BLAVE_BROWSER; see desktop_web().
+WEB_TOOLS = ["WebSearch", "WebFetch"]
 PROTECTED_EDIT_RULES = [
     "Edit(/lib/runner.py)",
     "Edit(/lib/param_scan.py)",
@@ -222,15 +231,19 @@ def _read_export(target, path, workspace):
 
 
 _EXPORT_FAIL_NOTE = "轉出檔讀取失敗，請再說一次「重新轉出」。"
+_EXPORT_FAIL_NOTE_CN = "转出档读取失败，请再说一次「重新转出」。"
+_EXPORT_FAIL_NOTE_EN = "Couldn't read the exported file. Say \"export again\" to retry."
 
 
-def extract_exports(text, workspace=None):
+def extract_exports(text, workspace=None, note=None):
     """回傳 (清理後文字, export chunk 清單)。剝掉所有 <export …/> 標記(含格式不合的
     殘留),合法且讀得到的各產一個 chunk;讀不到的不炸正文,但正文尾端補一行提示
-    (多個失敗只補一行)——否則用戶只看到「轉好了」卻沒有檔案下載。"""
+    (多個失敗只補一行)——否則用戶只看到「轉好了」卻沒有檔案下載。
+    note = 這一輪回覆語言的那一句(_export_fail_note);不給就是繁中。"""
     if not text or "<export" not in text:
         return text, []
     workspace = workspace or WORKSPACE
+    fail_note = note or _EXPORT_FAIL_NOTE
     chunks = []
     failed = False
     for target, path in _EXPORT_TAG_RE.findall(text):
@@ -241,8 +254,44 @@ def extract_exports(text, workspace=None):
             failed = True
     cleaned = _EXPORT_STRIP_RE.sub("", text).rstrip()
     if failed:
-        cleaned = f"{cleaned}\n\n{_EXPORT_FAIL_NOTE}" if cleaned else _EXPORT_FAIL_NOTE
+        cleaned = f"{cleaned}\n\n{fail_note}" if cleaned else fail_note
     return cleaned, chunks
+
+
+def _export_fail_note(message, lang=None):
+    """讀檔失敗那一句跟著這一輪的回覆語言(解析同 _fault_message:設定 > ui_lang > 看用戶打的字)。
+    zh / cn 以外的語言一律英文——這句是 runtime 補的,不經模型翻譯。"""
+    if lang == "cn":
+        return _EXPORT_FAIL_NOTE_CN
+    if lang:
+        return _EXPORT_FAIL_NOTE if lang == "zh" else _EXPORT_FAIL_NOTE_EN
+    return _EXPORT_FAIL_NOTE if _is_zh(message or "") else _EXPORT_FAIL_NOTE_EN
+
+
+def unmarked_exports(since, touched, workspace=None):
+    """這一輪轉好、回覆卻沒帶 <export …/> 標記的轉出檔,各產一個 chunk。
+    模型會漏寫標記(「回覆必須以 <suggest> 結尾」跟「標記放最後」搶同一個位置時丟掉標記),
+    檔案在、卡沒出。判準不靠模型:lint 過了才寫的 sidecar,`exported_at` 落在這一輪之內,
+    且這一輪的工具碰過那支策略(同時間別條對話轉的檔不算)。"""
+    workspace = workspace or WORKSPACE
+    chunks = []
+    for name in sorted(touched or ()):
+        if not _EXPORT_NAME_RE.fullmatch(name):
+            continue
+        for target, ext in _EXPORT_EXT.items():
+            rel = f"strategies/{name}/exports/{target}.{ext}"
+            try:
+                with open(os.path.join(workspace, rel + ".meta.json"), encoding="utf-8") as f:
+                    meta = json.load(f)
+                at = calendar.timegm(time.strptime(meta["exported_at"], "%Y-%m-%dT%H:%M:%SZ"))
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if meta.get("target") != target or at < int(since):
+                continue
+            chunk = _read_export(target, rel, workspace)
+            if chunk:
+                chunks.append(chunk)
+    return chunks
 
 
 # ── 導航指引(ui_nav)──────────────────────────────────────────────────────
@@ -507,6 +556,27 @@ def _is_zh(message):
     return not (fn >= 2 or (fn >= 1 and letters >= 4 * han))
 
 
+def _no_lang_evidence(message):
+    """這則訊息看不出用戶用什麼語言:沒有任何非 ASCII 的字(漢字、假名、韓文、西文重音字母都算證據),
+    自己打的英文字不超過兩個、而且沒有英文文法字。「YES」「ok」「BTCUSDT」屬於這一種。"""
+    if any(ch.isalpha() and not ch.isascii() for ch in message):
+        return False
+    words = _prose_words(_typed_english(message))
+    return len(words) <= 2 and not any(w.lower() in _EN_FUNCTION_WORDS for w in words)
+
+
+def _lang_basis(message, recent):
+    """判回覆語言時看哪一則用戶訊息:這一則看不出語言,就沿用最近一則看得出來的。
+    中文對話裡回一句「YES」確認,訊息尾端的錨、系統規則、工具後的提醒三處一起點名 English,
+    整則回覆變英文(e2e 0.1.8 #65)——判定原本只看當則。找不到就照舊看當則。"""
+    if not _no_lang_evidence(message):
+        return message
+    for role, content in reversed(list(recent or [])):
+        if role == "user" and isinstance(content, str) and not _no_lang_evidence(content):
+            return content
+    return message
+
+
 def _lang_directive(message, suggest=False, lang=None):
     """Deterministic per-turn language pin. `lang` (resolved reply language, see
     _resolve_reply_lang) wins outright — no per-message exception. Without it the
@@ -602,18 +672,275 @@ def lang_reminder(message, lang=None):
 _HOOK_MATCHER = getattr(sdk, "HookMatcher", None)
 
 
-def _lang_hooks(options, reminder):
-    """把 lang_reminder 掛成 PostToolUse hook。SDK 沒有 hooks / HookMatcher 的 build 不掛(回合照跑,只是少這句)。"""
+def _add_hook(options, event, matcher, fn):
+    """SDK 沒有 hooks / HookMatcher 的 build 不掛(回合照跑,只是少這一道),回 False。"""
     if _HOOK_MATCHER is None or "hooks" not in getattr(type(options), "__dataclass_fields__", {}):
         return False
+    hooks = dict(getattr(options, "hooks", None) or {})
+    hooks[event] = list(hooks.get(event) or []) + [_HOOK_MATCHER(matcher=matcher, hooks=[fn])]
+    options.hooks = hooks
+    return True
 
+
+def _lang_hooks(options, reminder):
+    """把 lang_reminder 掛成 PostToolUse hook。"""
     async def remind(_input, _tool_use_id, _context):
         return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": reminder}}
 
-    hooks = dict(getattr(options, "hooks", None) or {})
-    hooks["PostToolUse"] = list(hooks.get("PostToolUse") or []) + [_HOOK_MATCHER(matcher=None, hooks=[remind])]
-    options.hooks = hooks
-    return True
+    return _add_hook(options, "PostToolUse", None, remind)
+
+
+# 電腦版的 agent 不碰作業系統的排程器(e2e 0.1.8 #64 #75):macOS 對 `crontab <檔>` 跳系統框
+# 「想要管理你的電腦」,指令掛在框上等人按(實測 4 分 33 秒),agent 接著叫用戶去開完整磁碟取用權限。
+# 只認「指令位置」上的那三個名字——`grep crontab references/deployment.md` 是在讀文件,不擋。指令位置 =
+#   開頭,或接在 ; & | ( ` $( 引號 換行、find 的 -exec / -ok 之後;
+#   前面可以有 shell 關鍵字(if then else elif do while until ! {)、帶著自己選項的前綴指令(sudo -u root、env -i、
+#   command -p、time -p、nice -n 10、timeout 10、xargs -I{} …)、環境變數指派、路徑。
+# 這道守門防的是 agent **自然寫出來**的指令在 macOS 觸發系統框、掛住回合,不是安全邊界(agent 本來就有完整的 Bash)。
+# 已知擋不到、也不打算追的:把字拆開再拼回去(cron""tab、$X -l、eval)、直譯器的 -c 字串裡用字串拼接、複製或 symlink 成別的名字、
+# agent 自己寫進檔案的腳本(規則層在 AGENTS.md 與 references/deployment.md)。直接餵給直譯器的 heredoc 腳本擋得到(sched_verdict)。
+_TOK = r"""[^\s;&|()<>`"']+"""
+
+
+def _prefix_re(names, value_opts=""):
+    """前綴指令+它自己的選項:value_opts 是後面另外帶一個值的選項字母(`sudo -u root` 的 u)。"""
+    opt = (rf"-[{value_opts}]\s+(?!-){_TOK}|" if value_opts else "") + "-" + _TOK
+    return rf"(?:{names})(?:\s+(?:{opt}))*"
+
+
+_CMD_PREFIX = "(?:(?:" + "|".join([
+    r"if|then|else|elif|do|while|until|!|\{",
+    _prefix_re("sudo|doas", "ugCDhpRrTtU"), _prefix_re("env", "uCPS"), _prefix_re("nice|ionice", "ncp"),
+    _prefix_re("xargs", "InPLsEJRSd"), _prefix_re("command|builtin|exec|nohup|time|caffeinate|stdbuf"),
+    _prefix_re("timeout", "sk") + r"\s+" + _TOK,
+    r"[A-Za-z_][A-Za-z0-9_]*=\S*",
+]) + r")\s+)*"
+_SCHED_CMD_RE = re.compile(
+    r"""(?:^|[;&|(`\n"']|\$\(|\s-(?:exec|execdir|ok|okdir)\s)\s*""" + _CMD_PREFIX
+    + r"(?:[^\s;&|()`\"']*[/\\])?(?:crontab|launchctl|schtasks)(?:\.exe)?(?=$|[\s;&|)<>])", re.I)
+_CMD_PREFIX_RE = re.compile(r"\s*" + _CMD_PREFIX, re.I)
+# 引號裡的字只是這些指令的參數(要印的字、要找的字),不會被執行:`echo "crontab -l 可以列出排程"`、`grep 'crontab -l' x.md`
+_TEXT_CMDS = frozenset(("echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "sed", "awk", "man", "git"))
+# 在這台電腦上不碰排程器;用戶自己的雲端主機可以(Wei 2026-09-28:先確認、只裝被要求的那一條,規則在
+# references/cloud-handoff.md)。所以守門要分得出「在這台電腦上執行」與「經 SSH 在雲端主機上執行」。判別從嚴:
+# 一行指令**整行**就是一個 `ssh <選項> <user>@<host> <遠端指令>`(可以帶一段 heredoc 當它的輸入)才算遠端——
+# 行上有管線、轉向、; && || & 、括號、$( ) 或反引號(那些是這台電腦的 shell 在跑),目的地是 localhost / 127.* /
+# 這台電腦的主機名,選項裡帶 ProxyCommand / LocalCommand 之類會在本機執行的東西,都不算。認不出來的一律當本機。
+_SCHED_ANY_RE = re.compile(r"crontab|launchctl|schtasks", re.I)   # 出現就算(只用在 ssh 與餵給直譯器的腳本,不用在一般指令)
+_SSH_FLAGS_ARG = frozenset("BbcDEeFIiJLlmOoPpQRSWw")    # 後面帶值的旗標(man ssh)
+_SSH_FLAGS = frozenset("46AaCfGgKkMNnqsTtVvXxYy")
+_INTERPRETER_RE = re.compile(r"^(?:python[\d.]*|sh|bash|zsh|dash|ksh|node|ruby|perl|osascript)$")
+_HEREDOC_RE = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _local_host(host):
+    h = (host or "").strip("[]").lower().rstrip(".")
+    if not h or h in ("localhost", "::1", "0.0.0.0", "ip6-localhost") or h.startswith("127.") or h.endswith(".localhost"):
+        return True
+    try:
+        import socket
+        me = socket.gethostname().lower().rstrip(".")
+    except Exception:
+        me = ""
+    short = me.split(".")[0]
+    return bool(me) and h in (me, short, short + ".local", short + ".lan")
+
+
+def _sched_in_command(text):
+    """text 裡有沒有站在指令位置上的排程器指令。_TEXT_CMDS 的引號參數先挖空(裡面有 $( ) 或反引號的雙引號不挖:那會被執行)。"""
+    out, i, n, seg, owner = [], 0, len(text), 0, None
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            out.append(text[i:i + 2]); i += 2
+            continue
+        if c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if c == '"' and text[j] == "\\" else 1
+            if j >= n:
+                out.append(text[i:])
+                break
+            quoted = text[i:j + 1]
+            if owner is None:   # 這個指令的第一個引號才算一次
+                owner = (_CMD_PREFIX_RE.sub("", "".join(out[seg:]), count=1).split() or [""])[0]
+            if os.path.basename(owner) in _TEXT_CMDS and not (c == '"' and re.search(r"`|\$\(", quoted)):
+                quoted = c + " " * (len(quoted) - 2) + c
+            out.append(quoted); i = j + 1
+            continue
+        out.append(c); i += 1
+        if c in ";&|(\n`":   # 下一個字起是另一個指令
+            seg, owner = len(out), None
+    return bool(_SCHED_CMD_RE.search("".join(out)))
+
+
+def _expands_scheduler(body):
+    """沒加引號的 heredoc:內文裡的 $( ) 與反引號由**這台電腦**的 shell 先展開。展開的那一段提到排程器 → True。"""
+    for m in re.finditer(r"(?<!\\)(?:\$\(|`)", body or ""):
+        if m.group(0) == "`":
+            end = body.find("`", m.end())
+        else:
+            depth, end = 1, m.end()
+            while end < len(body) and depth:
+                depth += {"(": 1, ")": -1}.get(body[end], 0)
+                end += 1
+        if _SCHED_ANY_RE.search(body[m.end():end if end > 0 else len(body)]):
+            return True
+    return False
+
+
+def _shell_statements(cmd):
+    """一段 shell 指令 → [{text, body, plain, expands}]:expands = 這一行的 heredoc 沒加引號(內文會先被這台電腦的 shell 展開)。
+    在引號與 heredoc 之外的換行切開;heredoc 的內文跟著開它的那一行。
+    plain = 這一行在引號外沒有任何 shell 運算子(| & ; ( ) < > 反引號 $( ),只准一個 heredoc)。引號沒收尾 → None(認不出來)。"""
+    out, i, n = [], 0, len(cmd)
+    text, plain, pending, expands = [], True, [], False
+    while i <= n:
+        c = cmd[i] if i < n else "\n"
+        if c == "\n":
+            body = None
+            for delim in pending:   # 內文:到只有 delimiter 的那一行為止
+                end = re.compile(r"^[ \t]*" + re.escape(delim) + r"[ \t]*$", re.M).search(cmd, i + 1)
+                if not end:
+                    return None
+                body = (body or "") + cmd[i + 1:end.start()]
+                i = end.end()
+            if "".join(text).strip():
+                out.append({"text": "".join(text), "body": body, "plain": plain and len(pending) <= 1, "expands": expands})
+            text, plain, pending, expands = [], True, [], False
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            text.append(cmd[i:i + 2]); i += 2
+            continue
+        if c == "'":
+            j = cmd.find("'", i + 1)
+            if j < 0:
+                return None
+            text.append(cmd[i:j + 1]); i = j + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and cmd[j] != '"':
+                if cmd[j] == "\\":
+                    j += 1
+                elif cmd[j] == "`" or cmd.startswith("$(", j):
+                    plain = False   # 雙引號裡的指令替換是這台電腦的 shell 在跑
+                j += 1
+            if j >= n:
+                return None
+            text.append(cmd[i:j + 1]); i = j + 1
+            continue
+        m = _HEREDOC_RE.match(cmd, i) if c == "<" else None
+        if m:
+            pending.append(m.group(2)); text.append(m.group(0)); i = m.end()
+            expands = expands or not m.group(1)
+            continue
+        if c in "|&;()<>`" or cmd.startswith("$(", i):
+            plain = False
+        text.append(c); i += 1
+    return out
+
+
+def _ssh_remote_only(st):
+    """這一行是不是整行只有一個送到別台主機的 ssh(見上面那段判別)。"""
+    if not st["plain"]:
+        return False
+    try:
+        words = shlex.split(_HEREDOC_RE.sub(" ", st["text"]), posix=True)
+    except ValueError:
+        return False
+    if not words or words[0] != "ssh":
+        return False
+    i = 1
+    while i < len(words) and words[i].startswith("-") and words[i] != "--":
+        w = words[i]
+        if len(w) < 2:
+            return False
+        if w[1] in _SSH_FLAGS_ARG:
+            val = w[2:] if len(w) > 2 else (words[i + 1] if i + 1 < len(words) else None)
+            if val is None or re.search(r"command|exec", val, re.I) or _SCHED_ANY_RE.search(val):
+                return False   # ProxyCommand / LocalCommand / KnownHostsCommand / Match exec:在這台電腦上執行
+            i += 1 if len(w) > 2 else 2
+        elif all(ch in _SSH_FLAGS for ch in w[1:]):
+            i += 1
+        else:
+            return False
+    if i >= len(words) or words[i] == "--":
+        return False
+    user, at, host = words[i].rpartition("@")
+    if not at or not user or not re.match(r"^[A-Za-z0-9_.:\[\]-]+$", host) or _local_host(host):
+        return False
+    return len(words) > i + 1 or st["body"] is not None   # 有遠端指令,或內文就是送過去的輸入
+
+
+def sched_verdict(cmd):
+    """這段指令會不會在這台電腦上叫系統排程器。None = 不會(放行);"local" = 會;"form" = 看起來是要送到
+    別台主機、但寫法讓 runtime 分不出來(行上還有別的東西 / 目的地可疑)——理由另外講。純函式,tests/check_desktop_sched_guard.py。"""
+    sts = _shell_statements(cmd)
+    if sts is None:
+        return "local" if _sched_in_command(cmd) or (cmd.split()[:1] == ["ssh"] and _SCHED_ANY_RE.search(cmd)) else None
+    verdict = None
+    for st in sts:
+        body = st["body"] or ""
+        if _ssh_remote_only(st):
+            # 送去雲端主機的 heredoc 沒加引號:`$(crontab -l)` 是這台電腦先跑的。目的地是遠端,所以講「寫法」那一條
+            if st["expands"] and _expands_scheduler(body):
+                verdict = verdict or "form"
+            continue
+        first = _CMD_PREFIX_RE.sub("", st["text"], count=1).split()
+        ssh = bool(first) and first[0] == "ssh"
+        fed = bool(first) and (ssh or _INTERPRETER_RE.match(os.path.basename(first[0])))
+        hit = (_sched_in_command(st["text"]) or _SCHED_CMD_RE.search(body)
+               or (fed and _SCHED_ANY_RE.search(body))                  # 餵給直譯器 / ssh 的腳本裡提到排程器
+               or (ssh and _SCHED_ANY_RE.search(st["text"])))           # 沒被認成遠端的 ssh:提到就擋
+        if not hit:
+            continue
+        dest = next((w for w in first[1:] if "@" in w and not w.startswith("-")), "") if ssh else ""
+        if ssh and dest and not _local_host(dest.rpartition("@")[2].strip("\"'")):
+            verdict = verdict or "form"
+        else:
+            return "local"
+    return verdict
+
+
+# 給模型看的拒絕理由:只講事實與該做什麼,不給可以照抄的成品句(見下面「逐輪規則寫法」那條)
+SCHED_DENY_REASON = (
+    "Refused by the Blave runtime — this is the desktop app, where the agent never touches the operating "
+    "system's scheduler (crontab, launchd / launchctl, schtasks): on macOS the command opens a system "
+    "permission prompt in front of the user and hangs. Do not retry it another way (a script, a plist, another "
+    "tool) and do not tell the user to change any system permission. What holds here: Type A/C strategies go "
+    "live from the app's 自動下單 page (the user presses 啟動下單; the app schedules them itself); a Type B "
+    "strategy cannot run on a schedule on this computer — say so plainly and offer the two ways out (send it "
+    "to their cloud machine, or run it once by hand now). Details: references/deployment.md › Desktop app. "
+    "A schedule on the user's own cloud machine is a separate matter with its own steps "
+    "(references/cloud-handoff.md › A schedule on the cloud machine)."
+)
+# 看起來是要送到雲端主機、但寫法讓 runtime 分不出來:講清楚哪一種寫法才認得(那是同一件事的正確寫法,不是換方法繞)
+SCHED_DENY_REASON_FORM = (
+    "Refused by the Blave runtime — this command names the system scheduler, and the way it is written the "
+    "runtime cannot tell that it runs only on the user's cloud machine. The scheduler of this computer is never "
+    "touched. A schedule on the cloud machine, once the user has confirmed it (references/cloud-handoff.md › "
+    "A schedule on the cloud machine), is sent as ONE plain command and nothing else in the call: `ssh`, the "
+    "options of step 2, `blaveagent@<host>`, then the remote command in one pair of quotes — a quoted heredoc as "
+    "its input is fine. Outside that remote command: no pipe, no redirect, no `;` `&&` `||`, no `$(…)` or "
+    "backticks, no second command, never `localhost`. If that is not what this was, tell the user plainly what "
+    "was refused and stop — do not look for another way to get it done."
+)
+
+
+def _sched_guard_hooks(options):
+    """PreToolUse:Bash 指令要叫系統排程器就拒絕,理由回給模型(它不會掛在系統框上,也知道接下來怎麼講)。"""
+    async def guard(input_data, _tool_use_id, _context):
+        cmd = ((input_data or {}).get("tool_input") or {}).get("command")
+        verdict = sched_verdict(cmd) if isinstance(cmd, str) else None
+        if not verdict:
+            return {}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": SCHED_DENY_REASON_FORM if verdict == "form"
+                                       else SCHED_DENY_REASON}}
+
+    return _add_hook(options, "PreToolUse", "Bash", guard)
 
 
 def _foreign_pins(name):
@@ -771,7 +1098,7 @@ def _viewing_env_segment(cloud_mcp):
 
 def build_prompt(summary, recent, message, viewing_strategy=None, viewing_tab=None,
                  suggest_directive=False, viewing_view=None, viewing_widgets=None,
-                 reply_lang=None, resume_note=None, viewing_env=None, cloud_mcp=False):
+                 reply_lang=None, resume_note=None, viewing_env=None, cloud_mcp=False, lang_basis=None):
     parts = []
     if summary:
         parts.append(f"[過去對話摘要]\n{summary}\n")
@@ -883,7 +1210,7 @@ def build_prompt(summary, recent, message, viewing_strategy=None, viewing_tab=No
     # 回成中文/中英混雜(實測兩輪)。必須排在上面所有中文逐輪指令(紅線句、建議句
     # 規則)之後——之前放在它們前面,英文回合正文是英文、<suggest> 卻照中文範例
     # 寫成中文(uid=1,2026-08-25)。
-    parts.append(_lang_directive(message, suggest=suggest_directive, lang=reply_lang))
+    parts.append(_lang_directive(lang_basis or message, suggest=suggest_directive, lang=reply_lang))
     return "\n".join(parts)
 
 
@@ -1100,6 +1427,8 @@ _SUGGEST_RULE = (
     "- 模擬盤已穩定跑一段時間且執行無異常 → 建議小額實盤\n"
     "- 用戶想實際跑但還沒綁任何交易所 → 建議先綁模擬盤\n"
     "命中時，回覆**必須以 <suggest> 區塊結尾**（其後不得再有任何文字），格式：\n"
+    "這一輪有轉出檔要交付時，`<export … />` 標記照寫、放在 <suggest> 區塊的前一行——"
+    "不能因為要放 <suggest> 就省掉標記。\n"
     "<suggest>\n帶我看怎麼把〈策略名〉上模擬盤\n</suggest>\n"
     "一行一個建議、最多 3 個（通常 1 個就好）；句子＝用戶口吻的短指令"
     "（動詞＋對象＋必要參數），點了會替用戶原句送出。"
@@ -1136,6 +1465,11 @@ _SUGGEST_RULE = (
     "用戶**明確拒絕**過的建議（「不要」「先不上」），同一階段不要重提；只是沒點、沒回應"
     "不算拒絕——到下一個里程碑（回測重跑、換一支策略、回頭再問）可以再提，"
     "但連續兩輪不要貼一模一樣的句子（換角度或換動詞，例如「上模擬盤」→「先綁模擬盤帳戶」）。\n"
+    # 0.1.8 e2e:改完報告標題的回覆後面多了「これ以上の提案は不要 — 純修改，不附建議。」與一行為那句日文道歉
+    "**沒有要提議時，正文最後一句寫完就結束，後面什麼都不加**：不寫「沒有建議」「不附建議」"
+    "「這次只是修改」這類交代，不說明為什麼沒有 <suggest>，不提這一節的規則。"
+    "上面的檢查是你心裡做的，檢查的結果不寫進回覆。"
+    "也不評論、不更正自己前面寫的句子：寫錯了就只留對的那一句，不另起一行道歉或解釋。\n"
 )
 
 # Web renders standard Markdown in the browser — tables, headings, and
@@ -1729,7 +2063,8 @@ def partial_tool_kind(name, buf, trading=None):
 KIND_OBJ_MAX = 60
 _SILENT_TOOLS = {"TodoWrite", "ToolSearch", "BashOutput", "KillShell", "KillBash", "ExitPlanMode"}
 _BROWSER_SILENT = {"browser_wait", "browser_tabs", "browser_back", "browser_close"}
-_BROWSER_READ = {"browser_read", "browser_get", "browser_snapshot", "browser_screenshot", "browser_scroll"}
+_BROWSER_READ = {"browser_read", "browser_get", "browser_snapshot", "browser_screenshot", "browser_capture",
+                 "browser_scroll"}
 _BROWSER_ACT = {"browser_click", "browser_fill", "browser_type", "browser_press"}
 _STRATEGY_DIR_RE = re.compile(r"(?:^|[\s/'\"=])strategies/([^/\s'\"]+)/")
 _TICKER_RE = re.compile(r"^[A-Z0-9._-]{2,20}$")
@@ -2000,7 +2335,9 @@ def _tool_kind(name, params, workspace=None, trading=None):
         return "unknown", "", ""
     if name.startswith("mcp__blave__"):
         return "cloud", "", ""
-    if name in ("Agent", "Task", "TaskOutput"):
+    # TaskOutput 不在這裡:它等的是背景指令的輸出(子代理在這個 runtime 是關掉的),分類由 on_tool 換成上一個 Bash 的
+    # (0.1.8 e2e #134:等回測時狀態列寫「正在委派研究」);這裡落到 unknown
+    if name in ("Agent", "Task"):
         return "delegate", "", ""
     if name == "Read":
         rel = _ws_rel(params.get("file_path") or "", workspace)
@@ -2074,6 +2411,7 @@ class WebSink:
         self.full_text = ""
         self.error_text = None
         self.error_code = None
+        self.started_at = time.time()  # wall clock:跟 lint sidecar 的 exported_at 比(unmarked_exports)
         # Set when the user hits Stop: /report piggybacks `interrupt: true` on its
         # response, or turn_stop sees the flag file web_bridge writes when the inbox
         # `interrupt` arrives (that one also reaches a turn that is silent in a tool).
@@ -2093,6 +2431,7 @@ class WebSink:
         # (done chunk 也要帶 tool)。sink 活一個回合就丟,不需要清理。
         self._tool_t0 = {}
         self._trading = None  # 下單設定裡的策略名(_trading_names),第一個工具呼叫時讀
+        self._last_bash = None  # 這一輪上一個 Bash 指令的 (kind, kind_obj):等它的輸出(TaskOutput)時狀態列照它講
         self._nav_fired = False  # ui_nav 一回合最多一次(旁白段誤觸發會退還,見 on_tool)
         self._nav_fired_seg = -1  # 送出 ui_nav 時的 _seg_start
         # 逐 token 的文字要先攢起來再送。實測 deepseek 一段回覆吐 ~68 delta/秒,
@@ -2217,6 +2556,10 @@ class WebSink:
         if self._trading is None:
             self._trading = _trading_names(WORKSPACE)
         kind, kind_obj, kind_tab = _tool_kind(name, params, trading=self._trading)
+        if name == "Bash":
+            self._last_bash = (kind, kind_obj)
+        elif name == "TaskOutput":
+            kind, kind_obj = self._last_bash or ("unknown", "")
         chunk["kind"] = kind
         if kind_obj:
             chunk["kind_obj"] = kind_obj
@@ -2225,7 +2568,7 @@ class WebSink:
         block_id = getattr(block, "id", None)
         if block_id:
             chunk["id"] = block_id
-            self._tool_t0[block_id] = (time.monotonic(), name, where)
+            self._tool_t0[block_id] = (time.monotonic(), name, where, kind)
         self._send(chunk)
 
     def on_tool_prep(self, name, kind=None, kind_obj=None):
@@ -2252,7 +2595,7 @@ class WebSink:
         started = self._tool_t0.pop(getattr(block, "tool_use_id", None), None)
         if not started:
             return
-        t0, name, where = started
+        t0, name, where = started[:3]
         self._send({
             "type": "tool", "id": block.tool_use_id, "tool": name, "status": "done", "where": where,
             "ms": max(0, int((time.monotonic() - t0) * 1000)),
@@ -2305,7 +2648,10 @@ class WebSink:
         if cut:
             print("[agent_turn] 截掉模型續寫的假對話回合", file=sys.stderr)
         cleaned, suggestions = extract_suggestions(cleaned)
-        cleaned, exports = extract_exports(cleaned)
+        marked = "<export" in cleaned
+        cleaned, exports = extract_exports(cleaned, note=getattr(self, "export_fail_note", None))
+        if not marked:
+            exports = unmarked_exports(self.started_at, getattr(self, "export_touched", None))
         cleaned = _NAV_STRIP_RE.sub("", cleaned)  # 放錯位置的標記只剝不觸發
         if cleaned != seg:
             self.full_text = self.full_text[: self._seg_start] + cleaned
@@ -2662,15 +3008,51 @@ def _fault_receipt_suffix(steps):
     return "\n[中斷前已執行:" + "、".join(shown) + "]"
 
 
+# 停止那一句裡「還在跑的步驟」怎麼講:工具分類(_tool_kind 的 kind)→ (繁中, 簡中, 英文)。
+# 工具名(mcp__blave_browser__browser_search、Bash)是內部名稱,不給用戶看;對不到的 kind 不列。
+# 用詞:zh / cn = 狀態列那組字拿掉「正在」;en 一律動名詞(設計師 0.1.8 第四批)。
+_STOP_STEP_TEXT = {
+    "search": ("搜尋", "搜索", "searching the web"),
+    "web_read": ("讀網頁", "读网页", "reading a web page"),
+    "web_read_many": ("讀網頁", "读网页", "reading a web page"),
+    "web_act": ("操作網頁", "操作网页", "working on a web page"),
+    "docs": ("查說明文件", "查说明文件", "reading the docs"),
+    "files": ("找檔案", "找文件", "looking through files"),
+    "file_read": ("讀檔案", "读文件", "reading a file"),
+    "file_write": ("改檔案", "改文件", "editing a file"),
+    "strategy_read": ("讀策略", "读策略", "reading a strategy"),
+    "strategy_write": ("寫策略", "写策略", "writing a strategy"),
+    "data": ("抓資料", "抓数据", "fetching data"),
+    "backtest": ("跑回測", "跑回测", "running a backtest"),
+    "live_tick": ("跑策略", "跑策略", "running a strategy"),
+    "scan": ("掃參數", "扫参数", "scanning parameters"),
+    "validate": ("驗證策略", "验证策略", "validating the strategy"),
+    "check": ("檢查策略碼", "检查策略代码", "checking the strategy code"),
+    "report": ("組報告", "组报告", "building the report"),
+    "watch": ("更新看盤板", "更新看盘板", "updating the watchboard"),
+    "schedule": ("設定排程", "设定排程", "setting up a schedule"),
+    # 這一種涵蓋下單、撤單、TWAP、平倉、改槓桿、對帳:寫「下單」會把撤單講成下了單(跟狀態列 act.order 同一套字)
+    "order": ("執行下單指令", "执行下单指令", "running an order command"),
+    "account": ("查帳戶", "查账户", "checking the account"),
+    "status": ("查執行狀態", "查运行状态", "checking what is running"),
+    "install": ("安裝套件", "安装套件", "installing packages"),
+    "cloud": ("連雲端主機", "连云端主机", "working on the cloud machine"),
+    "delegate": ("委派研究", "委派研究", "delegating research"),
+}
+
+
 def _stop_note(left_running, in_flight, message, lang=None, gave_up=()):
     """停止鈕收尾那一句(進回覆也進歷史):哪幾支會動到部位/帳本的腳本沒被中斷、還在背景
     跑完(turn_stop 刻意放過),Codex 等了 HOLD_MAX_S 還沒結束、不再等的那幾支(輸出管線
-    已斷,可能沒跑完),以及停下時還在跑的步驟。都沒有就不說話。"""
+    已斷,可能沒跑完),以及停下時還在跑的步驟。都沒有也要有「已停止。」:停在兩個工具之間時
+    沒有這一句,finalize 會拿最後一句過場旁白補位,看起來像正式回答(0.1.8 e2e #87)。
+    in_flight = 停下時還沒回來的工具的 kind;講得出人話的才列,其餘只算「有步驟被停」。"""
     left_running = [x for x in left_running if x not in gave_up]
-    if not left_running and not in_flight and not gave_up:
-        return ""
-    left, cut, gone = "、".join(left_running), "、".join(dict.fromkeys(in_flight)), "、".join(gave_up)
-    if lang in ("zh", "cn") or (not lang and _is_zh(message)):
+    zh = lang in ("zh", "cn") or (not lang and _is_zh(message))
+    col = (1 if lang == "cn" else 0) if zh else 2
+    steps = list(dict.fromkeys(_STOP_STEP_TEXT[k][col] for k in in_flight if k in _STOP_STEP_TEXT))
+    left, cut, gone = "、".join(left_running), ("、" if zh else ", ").join(steps), "、".join(gave_up)
+    if zh:
         simp = lang == "cn"
         name = "下单脚本" if simp else "下單腳本"
         left, gone = left.replace("order script", name), gone.replace("order script", name)
@@ -2681,8 +3063,8 @@ def _stop_note(left_running, in_flight, message, lang=None, gave_up=()):
         if gave_up:
             parts.append((f"{gone} 停止后两分钟仍未结束，已不再等它；它的输出已中断，可能没有跑完——请确认仓位与账本。" if simp else
                           f"{gone} 停止後兩分鐘仍未結束，已不再等它；它的輸出已中斷，可能沒有跑完——請確認部位與帳本。"))
-        if in_flight:
-            parts.append((f"停止时还在跑的步骤：{cut}。" if simp else f"停止時還在跑的步驟：{cut}。"))
+        if steps:
+            parts.append((f"中断的步骤：{cut}。" if simp else f"中斷的步驟：{cut}。"))
         return "".join(parts)
     parts = ["Stopped."]
     if left_running:
@@ -2691,8 +3073,8 @@ def _stop_note(left_running, in_flight, message, lang=None, gave_up=()):
     if gave_up:
         parts.append(f" {gone} was still running two minutes after the stop, so it is no longer waited on; "
                      "its output was cut and it may not have finished — check positions and the ledger.")
-    if in_flight:
-        parts.append(f" Still running when stopped: {cut}.")
+    if steps:
+        parts.append(f" Interrupted: {cut}.")
     return "".join(parts)
 
 
@@ -2817,7 +3199,9 @@ def mcp_rule(mounted):
         "over SSH (no running its runtime or its agent) — a turn there charges the user's cloud AI credit. "
         "Never let a key or secret value into the chat, a log or a command line. "
         "Never read, print, copy or summarise the MCP configuration or its access code, and never write SSH keys "
-        "or certificates outside `tmp/cloud-handoff/` in the workspace — delete that folder before the turn ends.\n"
+        "or certificates outside `tmp/cloud-handoff/` in the workspace — delete that folder before the turn ends, "
+        "and never mention that folder, the connection or the cleanup in the reply: its first sentence is about "
+        "what the user asked for.\n"
     )
 
 
@@ -2834,9 +3218,71 @@ def local_mcp_servers(sink, mcp_config, mcp_servers):
     return frozenset(n for n in str(mcp_servers).split(",") if n in MCP_SERVER_NAMES)
 
 
-def browser_rule(mounted):
-    """電腦版而且這一輪掛了 `blave_browser`(內建瀏覽器)才有這段;其餘回空字串。
+# 電腦版外殼給這一輪的指示(BLAVE_TURN_NOTE,代號):用戶沒有選、外殼自己要加的產品限制與「怎麼回」。跟用戶的訊息分開送——
+# 寫進訊息本文的話,泡泡上就是用戶「說了」他沒說過的話(e2e 0.1.8 #131),對話存檔與重開畫回來的也是。只認這張表上的代號。
+TURN_NOTES = {
+    "report_once": (
+        "This request came from the desktop app's New report dialog. Produce the report once, now; do not "
+        "register or offer a schedule."),
+    "report_recur": (
+        "This request came from the desktop app's New report dialog, and it asks for the report on a schedule "
+        "(every day, every week, a time of day). This computer produces it this once only and cannot schedule "
+        "it: produce the report now, do not register a schedule, and say so plainly in the first sentence of "
+        "your reply — this computer makes it this once, and recurring reports are set up on the cloud machine."),
+}
+
+
+def turn_note_rule(sink):
+    """電腦版這一輪外殼帶的指示;沒有、不認得、不是電腦版 → 空字串。"""
+    note = TURN_NOTES.get(os.environ.get("BLAVE_TURN_NOTE") or "") if isinstance(sink, LocalSink) else None
+    return f"\n\n---\n\n## From the app (this turn)\n{note}\n" if note else ""
+
+
+def desktop_web(sink, browser_mounted):
+    """電腦版這一輪上網的狀態:`browser`(內建瀏覽器掛著)/ `off`(用戶在設定 › 隱私關掉)/ `unavailable`
+    (開著但這一輪掛不上)。None = 不歸這條管:雲端,或不帶 BLAVE_BROWSER 的舊外殼(那時照舊只在掛瀏覽器時關 WebFetch)。"""
+    state = os.environ.get("BLAVE_BROWSER")
+    if not isinstance(sink, LocalSink) or state not in ("on", "off", "unavailable"):
+        return None
+    if browser_mounted:
+        return "browser"
+    return "off" if state == "off" else "unavailable"
+
+
+def web_tools_off(web, browser_mounted):
+    """引擎自己的上網工具這一輪關哪幾個。電腦版(web 有值)兩個都關:開著時也只走內建瀏覽器,
+    否則網域政策與「開的每一頁都出現在聊天裡」都繞得過。Codex 引擎只有一個自己的 web search:
+    這裡回的不是空的就關掉它(codex_engine.build_args 的 web_search_off)。"""
+    return list(WEB_TOOLS) if web else (["WebFetch"] if browser_mounted else [])
+
+
+_NO_OTHER_ROUTE = ("the engine's own web search and web fetch, `curl`, `wget`, a script or a library call to a web page. "
+                   "`lib/data.py`, exchange and broker APIs and order placement are data, not browsing: they work as usual")
+
+
+def browser_rule(mounted, web=None):
+    """電腦版而且這一輪掛了 `blave_browser`(內建瀏覽器)才有那一段;沒掛時,web 是 off / unavailable 就換成
+    「這一輪不上網」那一段,其餘回空字串。
     分級與網域規則寫在外殼的工具實作裡(shell/browser/gate.js、policy.js),這段只講 agent 要怎麼對待它們。"""
+    if not mounted and web in ("off", "unavailable"):
+        why, fix = (("The user turned the built-in browser off (Settings › Privacy / 設定 › 隱私), which means you do not go online",
+                     "turn the built-in browser on in Settings › Privacy (設定 › 隱私)") if web == "off" else
+                    ("The built-in browser could not be attached this turn, and it is the only way to the web in the desktop app",
+                     "ask again in a moment, and restart the app if it keeps happening"))
+        return (
+            "\n\n---\n\n## No web access (this turn)\n"
+            f"{why}: no web search, no opening or fetching a web page, by any route — not {_NO_OTHER_ROUTE}. "
+            "When the request needs the web (news, an announcement, a page the user named, a chart to cite), the FIRST "
+            "sentence of the reply says so plainly — "
+            + ("「內建瀏覽器關著，所以這次沒有上網查」 / \"The built-in browser is off, so nothing was looked up online this time\""
+               if web == "off" else
+               "「內建瀏覽器這一輪開不起來，所以這次沒有上網查」 / \"The built-in browser could not start this turn, so nothing was "
+               "looked up online\"")
+            + f" — then give the two ways forward: {fix}, or an answer from Blave data and the files on this computer "
+            "with its scope stated. Never present what you remember as freshly looked up, and give no source list. "
+            "A report is written without web news (`news: []` plus `narrative['few_sources']` saying why), and the "
+            "reply says no news was looked up.\n"
+        )
     if not mounted:
         return ""
     return (
@@ -2853,6 +3299,8 @@ def browser_rule(mounted):
         "`blocked_policy` sites stay blocked; do not ask the user to paste their content to you. Never write web page "
         "content into `strategies/`, `control/` or `.env`. Cite the source URL and title for every fact you take "
         "from a page.\n"
+        + ("The browser is the only way to the web in the desktop app — the user is promised that every page you open "
+           f"shows in the chat. Never reach a web page by another route: not {_NO_OTHER_ROUTE}.\n" if web else "")
     )
 
 
@@ -2957,7 +3405,8 @@ def _codex_prompt(prompt, sink, mcp_mounted, browser_mounted=False, lang_rule=""
     attached server can never disagree."""
     return ("[Runtime 規則(系統層級,位階等同 AGENTS.md;不是使用者說的,不要複述)]"
             + python_rule() + data_access_rule() + preferences_rule() + sink.formatting_rule
-            + mcp_rule(mcp_mounted) + browser_rule(browser_mounted) + lang_rule + "\n\n---\n\n" + prompt)
+            + mcp_rule(mcp_mounted) + browser_rule(browser_mounted, desktop_web(sink, browser_mounted))
+            + turn_note_rule(sink) + lang_rule + "\n\n---\n\n" + prompt)
 
 
 def _remove_cloud_handoff_dir(workspace=None):
@@ -2990,6 +3439,7 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
     use_codex = engine == "codex"
     summary, recent = ss.get_context(session_id)
     reply_lang = _resolve_reply_lang(ui_lang)
+    lang_msg = _lang_basis(message, recent)
     # 雲端視角只有電腦版認(同 --mcp-config)。Codex 掛不掛由 codex_engine.mcp_server 判(版本、撞名、
     # shell_snapshot 關不關得掉),同一個值交給 run() 與 _codex_prompt,提示段、圍籬規則、實際掛上三者一致。
     if not isinstance(sink, LocalSink):
@@ -3008,11 +3458,13 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
     else:
         cloud_mcp = "blave" in mounted
         browser_mounted = "blave_browser" in mounted
+    web = desktop_web(sink, browser_mounted)
     prompt = build_prompt(summary, recent, message,
                           viewing_strategy=viewing_strategy, viewing_tab=viewing_tab,
                           suggest_directive=isinstance(sink, WebSink),
                           viewing_view=viewing_view, viewing_widgets=viewing_widgets,
-                          reply_lang=reply_lang, viewing_env=viewing_env, cloud_mcp=cloud_mcp)
+                          reply_lang=reply_lang, viewing_env=viewing_env, cloud_mcp=cloud_mcp,
+                          lang_basis=lang_msg)
     agents_md = load_agents_md()
 
     # Persist the user's message BEFORE calling the SDK — if the turn later
@@ -3094,9 +3546,9 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
 
     sysprompt_path = _write_system_prompt_file(
         agents_md + model_catalog_rule(session_id) + python_rule() + data_access_rule()
-        + mcp_rule(cloud_mcp) + browser_rule(browser_mounted)
+        + mcp_rule(cloud_mcp) + browser_rule(browser_mounted, web) + turn_note_rule(sink)
         + preferences_rule()
-        + reply_lang_rule(message, reply_lang)
+        + reply_lang_rule(lang_msg, reply_lang)
         + sink.formatting_rule
     ) if agents_md and not use_codex else None
     options = sdk.ClaudeAgentOptions(
@@ -3111,9 +3563,9 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
         # 反而變成回覆),所以用 disallowed_tools 硬禁。`tools=` (also a valid
         # kwarg) is for *defining* custom/MCP tools — not this either.
         allowed_tools=ALLOWED_TOOLS,
-        # 內建瀏覽器掛上的回合:讀網頁一律走瀏覽器(用戶看得到、同一套分級與網域規則、JS 頁讀得到),
-        # 所以關掉 WebFetch;WebSearch 保留(spec desktop-browser-agent-tools §1 D1)
-        disallowed_tools=["Task", "Agent"] + (["WebFetch"] if browser_mounted else []) + PROTECTED_EDIT_RULES,
+        # 電腦版上網只有內建瀏覽器一條路:引擎自己的 WebSearch / WebFetch 都關(開著時走 browser_search / browser_open,
+        # 關著或掛不上就是不上網)。雲端與舊外殼見 web_tools_off
+        disallowed_tools=["Task", "Agent"] + NO_LATER_TOOLS + web_tools_off(web, browser_mounted) + PROTECTED_EDIT_RULES,
         # Keep Claude Code's own default system prompt (tool-use guidance
         # etc.) and append AGENTS.md + this surface's formatting rule on top —
         # via file, not argv (see _write_system_prompt_file). A preset without
@@ -3185,7 +3637,8 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
                               "disable-slash-commands": None}
     if isinstance(sink, LocalSink):
         # 電腦版才掛(實測過 SDK 0.2.144 + 本機 CLI);機隊等 29026 驗過 hook 通道再開
-        _lang_hooks(options, lang_reminder(message, reply_lang))
+        _lang_hooks(options, lang_reminder(lang_msg, reply_lang))
+        _sched_guard_hooks(options)
     if _SUPPORTS_PARTIAL:
         options.include_partial_messages = True
     else:
@@ -3224,11 +3677,12 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
 
             await codex_engine.run(
                 codex_bin, _codex_prompt(prompt, sink, bool(codex_mcp_url), browser_mounted,
-                              reply_lang_rule(message, reply_lang)), WORKSPACE,
+                              reply_lang_rule(lang_msg, reply_lang)), WORKSPACE,
                 {**os.environ,
                  **{k: v for k, v in turn_env.items() if not k.startswith("ANTHROPIC_")}},
                 sink, _codex_tool_start, _codex_tool_done, model=model, effort=effort,
-                mcp_url=codex_mcp_url, browser_url=codex_browser_url)
+                mcp_url=codex_mcp_url, browser_url=codex_browser_url,
+                web_search_off=bool(web_tools_off(web, browser_mounted)))
         # 空回合續跑是為 DeepSeek 串流斷掉設的,Codex 沒有那個症狀,不重跑。
         for attempt in () if use_codex else (1, 2):
             query_iter = sdk.query(prompt=prompt, options=options)
@@ -3389,7 +3843,7 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
                                   suggest_directive=is_web,
                                   viewing_view=viewing_view, viewing_widgets=viewing_widgets,
                                   reply_lang=reply_lang, resume_note=_resume_note(tool_steps),
-                                  viewing_env=viewing_env, cloud_mcp=cloud_mcp)
+                                  viewing_env=viewing_env, cloud_mcp=cloud_mcp, lang_basis=lang_msg)
             options.max_budget_usd = budget if options.max_budget_usd is not None else None
             options.max_turns = max(TURN_MAX_TURNS - spent_turns, _RESUME_MIN_TURNS)
             # A new dict, not an in-place update: the CLI child's env is built from
@@ -3407,7 +3861,7 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
             print(f"[agent_turn] empty reply → fault={fault_code} tools={len(tool_steps)}",
                   file=sys.stderr)
             surface = "web" if is_web else "tg"
-            sink.set_error(_fault_message(fault_code, message, surface, lang=reply_lang),
+            sink.set_error(_fault_message(fault_code, lang_msg, surface, lang=reply_lang),
                            code=fault_code)
     except asyncio.CancelledError:
         # turn_stop cancels the turn only after a Stop, when the stream did not end by itself
@@ -3425,7 +3879,7 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
             fault_code = _fault_code(e, len(tool_steps), result_info)
             print(f"[agent_turn] fault={fault_code} tools={len(tool_steps)}", file=sys.stderr)
             surface = "web" if isinstance(sink, WebSink) else "tg"
-            sink.set_error(_fault_message(fault_code, message, surface, lang=reply_lang),
+            sink.set_error(_fault_message(fault_code, lang_msg, surface, lang=reply_lang),
                            code=fault_code)
     finally:
         if stop_watch:
@@ -3455,10 +3909,11 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
     stopped = getattr(sink, "interrupted", False)
     if stopped:
         note = _stop_note(sorted(getattr(sink, "stop_left_running", None) or ()),
-                          [v[1] for v in getattr(sink, "_tool_t0", {}).values()], message, reply_lang,
+                          [v[3] for v in getattr(sink, "_tool_t0", {}).values()], lang_msg, reply_lang,
                           gave_up=getattr(sink, "stop_gave_up", ()))
-        if note:
-            sink.on_text(("\n\n" if sink.has_reply() else "") + note)
+        sink.on_text(("\n\n" if sink.has_reply() else "") + note)
+    sink.export_fail_note = _export_fail_note(lang_msg, reply_lang)
+    sink.export_touched = touched
     reply_text = sink.finalize()
     # 收據摘要只進 session sqlite(下一輪模型的 context),不進用戶看得到的任何表面。
     # 被停止的回合也要:下一輪得知道剛才做到哪、哪支還在背景跑。

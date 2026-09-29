@@ -32,7 +32,23 @@ const EVENTS = {
     // 雲端群益開通(renderer/capital.js;spec-capital-connect-v2 §5):每開一次框每個名字最多一次,失敗不埋
     "cap_form_saved", "cap_setup_done", "cap_pfx_upload", "cap_sign_open", "cap_ready", "cap_rdp_open",
     // 報告區讀本機報告時從報告推(renderer/reports.js rptTrackKind):內建範本晨報、news block 的管道
-    "morning_tw", "morning_crypto", "news_web", "news_licensed"] },
+    "morning_tw", "morning_crypto", "news_web", "news_licensed",
+    // 報告公開分享(renderer/report-share.js;0.1.8):公開 / 更新成功、取消成功、按「複製連結」
+    "share_publish", "share_revoke", "share_copy",
+    // 策略轉出(renderer/export.js;0.1.8):確認框送出且回合跑起來(依平台)、程式碼分頁複製、下載…存好、在程式碼分頁看轉出檔
+    "export_pine", "export_xq", "export_mc", "export_copy", "export_save", "export_view",
+    // 策略版本(0.1.8;renderer/versions.js):開選單、進時光機、開比較框、還原送出、守門框送出分岔
+    "version_menu", "version_view", "version_compare", "version_restore", "version_fork",
+    // 聊天結果卡(renderer/results.js;0.1.8):按卡上的鈕(報告 / 策略),回合結束自己出卡不算;report_pdf = 報告「存成 PDF」
+    "result_report", "result_strategy", "report_pdf",
+    // 設定 › 公開連結(renderer/report-sharelist.js;0.1.8):切到那個分類、清單畫出來時
+    "share_list_open",
+    // 送進 TradingView(renderer/pine-install.js;0.1.8):按了送進、貼好交接、回傳結果送出、請 agent 修 / 貼送出、找不到編輯器、編譯沒過
+    // tv_read / tv_fix / tv_fail_compile:0.1.8 流程改成停在交接之後沒有送出點(回傳結果、請 agent 修、檢查結果三個入口拿掉);
+    // 名字留著——舊版外殼還在送、api 端照收,兩端逐字比對連順序都比
+    "tv_send", "tv_pasted", "tv_read", "tv_fix", "tv_agent_paste", "tv_fail_editor", "tv_fail_compile",
+    // 內建瀏覽器「用系統瀏覽器開」(renderer/browser.js;0.1.8):按了就記,不記網址
+    "browser_open_ext"] },
 };
 const ONCE = ["app_first_open", "first_backtest_done"];   // 每個安裝只送一次:自己記,不靠 api 去重
 // 每安裝每屬性值每 UTC 日只送一次(契約 §「外殼端同日同 name 也不重送」):送過的記在狀態檔、換日整組清掉。

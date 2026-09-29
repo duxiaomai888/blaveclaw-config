@@ -37,11 +37,14 @@ const KEEP_ROLES = new Set([
   "menuitemradio", "option", "slider", "spinbutton", "listbox", "heading", "listitem", "img", "image", "navigation", "main",
   "search", "form", "dialog", "alertdialog", "tablist", "menu", "table", "row", "cell", "columnheader", "rowheader", "article",
   "PopUpButton", "DisclosureTriangle",
+  // browser_capture 的目標:圖表常包在 <figure>(多半沒有名字)或是一張 <canvas>(AX role 就叫 Canvas)
+  "figure", "Canvas",
 ]);
 const INTERACTIVE = new Set(["link", "button", "textbox", "searchbox", "combobox", "checkbox", "radio", "switch", "tab", "menuitem",
   "menuitemcheckbox", "menuitemradio", "option", "slider", "spinbutton", "listbox", "PopUpButton", "DisclosureTriangle"]);
 const VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
 const MAX_NODES = 400, MAX_CHARS = 15000;
+const WORLD = "blave";   // isolated world 的名字:run() 與新文件腳本(watchEdits)共用
 const KEYS = {
   Enter: { key: "Enter", code: "Enter", vk: 13, text: "\r" }, Tab: { key: "Tab", code: "Tab", vk: 9 }, Escape: { key: "Escape", code: "Escape", vk: 27 },
   ArrowUp: { key: "ArrowUp", code: "ArrowUp", vk: 38 }, ArrowDown: { key: "ArrowDown", code: "ArrowDown", vk: 40 },
@@ -49,6 +52,7 @@ const KEYS = {
   PageUp: { key: "PageUp", code: "PageUp", vk: 33 }, PageDown: { key: "PageDown", code: "PageDown", vk: 34 },
   Home: { key: "Home", code: "Home", vk: 36 }, End: { key: "End", code: "End", vk: 35 },
 };
+const modsOk = (key, mods, platform) => (platform === "darwin" ? key === "ArrowUp" && mods === 4 : key === "Home" && mods === 2);
 const q = (s) => JSON.stringify(String(s).replace(/\s+/g, " ").trim().slice(0, 100));
 
 function createPage(wc) {
@@ -67,6 +71,9 @@ function createPage(wc) {
   async function attach() {
     if (!dbg.isAttached()) dbg.attach("1.3");
     await send("DOM.enable"); await send("Page.enable"); await send("Runtime.enable"); await send("Accessibility.enable");
+    // 用戶改過欄位的紀錄(inpage.watchEdits)要從文件一開始就聽:裝在同名的 isolated world(worldName 同 world() 的,
+    // 同一個 frame 同名就是同一個 world),之後 run() / describe 讀得到它留的記號
+    try { await send("Page.addScriptToEvaluateOnNewDocument", { source: "(" + IP.watchEdits.toString() + ")()", worldName: WORLD }); } catch (_) { /* 舊版沒有:退回只認鍵盤 */ }
     try { mainFrameId = (await send("Page.getFrameTree")).frameTree.frame.id; } catch (_) { /* 等 frameNavigated */ }
   }
   function detach() { if (guardTimer) clearTimeout(guardTimer); guardTimer = null; decide = null; guardOn = false; try { if (dbg.isAttached()) dbg.detach(); } catch (_) { /* 已經分離 */ } }
@@ -110,7 +117,7 @@ function createPage(wc) {
   async function world() {
     if (ctxCache) return ctxCache;
     const tree = await send("Page.getFrameTree");
-    const w = await send("Page.createIsolatedWorld", { frameId: tree.frameTree.frame.id, worldName: "blave", grantUniveralAccess: false });
+    const w = await send("Page.createIsolatedWorld", { frameId: tree.frameTree.frame.id, worldName: WORLD, grantUniveralAccess: false });
     ctxCache = w.executionContextId;
     return ctxCache;
   }
@@ -241,7 +248,10 @@ function createPage(wc) {
   }
   /** opt: { clear(fill 先清空;type 接在後面), perChar(逐字送), delay(每字毫秒) } */
   async function fill(b, text, d, opt) {
-    if (d.isSelect) { const got = await callOn(b, IP.selectOption, [text]); return got === null ? { error: "invalid_args", message: "no option matches; options: " + d.options.slice(0, 20).join(" | ") } : {}; }
+    // 填完記在元素上(isolated world 的 expando):agent 自己填的值不算「用戶改過」(inpage.describe dirty),
+    // 用戶之後在裡面打字 watchEdits 會蓋過這個記號
+    const mine = () => callOn(b, function () { this.__blaveAgentFilled = true; return true; }).catch(() => {});
+    if (d.isSelect) { const got = await callOn(b, IP.selectOption, [text]); if (got !== null) await mine(); return got === null ? { error: "invalid_args", message: "no option matches; options: " + d.options.slice(0, 20).join(" | ") } : {}; }
     await send("DOM.focus", { backendNodeId: b }).catch(() => {});
     // Input.insertText 打進「有焦點的元素」:DOM.focus 對編輯面(Monaco 的 view-lines 一類)是
     // no-op,焦點沒對到就會打進頁面上別的欄位。focusTarget 補 element.focus() 並認可編輯器把
@@ -269,29 +279,43 @@ function createPage(wc) {
       });
       pasteChain = job.catch(() => {});   // 一個失敗不卡死後面的
       await job;
-      return {};
+      await mine(); return {};
     }
-    if (!opt.perChar) { await send("Input.insertText", { text: String(text) }); return {}; }
+    if (!opt.perChar) { await send("Input.insertText", { text: String(text) }); await mine(); return {}; }
     for (const ch of String(text)) { await send("Input.insertText", { text: ch }); await sleep(opt.delay || 35); }
-    return {};
+    await mine(); return {};
   }
-  /** 目前有焦點的元素 → { backendNodeId, desc } 或 null。 */
+  /** 目前有焦點的元素 → { backendNodeId, desc } 或 null(頁面沒有 activeElement、或問不到)。
+      desc.opaque = true:焦點停在一個 closed shadow root 的宿主上——頁內腳本走不進去,真正有焦點的可能是裡面的密碼欄;
+      呼叫端把它跟 iframe 一樣當「看不進去」。 */
   async function focused() {
     const ctx = await world();
-    const r = await send("Runtime.evaluate", { expression: "document.activeElement", contextId: ctx });
+    // 焦點在開放的 shadow root 裡時,document.activeElement 只給到宿主:往裡面走到真正有焦點的那個元素
+    const r = await send("Runtime.evaluate", { expression: "(function () { let e = document.activeElement; for (let i = 0; i < 20 && e && e.shadowRoot && e.shadowRoot.activeElement; i++) e = e.shadowRoot.activeElement; return e; })()", contextId: ctx });
     if (!r.result || !r.result.objectId) return null;
     try {
-      const dn = await send("DOM.describeNode", { objectId: r.result.objectId });
+      // closed shadow root 頁內看不到(e.shadowRoot 是 null),CDP 看得到:pierce 之後宿主節點帶 shadowRoots
+      const dn = await send("DOM.describeNode", { objectId: r.result.objectId, pierce: true });
       const b = dn.node.backendNodeId;
       if (dn.node.nodeName === "BODY" || dn.node.nodeName === "HTML") return { backendNodeId: b, desc: { tag: "body", inForm: false } };
-      return { backendNodeId: b, desc: await describe(b) };
+      const desc = await describe(b);
+      if ((dn.node.shadowRoots || []).some((s) => s.shadowRootType === "closed")) desc.opaque = true;
+      return { backendNodeId: b, desc };
     } finally { send("Runtime.releaseObject", { objectId: r.result.objectId }).catch(() => {}); }
   }
   /** onScreen = false:視窗外的 view 收不到 CDP 的鍵盤事件(同滑鼠,實測),改在頁內做同一件事——
       Enter 在 form 裡 = requestSubmit()(會跑 submit 事件與表單驗證,跟按 Enter 一樣;送出分級在呼叫端已判過),
       翻頁鍵 = 捲動,其餘送一個 KeyboardEvent 給有焦點的元素。 */
-  async function press(key, onScreen) {
+  async function press(key, onScreen, mods) {
     const k = KEYS[key]; if (!k) return { error: "invalid_args" };
+    // mods(CDP modifiers:Ctrl=2 / Meta=4):只有外殼自己的流程會帶(pine.js 把游標移到文件開頭),不經 agent 工具。
+    // 寫死只收「到文件開頭」那一組——帶修飾鍵的真鍵盤能觸發頁面與瀏覽器的快捷鍵,不開放任意組合
+    if (mods !== undefined && mods !== null && mods !== 0) {
+      if (!onScreen || !modsOk(key, mods, process.platform)) return { error: "invalid_args" };
+      await send("Input.dispatchKeyEvent", { type: "keyDown", key: k.key, code: k.code, windowsVirtualKeyCode: k.vk, modifiers: mods });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", key: k.key, code: k.code, windowsVirtualKeyCode: k.vk, modifiers: mods });
+      return {};
+    }
     if (!onScreen) {
       await run(function (key) {
         const el = document.activeElement || document.body;
@@ -334,12 +358,48 @@ function createPage(wc) {
       return r.data;
     } catch (_) { return null; } finally { if (cleanup) await cleanup(); }
   }
+  /** 元素捲進畫面後的外框(可視區 CSS px;多個 quad 取聯集)+ 可視區大小與捲動量。 */
+  async function clipOf(b) {
+    await send("DOM.scrollIntoViewIfNeeded", { backendNodeId: b }).catch(() => {});
+    const { quads } = await send("DOM.getContentQuads", { backendNodeId: b });
+    if (!quads || !quads.length) return { error: "not_visible" };
+    const xs = [], ys = [];
+    for (const qd of quads) { xs.push(qd[0], qd[2], qd[4], qd[6]); ys.push(qd[1], qd[3], qd[5], qd[7]); }
+    const x = Math.min(...xs), y = Math.min(...ys);
+    const m = await send("Page.getLayoutMetrics");
+    const vp = m.cssLayoutViewport || m.layoutViewport;
+    return { box: { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }, view: { w: vp.clientWidth, h: vp.clientHeight, px: vp.pageX || 0, py: vp.pageY || 0 } };
+  }
+  /** 每一點上面是不是別的元素蓋著(擷取用,稽核 B4):true = 被蓋、false = 是目標或它的子孫(同源 iframe 裡的也算)、null = 查不出來。 */
+  async function covered(b, pts) {
+    const out = [];
+    for (const p of pts) {
+      let hitObj, tgtObj;
+      try {
+        const hit = await send("DOM.getNodeForLocation", { x: p.x, y: p.y, includeUserAgentShadowDOM: false, ignorePointerEventsNone: false });
+        if (hit.backendNodeId === b) { out.push(false); continue; }
+        hitObj = await objectFor(hit.backendNodeId); tgtObj = await objectFor(b);
+        const r = await send("Runtime.callFunctionOn", { functionDeclaration: "function(h){for(var n=h;n;){if(this===n||this.contains(n))return true;var w=n.ownerDocument&&n.ownerDocument.defaultView;try{n=w&&w!==window?w.frameElement:null}catch(e){n=null}}return false}", objectId: tgtObj, arguments: [{ objectId: hitObj }], returnByValue: true });
+        out.push(r.exceptionDetails ? null : !r.result.value);
+      } catch (_) { out.push(null); } finally {
+        if (hitObj) send("Runtime.releaseObject", { objectId: hitObj }).catch(() => {}); if (tgtObj) send("Runtime.releaseObject", { objectId: tgtObj }).catch(() => {});
+      }
+    }
+    return out;
+  }
+  /** 只拍 box 那一塊(clip 是文件座標:可視區座標 + 捲動量)。回 base64 PNG 或 null。 */
+  async function captureClip(box, view, scale) {
+    try {
+      const r = await send("Page.captureScreenshot", { format: "png", clip: { x: box.x + view.px, y: box.y + view.py, width: box.w, height: box.h, scale } }, 8000);
+      return r.data || null;
+    } catch (_) { return null; }
+  }
   return {
-    attach, detach, invalidate, guard, guarded: () => guardOn, disarm, run, callOn, describe, snapshot, center, click, fill, focused, press, screenshot, node,
+    attach, detach, invalidate, guard, guarded: () => guardOn, disarm, run, callOn, describe, snapshot, center, click, fill, focused, press, screenshot, node, clipOf, captureClip, covered,
     refCount: () => refs.size,
-    extract: () => run(IP.extract), serp: (engine) => run(IP.serp, [engine]), hasText: (s) => run(IP.hasText, [s]),
+    extract: () => run(IP.extract), serp: (engine, vf) => run(IP.serp, [engine, vf]), hasText: (s) => run(IP.hasText, [s]),
     scroll: (dir, amount, smoothMs) => run(IP.scrollPage, [dir, amount, smoothMs || 0]), lastPos: () => lastPos, progress: () => run(IP.progress), quiet: () => run(IP.quiet),
   };
 }
 
-module.exports = { createPage, KEYS };
+module.exports = { createPage, KEYS, modsOk };

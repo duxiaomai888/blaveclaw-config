@@ -94,7 +94,7 @@ function classify(action, d, key) {
   }
   if (action === "press") {
     if (key !== "Enter") return { ok: true };
-    if (d.tag === "iframe") return { ok: false, error: "needs_user", kind: "action" };   // 焦點在別的 frame 裡:看不到按的是什麼
+    if (d.tag === "iframe" || d.opaque) return { ok: false, error: "needs_user", kind: "action" };   // 焦點在別的 frame / closed shadow root 裡:看不到按的是什麼
     if (buttonLike(d)) return classify("click", d);   // Enter 在按鈕 / 連結上 = 點它,照點擊的分級
     if (sensitiveField(d)) return { ok: false, error: "needs_user", kind: "submit" };
     if (!d.inForm) return { ok: true };   // 不在 form 裡的 Enter:由 POST 後盾接
@@ -110,4 +110,70 @@ function classify(action, d, key) {
   return { ok: false, error: "invalid_args" };
 }
 
-module.exports = { classify, sensitiveField, actionWord, searchContext, editableField, buttonLike, realLink, ACTION_WORDS_EN, ACTION_WORDS_CJK };
+/* browser_capture 的元素大小分級(報告引用圖只收「單一圖表元素」,不收整版截圖)。box / view 是可視區 CSS px。
+   - 小於 80×50:不是圖表(icon、一行字)
+   - 比可視區大:捲不進一個畫面的元素是版面區塊(文章欄、整頁),不是一張圖;也不做 beyond-viewport 擷取
+     (那會改頁面 viewport、整頁 reflow,見 index.js unEmulate)
+   - 寬 ≥90% 且高 ≥85% 可視區,或面積 ≥75% 可視區:等於截整個畫面(只有前一條時 100%×84.9% 也過,稽核 B2)。
+     滿版寬、高度不到 75% 的圖表照收
+   - 捲過之後仍有一部分在可視區外(橫向捲動容器裡):裁出來會是半張圖 */
+const CAPTURE_MIN_W = 80, CAPTURE_MIN_H = 50, CAPTURE_VIEW_W = 0.9, CAPTURE_VIEW_H = 0.85, CAPTURE_VIEW_AREA = 0.75;
+function captureFit(box, view) {
+  if (box.w < CAPTURE_MIN_W || box.h < CAPTURE_MIN_H) return "too_small";
+  if (box.w > view.w + 1 || box.h > view.h + 1) return "too_large";
+  if (box.w >= CAPTURE_VIEW_W * view.w && box.h >= CAPTURE_VIEW_H * view.h) return "too_large";
+  if (box.w * box.h >= CAPTURE_VIEW_AREA * view.w * view.h) return "too_large";
+  if (box.x < -1 || box.y < -1 || box.x + box.w > view.w + 1 || box.y + box.h > view.h + 1) return "not_visible";
+  return null;
+}
+/* 兩次量到的外框差多少(文件座標:可視區座標 + 捲動量;位置與大小取最大的那個差)。超過 CAPTURE_DRIFT_MAX = 版面還在動 */
+const CAPTURE_DRIFT_MAX = 4;
+function captureDrift(a, b) {
+  return Math.max(
+    Math.abs((a.box.x + a.view.px) - (b.box.x + b.view.px)), Math.abs((a.box.y + a.view.py) - (b.box.y + b.view.py)),
+    Math.abs(a.box.w - b.box.w), Math.abs(a.box.h - b.box.h));
+}
+/* 遮擋檢查的取樣點:中心 + 四角(往內縮,避開圓角與邊框)。covered[i]:true = 那一點上面是別的元素、false = 是目標或它的子孫、
+   null = 查不出來(不當成被遮)。中心被遮,或四角有兩個以上被遮 → 拍到的會是橫幅 / 彈窗;
+   只有一角被遮多半是圖表自己旁邊的小鈕,不擋 */
+function capturePoints(box) {
+  const dx = Math.min(12, box.w / 4), dy = Math.min(12, box.h / 4), r = Math.round;
+  return [
+    { x: r(box.x + box.w / 2), y: r(box.y + box.h / 2) },
+    { x: r(box.x + dx), y: r(box.y + dy) }, { x: r(box.x + box.w - dx), y: r(box.y + dy) },
+    { x: r(box.x + dx), y: r(box.y + box.h - dy) }, { x: r(box.x + box.w - dx), y: r(box.y + box.h - dy) },
+  ];
+}
+function captureCovered(covered) {
+  if (!Array.isArray(covered) || !covered.length) return false;
+  return covered[0] === true || covered.slice(1).filter((x) => x === true).length >= 2;
+}
+
+/* 拍到的圖是不是空的 / 被攔腰切斷(擷取的事後檢查)。bm = BGRA 位元組,w × h 像素。
+   "blank" = 整張同一個顏色(圖還沒畫、圖檔一個 byte 都還沒到);"cut" = 底部連續一大片(≥ 1/4 高)每一列都是同一個顏色,
+   而且那個顏色不是上面那一段的底色——圖只畫了上半,下半透出頁面底色(e2e 0.1.8:glassnode 的圖 1360×843,下半整片 #16171b)。
+   null = 看起來是一張完整的圖。深色底的圖表不會中:它底部的空白列跟上面的底色是同一個顏色。
+   四邊各讓 CAPTURE_EDGE px 不看:外框落在半個像素上時,最外圈那一兩列是跟隔壁內容混出來的顏色(實測)。
+   每列每 4 px 取一點;顏色差用三個通道的最大差,CAPTURE_FLAT_TOL 以內算同色(縮圖與壓縮的雜訊) */
+const CAPTURE_FLAT_TOL = 10, CAPTURE_CUT_MIN = 0.25, CAPTURE_CUT_DIFF = 40, CAPTURE_EDGE = 3;
+function captureBlank(bm, w, h) {
+  const m = CAPTURE_EDGE;
+  if (!bm || !(w > 4 * m) || !(h > 4 * m) || bm.length < w * h * 4) return null;
+  const near = (a, b, tol) => Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol;
+  const at = (x, y) => { const i = (y * w + x) * 4; return [bm[i + 2], bm[i + 1], bm[i]]; };
+  // 這一列是不是同一個顏色;是就回那個顏色
+  const flat = (y) => { const c = at(m, y); for (let x = m + 4; x < w - m; x += 4) if (!near(at(x, y), c, CAPTURE_FLAT_TOL)) return null; return c; };
+  const y0 = m, y1 = h - 1 - m, base = flat(y1);
+  if (!base) return null;
+  let top = y1;
+  while (top > y0) { const c = flat(top - 1); if (!c || !near(c, base, CAPTURE_FLAT_TOL)) break; top--; }
+  if (top === y0) return "blank";
+  if (y1 + 1 - top < (y1 + 1 - y0) * CAPTURE_CUT_MIN) return null;
+  // 上面那一段的底色:每 8 列取左右兩端與中間三點,出現最多的那個顏色(量化到 16 階)
+  const seen = new Map();
+  for (let y = y0; y < top; y += 8) for (const x of [m, w >> 1, w - 1 - m]) { const c = at(x, y), k = (c[0] >> 4) + "," + (c[1] >> 4) + "," + (c[2] >> 4); const e = seen.get(k) || { n: 0, c }; e.n++; seen.set(k, e); }
+  let bg = null; for (const e of seen.values()) if (!bg || e.n > bg.n) bg = e;
+  return bg && !near(bg.c, base, CAPTURE_CUT_DIFF) ? "cut" : null;
+}
+
+module.exports = { classify, captureFit, captureDrift, capturePoints, captureCovered, captureBlank, CAPTURE_DRIFT_MAX, sensitiveField, actionWord, searchContext, editableField, buttonLike, realLink, ACTION_WORDS_EN, ACTION_WORDS_CJK };

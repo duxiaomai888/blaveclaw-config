@@ -2,7 +2,7 @@
    web 那份是恆暗、寫死 dark 值;這裡 token 一律換成語意角色(--ink / --ink-2 / --ink-3 / --border-hairline /
    --surface-card / --surface-muted),app 兩態都對。刻意不換的:.is-na 無資訊格的 --color-greyDark(tokens.css 兩態都有)。
    搬運 delta 另有兩處:熱圖 td 加 white-space: nowrap(480 欄會把 +2.1 折成四行;橫捲交給 .rb-heat-wrap)、
-   web 的 768 手機斷點拿掉(桌面中欄最窄 480,由 kpi 的 3+3 網格與表 / 熱圖自己的橫捲承接)。
+   web 的 768 手機斷點拿掉(桌面中欄最窄 480,kpi 由內容欄寬的 container query 承接,表 / 熱圖有自己的橫捲)。
    圖表走 SVG,顏色全部由下方的 class 供給(presentation attribute 吃不到 CSS 變數的引擎差異,一律不用 fill="var(...)")。 */
 
 /* ---------- 閱讀欄 ---------- */
@@ -10,6 +10,7 @@
   max-width: 680px;
   margin: 0 auto;
   color: var(--ink-2);
+  container: rb / inline-size;
 }
 
 /* block 間距一律由 wrapper 給；wrapper 無 padding/border，故與子元素的
@@ -125,6 +126,9 @@
   font-size: 20px;
   font-weight: 500;
   color: var(--ink);
+  /* 數字不從中間斷(斷成兩行會被讀成兩個數字);放不下靠下面的排法,不縮字 */
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .rb-report .rb-kpi-cell.is-focus .rb-kpi-value {
   font-size: 28px;
@@ -134,6 +138,16 @@
   font-weight: 400;
   color: var(--ink-3);
   margin-left: var(--space-4);
+  /* 單位是一個整體:格子放不下時整顆換到下一行,不從字中間斷成「U／SDT」。
+     inline-block 是為了在數字與單位之間留一個可以換行的點(數字那一格已經不准任意斷) */
+  display: inline-block;
+  white-space: nowrap;
+}
+/* 超過 8 個字元的單位(契約上限 16)自己一行:中文 16 個字比最窄的格子寬,nowrap 會伸出格子 */
+.rb-report .rb-kpi-unit.is-long {
+  display: block;
+  margin: var(--space-2) 0 0;
+  white-space: normal;
 }
 /* delta 走值下方第三行(值=現況、delta=變化,兩件事不同排),因此退出寬度計算;
    一格一個色訊號:有 delta 時色在 delta、值是墨色(見下方 .rb-kpi-delta.rb-up/.rb-dn) */
@@ -149,10 +163,28 @@
 /* 有 delta 的格子:漲跌色上在 delta(文字級的 greenText/redText),值維持墨色 */
 .rb-report .rb-kpi-delta.rb-up { color: var(--color-greenText); }
 .rb-report .rb-kpi-delta.rb-dn { color: var(--color-redText); }
-/* 6 格(契約上限)固定折成 3+3 兩排等寬網格,不放任自由 wrap 折出 5+1 孤兒 */
+/* 6 格(契約上限):焦點格在任何寬度都獨佔一列(三等分的格子放不下七位數加單位),其餘五格三等分排成 3+2 */
 .rb-report .rb-kpi.is-n6 .rb-kpi-cell {
   flex: 0 0 calc((100% - var(--space-32) * 2) / 3);
   min-width: 0;
+}
+.rb-report .rb-kpi.is-n6 .rb-kpi-cell.is-focus {
+  flex: 0 0 100%;
+}
+/* 欄數跟著內容欄寬走,不跟視窗寬:中欄最窄 480 時內容欄只有 432 */
+@container rb (max-width: 599px) {
+  .rb-report .rb-kpi {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-16) var(--space-24);
+  }
+  .rb-report .rb-kpi .rb-kpi-cell {
+    min-width: 0;
+  }
+  .rb-report .rb-kpi-cell.is-focus,
+  .rb-report .rb-kpi-cell.is-wide {
+    grid-column: 1 / -1;
+  }
 }
 
 /* ---------- 圖表（SVG） ---------- */
@@ -838,12 +870,32 @@
 .rb-report .rb-image {
   margin-top: var(--space-8);
 }
+/* 高上限 480(≈ 680 欄 × 0.7):直式長圖不吃掉整個閱讀視圖。width:auto 讓 w/h 屬性不再釘住寬——不然 max-height 一夾就變形;
+   等比縮小、靠左、不放大(spec-report-image-cite-0.1.8 §2,全部 image 適用) */
 .rb-report .rb-image img {
   display: block;
   max-width: 100%;
+  max-height: 480px;
+  width: auto;
   height: auto;
   border-radius: var(--radius-lg);
   border: 1px solid var(--border-hairline);
+}
+/* 引用圖的來源行:news 來源連結的語彙(.rb-xlink:名稱常駐底線 + mono 網域),前綴與網域 ink-3;caption 排在它之後、間距收到 4 */
+.rb-report .rb-image-src {
+  margin-top: var(--space-6);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+.rb-report .rb-image-src-l {
+  margin-right: var(--space-8);
+}
+.rb-report .rb-image-src-nm {
+  color: var(--ink-2);
+}
+.rb-report .rb-image.is-cited + .rb-cap {
+  margin-top: var(--space-4);
 }
 /* 破圖 icon 留在報告裡比沒有更糟:就地換成扁平框,內容是 alt(這張圖本來要
    說什麼)。不放 Retry——整頁重載即重試,圖以 sha256 定址,取不到多半是真的不在了 */

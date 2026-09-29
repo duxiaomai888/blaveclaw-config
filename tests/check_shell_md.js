@@ -10,10 +10,11 @@
 // 跑法:node tests/check_shell_md.js(找不到 shell/node_modules 的 Electron 就 SKIP)
 const path = require("path"), fs = require("fs");
 const SHELL = path.join(__dirname, "..", "shell");
+const GATE = require("./_electron_gate");
 
 if (!process.versions.electron) {
-  const bin = path.join(SHELL, "node_modules", ".bin", "electron");
-  if (!fs.existsSync(bin)) { console.log("SKIP  找不到 shell/node_modules 的 Electron(先 cd shell && npm install)"); process.exit(0); }
+  const bin = GATE.bin(SHELL);
+  if (!bin) { process.exit(0); }
   const r = require("child_process").spawnSync(bin, [__filename], { stdio: "inherit" });
   process.exit(r.status == null ? 1 : r.status);
 }
@@ -128,7 +129,7 @@ app.whenReady().then(async () => {
 
   const src = fs.readFileSync(path.join(SHELL, "renderer", "app.js"), "utf8");
   const a0 = src.indexOf("/* ── agent 回覆的顯示"), a1 = src.indexOf("function addMsg(", a0);
-  ok("⑤ 畫 markdown 的那一段沒有 innerHTML / outerHTML / insertAdjacentHTML", a0 > 0 && a1 > a0 && !/innerHTML|outerHTML|insertAdjacentHTML/.test(src.slice(a0, a1)));
+  ok("⑤ 畫 markdown 的那一段(app.js paintAi + md.js 整支)沒有 innerHTML / outerHTML / insertAdjacentHTML", a0 > 0 && a1 > a0 && !/innerHTML|outerHTML|insertAdjacentHTML/.test(src.slice(a0, a1) + fs.readFileSync(path.join(SHELL, "renderer", "md.js"), "utf8")));
 
   console.log(red ? `\n${red} 紅` : "\nALL PASS");
   app.exit(red ? 1 : 0);

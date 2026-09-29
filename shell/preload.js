@@ -9,11 +9,23 @@ contextBridge.exposeInMainWorld("blave", {
   deleteStrategy: (name) => ipcRenderer.invoke("delete-strategy", name),
   listSessions: () => ipcRenderer.invoke("list-sessions"),
   loadSessionImages: (id) => ipcRenderer.invoke("load-session-images", id),
+  // 聊天結果卡(renderer/results.js):每輪一列 { ts, items },主行程驗形狀才落地
+  saveTurnResults: (id, entry) => ipcRenderer.invoke("save-turn-results", id, entry),
+  loadTurnResults: (id) => ipcRenderer.invoke("load-turn-results", id),
   loadSession: (id) => ipcRenderer.invoke("load-session", id),
   deleteSession: (id) => ipcRenderer.invoke("delete-session", id),
   listStrategies: () => ipcRenderer.invoke("list-strategies"),
   loadStrategy: (name) => ipcRenderer.invoke("load-strategy", name),
+  // 轉出檔「下載…」:主行程讀檔 + 開存檔框。ref = { session, id }(對話裡那張卡的快照)或 { strategy, target }(程式碼分頁);不過內容、不過路徑
+  saveExport: (ref) => ipcRenderer.invoke("save-export", ref ? { session: ref.session, id: ref.id, strategy: ref.strategy, target: ref.target } : null),
+  revealExport: (token) => ipcRenderer.invoke("reveal-export", token),   // 只收 saveExport 回的 token
+  loadSessionExports: (id) => ipcRenderer.invoke("load-session-exports", id),
+  // 策略版本(renderer/versions.js):這台電腦讀 strategies/<name>/versions/;雲端走 /cloud/version
+  loadVersion: (name, n) => ipcRenderer.invoke("load-version", name, n),
+  compareVersions: (name, a, b) => ipcRenderer.invoke("compare-versions", name, a, b),
+  cloudVersion: (q) => ipcRenderer.invoke("cloud-version", { name: q && q.name, op: q && q.op, n: q && q.n, a: q && q.a, b: q && q.b }),
   accountStatus: () => ipcRenderer.invoke("account-status"),
+  balance: () => ipcRenderer.invoke("balance"),   // Blave 餘額:{ balance, trial } 或 null(讀不到);憑證在主行程
   planStart: () => ipcRenderer.invoke("plan-start"),
   publicPricing: () => ipcRenderer.invoke("public-pricing"),
   tradeLabels: (labels) => ipcRenderer.send("trade-labels", labels),
@@ -27,6 +39,16 @@ contextBridge.exposeInMainWorld("blave", {
   // 雲端的報告清單 / 本體(renderer/reports.js):主行程打 api、圖換成 data URI 才交過來;force = 送出「新增報告」後的輪詢,跳過 5 分鐘快取
   cloudReports: (force) => ipcRenderer.invoke("cloud-reports", force),
   cloudReport: (id, ver) => ipcRenderer.invoke("cloud-report", id, ver),   // ver = 清單的 stored_at(同 id 覆寫後換一份)
+  // 報告公開分享(renderer/report-share.js):view = "local" | "cloud";回 { code, share?, displayName? }(穩定代號,沒有憑證)
+  shareState: (view, id) => ipcRenderer.invoke("share-state", view, id),
+  sharePublish: (view, id, a) => ipcRenderer.invoke("share-publish", view, id, { byline: a && a.byline, confirmed: !!a && a.confirmed === true, update: !!a && a.update === true }),
+  shareRevoke: (view, id) => ipcRenderer.invoke("share-revoke", view, id),
+  // 設定 › 公開連結(renderer/report-sharelist.js):這個帳號所有公開中的報告;取消只給代碼
+  shareList: () => ipcRenderer.invoke("share-list"),
+  shareRevokeCode: (code) => ipcRenderer.invoke("share-revoke-code", code),
+  // 報告存成 PDF(renderer/report-pdf.js):主行程開存檔框、自己讀報告、自己寫檔;回 { code: OK | CANCELED | BUSY | FAIL };OK 另帶 { dir, token }(token 給 revealExport)
+  reportPdf: (view, id, ver, lang) => ipcRenderer.invoke("report-pdf", view, id, ver, lang),
+  onReportPdfSaving: (fn) => ipcRenderer.on("report-pdf-saving", () => fn()),   // 存檔框按了儲存、開始產
   // 雲端寫入:只有指令名與參數過得來(金鑰不走這支,主行程也拒收);requestId = 重試時沿用上一趟那顆
   cloudSend: (cmd, args, requestId) => ipcRenderer.invoke("cloud-send", cmd, args, requestId),
   // 雲端連交易所:金鑰只走這一支(cloud-send 拒收 credentials);回應只有 { ok, code, detail },沒有金鑰值
@@ -94,6 +116,7 @@ contextBridge.exposeInMainWorld("blave", {
   onEngineProgress: (fn) => ipcRenderer.on("engine-progress", (_e, t) => fn(t)),
   onTurnEvent: (fn) => ipcRenderer.on("turn-event", (_e, c) => fn(c)),
   onTurnEnd: (fn) => ipcRenderer.on("turn-end", (_e, r) => fn(r)),
+  onWindowActive: (fn) => ipcRenderer.on("window-active", (_e, on) => fn(on === true)),
   // 內建瀏覽器(renderer/browser.js):只送分頁 id、中欄 bounds、用戶動作;網址只有用戶在網址列自己打的
   onBrowserEvent: (fn) => ipcRenderer.on("browser-event", (_e, ev) => fn(ev)),
   browserExpand: (id, bounds) => ipcRenderer.invoke("browser-expand", id, bounds),
@@ -105,7 +128,7 @@ contextBridge.exposeInMainWorld("blave", {
   browserNavigate: (id, url) => ipcRenderer.invoke("browser-navigate", id, url),
   browserReload: (id) => ipcRenderer.invoke("browser-reload", id),
   browserOpenLive: (sessionId, snapshotId) => ipcRenderer.invoke("browser-open-live", sessionId, snapshotId),
-  browserShowLive: (url) => ipcRenderer.invoke("browser-show-live", url),   // 點瀏覽卡 / 來源卡:開即時頁(分頁還在就切過去)
+  browserShowLive: (url) => ipcRenderer.invoke("browser-show-live", url),   // 點瀏覽卡:開即時頁(分頁還在就切過去)
   browserSnapshot: (sessionId, snapshotId) => ipcRenderer.invoke("browser-snapshot", sessionId, snapshotId),
   browserHistory: (sessionId) => ipcRenderer.invoke("browser-history", sessionId),
   browserBlockVisible: (on) => ipcRenderer.send("browser-block-visible", on),
@@ -113,4 +136,5 @@ contextBridge.exposeInMainWorld("blave", {
   browserPrefs: () => ipcRenderer.invoke("browser-prefs"),
   browserPrefsSet: (p) => ipcRenderer.invoke("browser-prefs-set", p),
   browserClear: () => ipcRenderer.invoke("browser-clear"),
+  pineInstall: (ref) => ipcRenderer.invoke("pine-install", ref ? { session: ref.session, id: ref.id, strategy: ref.strategy } : null),
 });

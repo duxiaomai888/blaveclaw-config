@@ -315,6 +315,13 @@ function loadAppSecret() {
 function clearAppSecret() {
   try { fs.unlinkSync(appSecretPath()); } catch (_) {}
 }
+/* Blave 餘額(balance.js):電腦版自己的端點,帶帳號 token + app_secret;只回數字給自家畫面,憑證不出主行程。 */
+let _balance = null;
+function balanceHost() {
+  if (!_balance) _balance = require("./balance").createBalance({ apiBase: API_BASE, post: (u, b) => postJSON(u, b),
+    getCreds: () => { const token = loadToken(); return token ? { token, appSecret: loadAppSecret() } : null; } });
+  return _balance;
+}
 /* 啟動雲端方案。回 { state } 或 { error }(穩定代號,畫面自己換成句子):
    APP_SECRET_REQUIRED(舊登入,沒有這顆)/ NO_CARD / NO_CREDIT / RATE_LIMITED / SERVER。
    後端是冪等的:已有主機就回現況,連點或重試不會開第二台。 */
@@ -424,6 +431,7 @@ async function signOutBlave() {
   if (_cloudCmd) _cloudCmd.reset();   // 在途的雲端指令:回應回來時丟掉(它是上一個人的)
   if (_capital) _capital.forget();   // 選好還沒上傳的群益憑證檔:是上一個人的
   if (_mcp) _mcp.reset();       // 接入碼也是:伺服器那邊 /revoke 會撤掉它,這裡把記憶體裡的丟掉、作廢在途的請求
+  if (_balance) _balance.reset();   // 上一個帳號的餘額
   lastAcct = null;
   return { revoked };
 }
@@ -432,10 +440,10 @@ function postJSON(url, body, extra) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const req = require("https").request(url, {
-      ...(extra || {}),   // 目前只有 my_ip 用:{ family: 4 } 強制走 IPv4
+      timeout: 20000,
+      ...(extra || {}),   // my_ip:{ family: 4 } 強制走 IPv4;報告分享的上傳:{ timeout } 放長
       method: "POST",
       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
-      timeout: 20000,
     }, (res) => {
       let buf = "";
       res.on("data", (d) => { buf += d; });
@@ -561,6 +569,7 @@ async function startOAuth(lang) {
   // 換了帳號:cloud.js 自己會認出 token 換了、把上一個人的東西丟掉(不靠這一行);這一行只是讓畫面不必等下一輪輪詢
   if (_cloud && _cloud.isRunning()) _cloud.refresh(true).catch(() => {});
   lastAcct = null;                    // 可能換了一個帳號:上一個帳號的「含不含資料」不能沿用
+  if (_balance) _balance.reset();     // 餘額也是
   libCache = null;                    // 同理:策略庫的 purchased / is_owner 是帳號的
   // 授權是在瀏覽器完成的,焦點還在那邊 —— 自己回到前景,不要讓用戶去找視窗。
   app.focus({ steal: true });
@@ -812,7 +821,8 @@ function stratMeta(code) {
     return m && m[2].trim() ? m[2].trim().slice(0, 200) : null;
   };
   // STRATEGY_NAME:組合的 key 是它(不一定等於資料夾名,runtime `_cmd_delete_strategy` 也照它比)
-  return { displayName: pick("DISPLAY_NAME"), description: pick("DESCRIPTION"), strategyName: pick("STRATEGY_NAME") };
+  // SYMBOL / INTERVAL:轉出的貼上步驟與「加密 → XQ」判斷用(renderer/export.js)
+  return { displayName: pick("DISPLAY_NAME"), description: pick("DESCRIPTION"), strategyName: pick("STRATEGY_NAME"), symbol: pick("SYMBOL"), interval: pick("INTERVAL") };
 }
 
 /* 這支策略程式會不會自己下單(Type B 那一種:AGENTS.md 規定交易所下單一律走 lib/order_*、執行走 lib/execute,
@@ -845,6 +855,11 @@ function stratSelfOrderingAny() {
   return false;
 }
 
+/* 側欄順序 = 最近被人或 agent 動過的在上面:程式碼、明確回測(stats 的 Generated At,秒)、參數掃描。
+   不看 stats.json 的 mtime——上線中的策略每根 K 的 live tick 都重寫它(Generated At 不動),那一支每小時跳回第一,
+   重開 app、切語言重畫時順序就跟著變。舊 stats 沒有 Generated At 才退回檔案時間;同時間照資料夾名,順序才固定 */
+const stratTouchedAt = (x) => Math.max(x.codeMtime || 0, x.scanMtime || 0, x.generatedAt ? x.generatedAt * 1000 : x.statsMtime || 0);
+const stratOrder = (a, b) => stratTouchedAt(b) - stratTouchedAt(a) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 function listStrategies() {
   return stratNames().map((name) => {
     const dir = path.join(STRAT_DIR(), name);
@@ -857,21 +872,37 @@ function listStrategies() {
     let scMtime = 0;
     try { scMtime = fs.statSync(path.join(dir, "scan.json")).mtimeMs; } catch (_) {}
     const touched = Math.max(mtime, sMtime, scMtime);
+    // 三個 mtime 分開交出去:聊天結果卡要分得出這一輪動的是程式碼、回測還是掃描(renderer/results.js)
+    const parts = { codeMtime: mtime, statsMtime: sMtime, scanMtime: scMtime, version: stratVersionNow(dir) };
     const hit = stratCache.get(name);
-    if (hit && hit.mtime === sMtime && hit.cMtime === mtime) return { ...hit.summary, mtime: touched };
+    if (hit && hit.mtime === sMtime && hit.cMtime === mtime) return { ...hit.summary, ...parts, mtime: touched };
     let displayName = null;
     try { displayName = stratMeta(fs.readFileSync(path.join(dir, "strategy.py"), "utf8")).displayName; } catch (_) {}
-    let summary = { name, displayName, hasBacktest: false, sharpe: null, totalReturn: null };
+    let summary = { name, displayName, hasBacktest: false, sharpe: null, totalReturn: null, maxDrawdown: null, generatedAt: null };
     if (sMtime) {
       try {
         const st = JSON.parse(fs.readFileSync(statsPath, "utf8"));
-        summary = { name, displayName, hasBacktest: true, sharpe: num(st["Sharpe Ratio"]), totalReturn: num(st["Total Return [%]"]) };
+        // generatedAt:只有明確回測會重蓋(lib/runner.py _carry_over),live tick 每根 K 重寫 stats.json 但不動它——結果卡靠它認「這一輪跑了回測」
+        summary = { name, displayName, hasBacktest: true, sharpe: num(st["Sharpe Ratio"]), totalReturn: num(st["Total Return [%]"]),
+          maxDrawdown: num(st["Max Drawdown [%]"]), generatedAt: num(st["Generated At"]) };
         tm().track("first_backtest_done");   // 每個安裝只會送出一次(telemetry.js 自己記)
       } catch (_) { /* 寫到一半或壞掉:當成還沒有回測 */ }
     }
     stratCache.set(name, { mtime: sMtime, cMtime: mtime, summary });
-    return { ...summary, mtime: touched };
-  }).sort((a, b) => b.mtime - a.mtime);      // 最近動過的在上面
+    return { ...summary, ...parts, mtime: touched };
+  }).sort(stratOrder);
+}
+// 最新定版的版號(lib/runner.py _mint_version 的 versions/index.json `current`);沒定過版 / 讀不到 = null。照 index 的 mtime 快取
+const stratVerCache = new Map();
+function stratVersionNow(dir) {
+  const p = path.join(dir, "versions", "index.json");
+  let m = 0; try { m = fs.statSync(p).mtimeMs; } catch (_) { stratVerCache.delete(p); return null; }
+  const hit = stratVerCache.get(p);
+  if (hit && hit.m === m) return hit.v;
+  let v = null;
+  try { const idx = JSON.parse(fs.readFileSync(p, "utf8")); v = Number.isInteger(idx && idx.current) && idx.current > 0 ? idx.current : null; } catch (_) { v = null; }
+  stratVerCache.set(p, { m, v });
+  return v;
 }
 
 function loadStrategy(name) {
@@ -883,7 +914,140 @@ function loadStrategy(name) {
   try { scan = JSON.parse(fs.readFileSync(path.join(dir, "scan.json"), "utf8")); } catch (_) {}
   if (!scan || typeof scan !== "object" || Array.isArray(scan)) scan = null;
   try { code = fs.readFileSync(path.join(dir, "strategy.py"), "utf8"); } catch (_) {}
-  return { name, stats, scan, code, dataSources: stratDataSources(dir), ...stratMeta(code) };
+  return { name, stats, scan, code, dataSources: stratDataSources(dir), versions: stratVersions(dir), ...stratMeta(code), exports: stratExports(dir, code), cryptoKline: stratUsesKline(dir) };
+}
+/* 轉出檔(references/{xq-xs,multicharts-powerlanguage,tradingview-pine}.md 存的三個固定檔名)。
+   讀檔規則同 runtime `_read_export`:regular file、≤256KB;讀不到那一份就當沒有(不猜、不報錯)。
+   stale = 策略在轉出之後改過:有 lint 寫的 sidecar 就比 sha256(mtime 會被 git checkout / 複製資料夾誤觸),沒有才比 mtime。 */
+const EXPORT_FILES = { xq: "xq.xs", mc: "mc.txt", pine: "pine.pine" };
+const EXPORT_MAX = 256 * 1024;
+function readExportFile(dir, target) {
+  const p = path.join(dir, "exports", EXPORT_FILES[target]);
+  try {
+    const st = fs.lstatSync(p);
+    if (!st.isFile() || st.size > EXPORT_MAX) return null;
+    const content = fs.readFileSync(p, "utf8");
+    return Buffer.byteLength(content, "utf8") > EXPORT_MAX ? null : { p, content, mtime: st.mtimeMs };
+  } catch (_) { return null; }
+}
+function stratExports(dir, code) {
+  let codeMtime = 0; try { codeMtime = fs.statSync(path.join(dir, "strategy.py")).mtimeMs; } catch (_) {}
+  const sha = require("crypto").createHash("sha256").update(Buffer.from(code || "", "utf8")).digest("hex");
+  const out = [];
+  for (const target of Object.keys(EXPORT_FILES)) {
+    const f = readExportFile(dir, target); if (!f) continue;
+    let meta = null;
+    try { const st = fs.lstatSync(f.p + ".meta.json"); if (st.isFile() && st.size < 4096) meta = JSON.parse(fs.readFileSync(f.p + ".meta.json", "utf8")); } catch (_) {}
+    const hash = meta && typeof meta.source_sha256 === "string" && /^[0-9a-f]{64}$/.test(meta.source_sha256) ? meta.source_sha256 : null;
+    const at = meta && typeof meta.exported_at === "string" ? Date.parse(meta.exported_at) : NaN;
+    out.push({ target, content: f.content, exportedAt: isFinite(at) ? at : f.mtime, stale: hash ? hash !== sha : codeMtime > f.mtime });
+  }
+  return out;
+}
+// 資料夾裡任一支 .py 用到 fetch_kline(Binance USDT-M)= 加密;XQ 沒有加密市場(掃法同 stratDataSources)
+function stratUsesKline(dir) {
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".py")).slice(0, 50); } catch (_) { return false; }
+  return files.some((f) => { try { const p = path.join(dir, f); return fs.lstatSync(p).isFile() && /\bfetch_kline\b/.test(fs.readFileSync(p, "utf8")); } catch (_) { return false; } });
+}
+/* 「下載…」:主行程自己讀檔、自己開存檔框、自己寫。renderer 只給策略名與 target,不給內容、不給路徑
+   (它會渲染 LLM 的文字,不能讓它決定寫哪個檔、寫什麼)。走存檔框而不是直接寫進「下載」:macOS 對直接寫
+   ~/Downloads 會跳一次檔案存取權限,存檔框是用戶自己選的位置、不經那一關。
+   回 { ok, dir, token }:token 給「在 Finder 中顯示」用,只認這裡存過的路徑。 */
+const savedExports = new Map();   // token → 存好的完整路徑(只在記憶體)
+/* ref = { session, id }:對話裡那張卡 → 存的是那一輪轉出時的快照(同 web:卡下載的是那則訊息帶的內容);
+   ref = { strategy, target }:程式碼分頁 → 存的是 workspace 裡現在那一份 */
+async function saveExport(win, ref) {
+  let name, target, f;
+  if (ref && typeof ref.id === "string") {
+    const r = exportById(ref.session, ref.id); if (!r) return { ok: false };
+    name = r.strategy; target = r.target; f = readSnap(r.snap);
+  } else {
+    name = String((ref && ref.strategy) || ""); target = String((ref && ref.target) || "");
+    if (!stratNames().includes(name) || !EXPORT_FILES[target]) return { ok: false };
+    f = readExportFile(path.join(STRAT_DIR(), name), target);
+  }
+  if (!f) return { ok: false };
+  const ext = EXPORT_FILES[target].split(".").pop();
+  const r = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath("downloads"), `${name}_${target}.${ext}`) });
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+  try { fs.writeFileSync(r.filePath, f.content, "utf8"); } catch (_) { return { ok: false }; }
+  return { ok: true, ...savedRef(r.filePath) };
+}
+// 剛存好的那個檔 → { dir, token }:畫面只拿資料夾名與 token,「在 Finder 中顯示」憑 token 回來找路徑(轉出卡與報告 PDF 共用)
+function savedRef(filePath) {
+  const token = require("crypto").randomBytes(8).toString("hex");
+  savedExports.set(token, filePath);
+  if (savedExports.size > 50) savedExports.delete(savedExports.keys().next().value);
+  const dir = path.dirname(filePath);   // 「下載」回 null:資料夾在磁碟上叫 Downloads,Finder 顯示的是系統語言的名字,由畫面翻
+  return { dir: dir === app.getPath("downloads") ? null : path.basename(dir), token };
+}
+/* 策略版本(.claude/docs/strategy-versions.md §9):lib/runner.py 的 _mint_version 寫進 strategies/<資料夾>/versions/。
+   摘要清單的形狀 = runtime strategy_reporter._read_versions(雲端視角從 /cloud/strategy 拿到的同一顆),renderer 用同一套畫。
+   讀不到 / 沒定過版 = null(畫面就是沒有版本介面)。items 逐筆只驗是物件,欄位型別由 renderer 的 strategy_versions.js 驗 */
+function stratVersions(dir) {
+  const vdir = path.join(dir, "versions");
+  let idx = null;
+  try { idx = JSON.parse(fs.readFileSync(path.join(vdir, "index.json"), "utf8")); } catch (_) { return null; }
+  if (!idx || typeof idx !== "object" || !Array.isArray(idx.items)) return null;
+  return { counter: idx.counter, current: idx.current, items: idx.items.filter((i) => i && typeof i === "object" && !Array.isArray(i)),
+    drift: fs.existsSync(path.join(vdir, "drift.json")) };
+}
+// 版號只收正整數(api agent_strategy_versions.MAX_VERSION_N 同一個上限):renderer 給的東西進 path.join 之前先過這關
+const versionN = (n) => (Number.isInteger(n) && n > 0 && n <= 1000000 ? n : null);
+/* 單版 blob(v<N>.json)。回 { code: "OK", blob } | { code: "ERROR" }:這台電腦沒有「還在同步」這一態——
+   檔案就在磁碟上,讀不到只會是寫到一半、壞掉,或已經被 20 版的保留砍掉 */
+function loadVersion(name, n) {
+  const v = versionN(n);
+  if (v === null || !stratNames().includes(name)) return { code: "ERROR" };
+  try {
+    const b = JSON.parse(fs.readFileSync(path.join(STRAT_DIR(), name, "versions", `v${v}.json`), "utf8"));
+    return b && typeof b === "object" && !Array.isArray(b) ? { code: "OK", blob: b } : { code: "ERROR" };
+  } catch (_) { return { code: "ERROR" }; }
+}
+/* 兩版的程式碼差異:跑 Python 的 difflib,跟 api 的 compare 端點(agent_strategy_versions._code_lines / _hunks)同演算法、
+   同上限——兩個視角比同一對碼,差異行才一樣。-I:不讀環境變數與 user site;碼走 stdin,輸出 ensure_ascii(Windows 的 stdout 編碼不影響) */
+const VERSION_DIFF_PY = [
+  "import difflib, json, re, sys",
+  "HUNK = re.compile(r'^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@')",
+  "def lines(code):",
+  "    if not isinstance(code, str): return [], False",
+  "    ls = code.splitlines()",
+  "    return ls[:20000], len(ls) > 20000",
+  "src = json.loads(sys.stdin.buffer.read().decode('utf-8'))",
+  "a, a_cut = lines(src.get('a'))",
+  "b, b_cut = lines(src.get('b'))",
+  "out, total, cut = [], 0, False",
+  "for line in difflib.unified_diff(a, b, lineterm='', n=3):",
+  "    m = HUNK.match(line)",
+  "    if m:",
+  "        out.append({'a_start': int(m.group(1)), 'a_count': int(m.group(2) if m.group(2) is not None else 1),",
+  "                    'b_start': int(m.group(3)), 'b_count': int(m.group(4) if m.group(4) is not None else 1), 'lines': []})",
+  "        continue",
+  "    if not out: continue",
+  "    if total >= 5000:",
+  "        cut = True",
+  "        break",
+  "    out[-1]['lines'].append([{'+': 'add', '-': 'del'}.get(line[:1], 'ctx'), line[1:]])",
+  "    total += 1",
+  "print(json.dumps({'hunks': out, 'truncated': bool(a_cut or b_cut or cut)}))",
+].join("\n");
+const VERSION_META_KEYS = ["n", "at", "note", "code_hash", "ret", "sharpe", "sortino", "mdd", "trades", "mcpt_p", "start", "end"];
+// 回 { code: "OK", data: api compare 端點同形狀 { strategy, a, b, hunks, truncated } } | { code: "ERROR" }
+function compareVersions(name, a, b) {
+  const A = loadVersion(name, a), B = loadVersion(name, b);
+  if (A.code !== "OK" || B.code !== "OK") return Promise.resolve({ code: "ERROR" });
+  const meta = (blob, n) => { const o = {}; VERSION_META_KEYS.forEach((k) => { o[k] = blob[k] === undefined ? null : blob[k]; }); o.n = n; return o; };
+  const py = fs.existsSync(VENV_PY) ? VENV_PY : basePython();
+  return new Promise((resolve) => {
+    const cp = execFile(py, ["-I", "-c", VERSION_DIFF_PY], { timeout: 15000, maxBuffer: 16 * 1024 * 1024, windowsHide: true, env: { ...process.env, ...PY_ENV } }, (err, stdout) => {
+      let d = null;
+      try { d = err ? null : JSON.parse(String(stdout)); } catch (_) { d = null; }
+      resolve(d && Array.isArray(d.hunks) ? { code: "OK", data: { strategy: name, a: meta(A.blob, a), b: meta(B.blob, b), hunks: d.hunks, truncated: d.truncated === true } } : { code: "ERROR" });
+    });
+    cp.stdin.on("error", () => {});
+    cp.stdin.end(JSON.stringify({ a: A.blob.code, b: B.blob.code }));
+  });
 }
 /* 這支策略用到哪些自帶資料來源(`DATA_<來源>_<欄位>`)。掃的是資料夾內**所有 .py**,對齊 references/cloud-handoff.md §5 的
    `grep -oE "DATA_[A-Z0-9]+_" strategies/<name>/*.py` —— 只掃 strategy.py 的話,helper 檔用到的來源會被漏講(稽核 C1)。
@@ -968,9 +1132,63 @@ function deleteSession(id) {
     db.prepare("DELETE FROM turns WHERE session_id = ?").run(id);
     db.prepare("DELETE FROM session_meta WHERE session_id = ?").run(id);
     try { fs.rmSync(path.join(IMG_DIR, id), { recursive: true, force: true }); } catch (_) { /* 圖刪不掉不擋 */ }
+    try { fs.rmSync(path.join(RES_DIR, id), { recursive: true, force: true }); } catch (_) { /* 結果卡同上 */ }
     try { fs.rmSync(path.join(BASE, "state", "browser-snapshots", id), { recursive: true, force: true }); } catch (_) { /* 瀏覽器快照同上 */ }
+    try { fs.rmSync(path.join(XP_DIR, id), { recursive: true, force: true }); } catch (_) { /* 轉出卡的快照同上 */ }
     return true;
   } catch (_) { return false; } finally { db.close(); }
+}
+
+/* ── 聊天結果卡(renderer/results.js;spec-desktop-result-card-0.1.8 §7)──────────────
+   session.db 只存文字,同聊天圖 / 轉出卡:state/chat-results/<session>/index.jsonl,一列 = 一輪 { ts: 回合結束, items }。
+   雲端報告晚到 = 同一個 ts 再 append 一列,讀的時候併回那一輪。存的是原始值(數字、時間戳、key),字由 renderer 現組。
+   畫面會把這些字畫出來(標題是 agent 寫的):這裡只擋形狀與長度,畫面一律 textContent */
+const RES_DIR = path.join(BASE, "state", "chat-results");
+const RES_KINDS = ["report", "strategy"], RES_ENVS = ["local", "cloud"], RES_SUBS = ["report", "new", "backtest", "scan", "code", "cloud"];
+const RES_MAX_ITEMS = 20, RES_MAX_LINES = 2000, RES_FILE_MAX = 2 * 1024 * 1024;
+const resStr = (v, max) => typeof v === "string" && v.length > 0 && v.length <= max;
+function resItemOk(x) {
+  if (!x || typeof x !== "object" || Array.isArray(x)) return null;
+  if (!RES_KINDS.includes(x.kind) || !RES_ENVS.includes(x.env) || !RES_SUBS.includes(x.sub) || !resStr(x.ref, 200) || !resStr(x.title, 200)) return null;
+  const ver = typeof x.ver === "number" && isFinite(x.ver) ? x.ver : resStr(x.ver, 200) ? x.ver : null;
+  const facts = {};
+  if (x.facts && typeof x.facts === "object" && !Array.isArray(x.facts)) {
+    for (const [k, v] of Object.entries(x.facts).slice(0, 16)) {
+      if (!/^[a-z_]{1,24}$/.test(k)) continue;
+      if (v === null || typeof v === "boolean" || (typeof v === "number" && isFinite(v)) || (typeof v === "string" && v.length <= 64)) facts[k] = v;
+    }
+  }
+  return { kind: x.kind, env: x.env, ref: x.ref, ver, sub: x.sub, title: x.title, facts, at: typeof x.at === "number" && isFinite(x.at) ? x.at : 0 };
+}
+function saveTurnResults(id, entry) {
+  if (!okSessionId(id) || !entry || !(Number(entry.ts) > 0) || !Array.isArray(entry.items)) return false;
+  const items = entry.items.slice(0, RES_MAX_ITEMS).map(resItemOk).filter(Boolean);
+  if (!items.length) return false;
+  const dir = path.join(RES_DIR, id), file = path.join(dir, "index.jsonl");
+  try {
+    let size = 0; try { size = fs.statSync(file).size; } catch (_) { /* 還沒有 */ }
+    if (size > RES_FILE_MAX) return false;   // 撐爆的對話不再記:卡這一輪照畫,只是重開不回來
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(file, JSON.stringify({ ts: Number(entry.ts), items }) + "\n", { mode: 0o600 });
+    return true;
+  } catch (_) { return false; }
+}
+// 舊對話的結果卡:[{ ts, items }],同一個 ts 的列併成一輪(照寫入順序)
+function loadTurnResults(id) {
+  if (!okSessionId(id)) return [];
+  let lines = [];
+  try { lines = fs.readFileSync(path.join(RES_DIR, id, "index.jsonl"), "utf8").split("\n").filter(Boolean).slice(-RES_MAX_LINES); } catch (_) { return []; }
+  const by = new Map();
+  for (const l of lines) {
+    try {
+      const r = JSON.parse(l), ts = Number(r.ts);
+      if (!(ts > 0) || !Array.isArray(r.items)) continue;
+      const items = r.items.slice(0, RES_MAX_ITEMS).map(resItemOk).filter(Boolean);
+      if (!by.has(ts)) by.set(ts, []);
+      by.get(ts).push(...items);
+    } catch (_) { /* 壞掉的一列跳過 */ }
+  }
+  return [...by].map(([ts, items]) => ({ ts, items }));
 }
 
 // ── 聊天裡的圖 ─────────────────────────────────────────
@@ -1035,6 +1253,75 @@ function loadSessionImages(id) {
   return out;
 }
 
+/* ── 聊天裡的轉出卡(runtime 的 export chunk)──────────────────────
+   web 把 export 跟那則訊息一起存(history 的 exports[]),重開照畫;session.db 是 runtime 的、只存文字,所以同聊天圖:
+   state/chat-exports/<session>/ 放那一輪轉出時的快照 + index.jsonl。index 在回合結束才寫、ts = 結束時間:
+   排在那一輪回覆(runtime 在結束前寫進逐字稿)之後,renderer 照時間把卡掛回那則回覆下面。
+   recentExports = 這次開 app 以來每支策略每個平台最新那一份:給主行程其他地方讀(之後內建瀏覽器「裝進 TradingView」要檔案路徑)。
+   路徑一律由策略名 + 固定檔名重建,不信 chunk 給的字。 */
+const XP_DIR = path.join(BASE, "state", "chat-exports");
+const XP_ID_RE = /^[0-9]{13}-[0-9]{1,6}$/;
+const recentExports = new Map();   // `${strategy}:${target}` → { id, sessionId, strategy, target, filename, size, src(workspace 檔), snap(快照) }
+let xpSeq = 0;
+function noteExport(c, sid) {
+  if (!c || !EXPORT_FILES[c.target] || typeof c.strategy !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(c.strategy) || typeof c.content !== "string" || !okSessionId(sid)) return null;
+  const size = Buffer.byteLength(c.content, "utf8"); if (!size || size > EXPORT_MAX) return null;
+  const ext = EXPORT_FILES[c.target].split(".").pop(), id = `${Date.now()}-${++xpSeq}`, dir = path.join(XP_DIR, sid);
+  try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, `${id}.${ext}`), c.content, { encoding: "utf8", mode: 0o600 }); } catch (_) { return null; }
+  const rec = { id, sessionId: sid, strategy: c.strategy, target: c.target, filename: `${c.strategy}_${c.target}.${ext}`, size,
+    src: path.join(STRAT_DIR(), c.strategy, "exports", EXPORT_FILES[c.target]), snap: path.join(dir, `${id}.${ext}`) };
+  recentExports.set(c.strategy + ":" + c.target, rec);
+  return rec;
+}
+function flushExports(sid, recs) {
+  if (!recs.length || !okSessionId(sid)) return;
+  const ts = Date.now() / 1000;
+  try { fs.appendFileSync(path.join(XP_DIR, sid, "index.jsonl"), recs.map((r) => JSON.stringify({ ts, id: r.id, target: r.target, strategy: r.strategy, size: r.size }) + "\n").join("")); } catch (_) { /* 寫不進去:這一輪的卡重開不會回來,檔案仍在策略資料夾 */ }
+}
+function sessionExports(sid) {
+  if (!okSessionId(sid)) return [];
+  let lines = [];
+  try { lines = fs.readFileSync(path.join(XP_DIR, sid, "index.jsonl"), "utf8").split("\n").filter(Boolean); } catch (_) { return []; }
+  const out = [];
+  for (const l of lines) {
+    try {
+      const r = JSON.parse(l);
+      if (!XP_ID_RE.test(r.id) || !EXPORT_FILES[r.target] || !/^[A-Za-z0-9_-]{1,64}$/.test(r.strategy) || !(Number(r.ts) > 0)) continue;
+      const ext = EXPORT_FILES[r.target].split(".").pop();
+      out.push({ ts: Number(r.ts), id: r.id, target: r.target, strategy: r.strategy, filename: `${r.strategy}_${r.target}.${ext}`,
+        size: Number(r.size) || 0, snap: path.join(XP_DIR, sid, `${r.id}.${ext}`), src: path.join(STRAT_DIR(), r.strategy, "exports", EXPORT_FILES[r.target]) });
+    } catch (_) { /* 壞掉的一列跳過 */ }
+  }
+  return out;
+}
+// 舊對話的轉出卡:[{ts, id, target, strategy, filename, size}](路徑不交給畫面)
+function loadSessionExports(sid) { return sessionExports(sid).map(({ ts, id, target, strategy, filename, size }) => ({ ts, id, target, strategy, filename, size })); }
+function exportById(sid, id) { return typeof id === "string" && XP_ID_RE.test(id) ? sessionExports(sid).find((r) => r.id === id) || null : null; }
+// 主行程其他地方讀這一份:這支策略這個平台最近一次轉出(這次開 app 以來);沒有就回 null
+function exportRef(strategy, target) { return recentExports.get(strategy + ":" + target) || null; }
+/* 「送進 TradingView」要貼的那一份(renderer 只給 ref,檔案與商品週期由這裡讀):
+   ref = { session, id } → 對話那張卡當時的快照;ref = { strategy } → workspace 裡現在那一份(程式碼分頁看到的)。
+   SYMBOL / INTERVAL 讀 strategy.py 的頂層常數,只拿去組圖表網址 */
+function pineJob(ref) {
+  let name, f, filename;
+  if (ref && typeof ref.id === "string") {
+    const r = exportById(ref.session, ref.id); if (!r || r.target !== "pine") return null;
+    name = r.strategy; f = readSnap(r.snap); filename = r.filename;
+  } else {
+    name = String((ref && ref.strategy) || ""); if (!stratNames().includes(name)) return null;
+    const rec = exportRef(name, "pine");
+    f = readExportFile(path.join(STRAT_DIR(), name), "pine"); filename = rec ? rec.filename : `${name}_pine.pine`;
+  }
+  if (!f) return null;
+  const dir = path.join(STRAT_DIR(), name);
+  let code = ""; try { code = fs.readFileSync(path.join(dir, "strategy.py"), "utf8"); } catch (_) { /* 策略刪了:不帶商品 */ }
+  const meta = stratMeta(code);
+  return { content: f.content, strategy: name, filename, symbol: meta.symbol, interval: meta.interval, cryptoKline: stratUsesKline(dir) };
+}
+function readSnap(p) {
+  try { const st = fs.lstatSync(p); if (!st.isFile() || st.size > EXPORT_MAX) return null; return { p, content: fs.readFileSync(p, "utf8"), mtime: st.mtimeMs }; } catch (_) { return null; }
+}
+
 /* ── 報告(renderer/reports.js;spec-desktop-0.1.6 §1.1)────────────────────────────
    本機視角的「袋」就是檔案系統:agent 照 references/reports.md 把報告寫進 <WS>/reports/<id>.json、圖放 <id>.files/。
    電腦版的 local_daemon 沒有起 report_uploader,所以報告永遠留在 drop dir、image block 永遠是 file 不是 sha256;
@@ -1042,25 +1329,28 @@ function loadSessionImages(id) {
    檔名 regex、2 MB 上限、mime 白名單都在這一層;block 內容不驗(那是 api 的事,渲染器對不認得的 block 本來就跳過)。 */
 const RPT_DIR = () => path.join(WS, "reports");
 const RPT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/, RPT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
-const RPT_BYTES_MAX = 2 * 1024 * 1024, RPT_MAX = 200, RPT_IMAGES_MAX = 20, RPT_TITLE_MAX = 200, RPT_TYPE_MAX = 32;
+const RPT_BYTES_MAX = 2 * 1024 * 1024, RPT_MAX = 200, RPT_IMAGES_MAX = 20, RPT_TITLE_MAX = 200, RPT_TYPE_MAX = 32, RPT_LABEL_MAX = 40;   // label 上限同 api 驗證器給 meta.report_type 的 40
 const RPT_TS_MIN = 946684800, RPT_TS_MAX = 4102444800;   // created_at 只認 2000–2100 年的 unix 秒:agent 寫的 1e13 會讓 renderer 畫出 NaN
 const RPT_IMAGES_BUDGET_MS = 60 * 1000, RPT_CLOUD_DOCS_MAX = 8;   // 雲端一份報告的圖加總最多等 60 秒(postJSON 單張 20 秒逾時 × 20 張太久);本體快取留 8 份(每份含 base64 圖)
 const RPT_EXT_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
 // 一份報告的信封(清單只讀這幾欄):id 缺就用檔名、有且不同 → 略過(同 uploader 的立場);標題 1–200 字,缺 → 略過;created_at 不是合理範圍的整數 → 檔案 mtime。
-// mtime(ms)一併交出:同 id 覆寫(lib/report.py 明寫重用 id = 覆蓋)renderer 靠它認出「這份換過了」——本體快取與「有沒有新報告」都比它
+// mtime(ms)一併交出:報告不覆寫(lib/report.py:id 已有報告就寫成 <id>-2),同一個檔只會被同一輪的 replace=True 或手寫檔案換掉——renderer 靠 mtime 認出「這份換過了」,本體快取與「有沒有新報告」都比它
+// label = 閱讀頁類型標籤畫的那個字(meta.report_type,agent 寫的顯示字,如「單標的晨報」):結果卡要跟它同一個字;沒有 → null
 function rptEnvelope(fileId, doc, mtimeMs) {
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) return null;
   if (doc.id !== undefined && doc.id !== fileId) return null;
   const title = typeof doc.title === "string" ? doc.title.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, RPT_TITLE_MAX) : "";
   if (!title) return null;
   const created = Number.isInteger(doc.created_at) && doc.created_at >= RPT_TS_MIN && doc.created_at <= RPT_TS_MAX ? doc.created_at : Math.floor(mtimeMs / 1000);
-  return { id: fileId, title, type: typeof doc.type === "string" ? doc.type.slice(0, RPT_TYPE_MAX) : null, created_at: created, mtime: Math.floor(mtimeMs) };
+  const meta = Array.isArray(doc.blocks) && doc.blocks[0] && typeof doc.blocks[0] === "object" && doc.blocks[0].type === "meta" ? doc.blocks[0] : null;
+  const label = meta && typeof meta.report_type === "string" ? meta.report_type.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, RPT_LABEL_MAX) : "";
+  return { id: fileId, title, type: typeof doc.type === "string" ? doc.type.slice(0, RPT_TYPE_MAX) : null, label: label || null, created_at: created, mtime: Math.floor(mtimeMs) };
 }
-// 讀一份 <dir>/<id>.json:不是普通檔 / 超過 2 MB / JSON 壞 → null
+// 讀一份 <dir>/<id>.json:不是普通檔(symlink 也不收:分享會把讀到的東西公開出去)/ 超過 2 MB / JSON 壞 → null
 function rptReadDoc(dir, id) {
   const f = path.join(dir, id + ".json");
   let st = null;
-  try { st = fs.statSync(f); } catch (_) { return null; }
+  try { st = fs.lstatSync(f); } catch (_) { return null; }
   if (!st.isFile() || st.size > RPT_BYTES_MAX) return null;
   try { const doc = JSON.parse(fs.readFileSync(f, "utf8")); return doc && typeof doc === "object" && !Array.isArray(doc) ? { doc, mtimeMs: st.mtimeMs } : null; } catch (_) { return null; }
 }
@@ -1083,17 +1373,19 @@ function reportsList() {
   out.sort((a, b) => b.created_at - a.created_at);
   return { reports: out.slice(0, RPT_MAX) };
 }
-// 本機一張圖 → data URI:file 只能是檔名(不含路徑)、副檔名決定 mime、≤ 2 MB;任一條不合就當沒有這張(渲染器畫失敗框)
-function rptImageUri(dir, id, file) {
+// 本機一張圖 → { mime, b64 }:file 只能是檔名(不含路徑)、副檔名決定 mime、≤ 2 MB;任一條不合就當沒有這張(渲染器畫失敗框)
+function rptImageB64(dir, id, file) {
   if (typeof file !== "string" || !RPT_FILE_RE.test(file)) return null;
   const mime = RPT_EXT_MIME[file.slice(file.lastIndexOf(".") + 1).toLowerCase()];
   if (!mime || file.indexOf(".") < 0) return null;
   try {
-    const f = path.join(dir, id + ".files", file), st = fs.statSync(f);
-    if (!st.isFile() || st.size === 0 || st.size > RPT_BYTES_MAX) return null;
-    return `data:${mime};base64,${fs.readFileSync(f).toString("base64")}`;
+    // lstat:圖檔或 <id>.files 是 symlink 就當沒有這張——跟過去讀,分享時會把 workspace 外的檔公開出去(稽核 P2-5)
+    const d = path.join(dir, id + ".files"), f = path.join(d, file), st = fs.lstatSync(f);
+    if (!fs.lstatSync(d).isDirectory() || !st.isFile() || st.size === 0 || st.size > RPT_BYTES_MAX) return null;
+    return { mime, b64: fs.readFileSync(f).toString("base64") };
   } catch (_) { return null; }
 }
+function rptImageUri(dir, id, file) { const im = rptImageB64(dir, id, file); return im ? `data:${im.mime};base64,${im.b64}` : null; }
 function reportLoad(id) {
   if (typeof id !== "string" || !RPT_ID_RE.test(id)) return null;
   for (const dir of rptDirs()) {
@@ -1110,6 +1402,95 @@ function reportLoad(id) {
     return { report: r.doc, images, mtime: Math.floor(r.mtimeMs) };
   }
   return null;
+}
+/* 分享本機報告(reportshare.js 的 readLocal):本體原樣 + image block 引用的 sidecar 圖 { 檔名: base64 }。
+   跟 reportLoad 同一套檔名 / 大小規則;缺的圖不補——api 會回 400 指名哪張,比默默少一張圖上公開頁誠實 */
+function reportForShare(id) {
+  if (typeof id !== "string" || !RPT_ID_RE.test(id)) return null;
+  for (const dir of rptDirs()) {
+    const r = rptReadDoc(dir, id);
+    if (!r || !rptEnvelope(id, r.doc, r.mtimeMs)) continue;
+    const images = {};
+    let n = 0;
+    for (const b of Array.isArray(r.doc.blocks) ? r.doc.blocks : []) {
+      if (!b || typeof b !== "object" || b.type !== "image" || typeof b.file !== "string" || images[b.file] !== undefined) continue;
+      if (++n > RPT_IMAGES_MAX) break;
+      const im = rptImageB64(dir, id, b.file);
+      if (im) images[b.file] = im.b64;
+    }
+    return { report: r.doc, images, mtime: Math.floor(r.mtimeMs) };
+  }
+  return null;
+}
+// 同 runtime/report_uploader.py log_error 的格式與上限:agent 用 lib.report.status(id) 讀得到同一行
+const RPT_ERRLOG_MAX = 64 * 1024, RPT_ERRLOG_KEEP = 200;
+function rptLogError(id, message) {
+  const f = path.join(RPT_DIR(), "upload_errors.log");
+  fs.mkdirSync(RPT_DIR(), { recursive: true });
+  fs.appendFileSync(f, new Date().toISOString().replace(/\.\d+Z$/, "Z") + " " + id + ": " + String(message).replace(/\s+/g, " ") + "\n");
+  if (fs.statSync(f).size > RPT_ERRLOG_MAX) fs.writeFileSync(f, fs.readFileSync(f, "utf8").split("\n").filter(Boolean).slice(-RPT_ERRLOG_KEEP).join("\n") + "\n");
+}
+const SHARE_UPLOAD_TIMEOUT_MS = 90 * 1000;   // 本機報告最多 20 張圖:api 逐張存完才回
+let _share = null;
+function shareClient() {
+  const RS = require("./reportshare");
+  if (!_share) _share = RS.createShareClient({
+    apiBase: API_BASE, post: (u, b) => postJSON(u, b, /\/share\/(publish|update)$/.test(u) ? { timeout: SHARE_UPLOAD_TIMEOUT_MS } : undefined), readLocal: reportForShare,
+    logError: rptLogError, log: (m) => console.error("[share] " + m), store: RS.createShareStore(path.join(BASE, "state", "report-shares.json")),
+    getCreds: () => { const token = loadToken(); return token ? { token, appSecret: loadAppSecret() } : null; },
+  });
+  return _share;
+}
+/* 設定 › 公開連結(renderer/report-sharelist.js):api 的清單 + 「desktop 袋那一份在不在這台電腦」(api 不知道,這裡看檔)。 */
+const rptLocalHas = (id) => typeof id === "string" && RPT_ID_RE.test(id) && rptDirs().some((dir) => { const r = rptReadDoc(dir, id); return !!(r && rptEnvelope(id, r.doc, r.mtimeMs)); });
+async function shareList() {
+  const r = await shareClient().list();
+  if (r.code !== "OK") return r;
+  return { code: "OK", limits: r.limits, shares: r.shares.map((x) => ({ ...x, local: x.origin === "desktop" && rptLocalHas(x.reportId) })) };
+}
+/* 報告存成 PDF(reportpdf.js;spec-report-pdf-0.1.8):看不見的視窗載 renderer/report-print.html、printToPDF、寫到用戶在存檔框選的位置。
+   報告本體由主行程自己讀(renderer 只給 view / id / 語言);上次存的資料夾記在 userData 的 ui-prefs.json(只記這一條路徑)。 */
+const uiPrefsPath = () => path.join(app.getPath("userData"), "ui-prefs.json");
+function pdfDirGet() {
+  try {
+    const d = JSON.parse(fs.readFileSync(uiPrefsPath(), "utf8")).pdfDir;
+    return typeof d === "string" && path.isAbsolute(d) && fs.statSync(d).isDirectory() ? d : null;
+  } catch (_) { return null; }   // 沒存過 / 資料夾不在了:回「下載項目」
+}
+function pdfDirSet(dir) {
+  let o = {}; try { const x = JSON.parse(fs.readFileSync(uiPrefsPath(), "utf8")); if (x && typeof x === "object" && !Array.isArray(x)) o = x; } catch (_) { /* 第一次 */ }
+  o.pdfDir = dir;
+  fs.writeFileSync(uiPrefsPath(), JSON.stringify(o));
+}
+// 雲端那一份:閱讀頁剛讀過的就在 rptCloudDocs 裡——同一個 stored_at 的本體不會變,過了 5 分鐘也照用(存檔框要馬上開);不在才重抓
+async function pdfLoadDoc(view, id, ver) {
+  if (view === "local") return reportLoad(id);
+  const token = loadToken(), hit = rptCloudDocs.get(id + "|" + (Number.isInteger(ver) ? ver : ""));
+  if (token && hit && hit.owner === token && hit.r.report) return hit.r;
+  const r = await cloudReport(id, ver);
+  return r.code === "OK" && r.report ? r : null;
+}
+function pdfOpenPage() {
+  const w = new BrowserWindow({
+    show: false, width: 794, height: 1123,
+    webPreferences: { preload: path.join(__dirname, "print-preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false },
+  });
+  w.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  w.webContents.on("will-navigate", (e) => e.preventDefault());
+  w.loadFile(path.join(__dirname, "renderer", "report-print.html"));
+  return w;
+}
+let _pdf = null;
+function reportPdf() {
+  if (!_pdf) _pdf = require("./reportpdf").createReportPdf({
+    loadDoc: pdfLoadDoc, openPage: pdfOpenPage, getDir: pdfDirGet, setDir: pdfDirSet,
+    showSave: (win, o) => dialog.showSaveDialog(win, o),
+    writeFile: (p, buf) => fs.promises.writeFile(p, buf),
+    downloads: () => app.getPath("downloads"),
+    onSaved: () => tm().track("feature_used", { name: "report_pdf" }),   // 檔案寫成功才送(取消、失敗不送)
+    savedRef,
+  });
+  return _pdf;
 }
 /* 雲端視角:平台的索引與 S3 本體(停機也讀得到)。兩支各快取 5 分鐘(清單 per 帳號、本體 per id),綁著拿到它的那顆 token——
    換帳號就對不上、登出時 clearToken 整組清掉;「新增報告」送出後的等待期間 renderer 帶 force 重問。
@@ -1589,18 +1970,33 @@ function mcpCode() {
    agent 經本機 MCP(`blave_browser`,127.0.0.1、每回合一顆 token)操作;分頁是獨立 partition 的 WebContentsView,renderer 只收事件。
    掛不掛:電腦版本機 + 設定開著(預設開),**不看登入**;token 跟 `blave` 那顆一樣只經單次設定檔 / Codex 子行程環境交給 CLI。 */
 let _browser = null;
+// 開發版專用的假驗證頁(BLAVE_DEV_FAKE_VERIFY=1,實機走「搜尋驗證交給用戶」用;browser/devverify.js)。打包版沒有這支
+const fakeVerify = app.isPackaged ? null : require("./browser/devverify").create({ env: process.env, isPackaged: app.isPackaged });
 const BROWSER_PREFS = () => path.join(app.getPath("userData"), "browser.json");
 function browser() {
   if (!_browser) _browser = require("./browser").createBrowser({
-    electron: require("electron"), stateDir: path.join(BASE, "state", "browser-snapshots"), reportsDir: RPT_DIR(), version: app.getVersion(),
+    electron: require("electron"), stateDir: path.join(BASE, "state", "browser-snapshots"), pineLog: path.join(BASE, "state", "pine-install.log"), reportsDir: RPT_DIR(), version: app.getVersion(),
     getWin: () => imgWin || BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && isOurPageUrl(w.webContents.getURL())) || null,
     uiLang: () => (/^zh/i.test(app.getLocale()) ? "zh" : "en"),
     track: (name) => tm().track("feature_used", { name }),
     reducedMotion: () => { try { return !!require("electron").systemPreferences.getAnimationSettings().prefersReducedMotion; } catch (_) { return false; } },
     loadPrefs: () => { try { return JSON.parse(fs.readFileSync(BROWSER_PREFS(), "utf8")); } catch (_) { return null; } },
     savePrefs: (p) => { try { fs.writeFileSync(BROWSER_PREFS(), JSON.stringify({ enabled: !!p.enabled }), { mode: 0o600 }); } catch (_) { /* 存不了就只在這次生效 */ } },
+    notify: browserNotify,
+    engines: fakeVerify ? fakeVerify.engines : undefined,
   });
+  if (fakeVerify) fakeVerify.serve(require("electron").session.fromPartition(require("./browser").PARTITION)).catch(() => {});
   return _browser;
+}
+/* 內建瀏覽器要用戶回來操作(目前只有一種:搜尋被要求機器人驗證)。app 在前景時畫面自己會講,不發;字還沒交過來也不發
+   (不拿英文退路塞給中文用戶)。點了把視窗叫到前面 */
+function browserNotify(kind) {
+  if (kind !== "captcha" || BrowserWindow.getFocusedWindow() || !tmLabels.br_captcha || !Notification.isSupported()) return false;
+  const n = new Notification({ title: TT.notifTitle(tmLabels.notifPrefixLocal, tmLabels.br_captchaTitle || "Blave"), body: tmLabels.br_captcha });
+  p1Alive.add(n); const drop = () => p1Alive.delete(n);
+  n.on("click", () => { drop(); showMain(); }); n.on("close", drop); n.on("failed", drop); notifWatch(n, "browser " + kind);
+  n.show();
+  return true;
 }
 /* 這一輪帶哪些憑證(純函式;tests/check_shell_data_env.js 從原文切出來跑)。三顆各看各的:
      proxyToken(帳號 token,會燒 Blave AI 額度)= **連的是 Blave AI** 而且有登入;
@@ -1612,7 +2008,10 @@ function turnCreds(kind, signedIn, included, handoffOn) {
   return { proxyToken: kind === "blave" && signedIn === true, dataKey: signedIn === true && included === true, mcp: handoffOn === true && signedIn === true };
 }
 const MESSAGE_MAX_BYTES = 1024 * 1024;   // 同 runtime/agent_turn.py 的 MESSAGE_STDIN_MAX
-async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEffort, viewing }) {
+/* 外殼給這一輪的指示(renderer 只交代號,字在 runtime/agent_turn.py TURN_NOTES):跟用戶的訊息分開送,不進泡泡也不進對話存檔。
+   只認這張表上的;renderer 會渲染 LLM 的文字,不能讓它把任意字串送成系統層級的規則 */
+const TURN_NOTES = ["report_once", "report_recur"];
+async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEffort, viewing, note }) {
   const model = safeId(rawModel), effort = safeId(rawEffort);
   // 這個值會進命令列、SQL 參數與圖檔目錄名,只認外殼自己發的格式
   if (!okSessionId(sessionId)) throw new Error("bad session id");
@@ -1652,9 +2051,18 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
   if (plan.mcp) { mcpMount = await mcpCode().get(); if (mcpMount) mcpFile = require("./mcpcode").writeConfig(mcpDir(), mcpMount); }
   // 內建瀏覽器:同一份單次設定檔多一個 `blave_browser`(兩個 server 可以只有其一)。runtime 靠 --mcp-servers 分別知道掛了哪幾個
   let brMount = null;
-  try { brMount = await browser().beginTurn(win, sessionId); } catch (_) { brMount = null; }
+  // userSent = 這一輪是人在這台電腦上按出來的(自動交還的前提:人在、剛動手)。打字的、畫面代組的固定句(轉出、範例、新增報告、交接確認框)
+  // 都算——它們都是這台電腦上的人按的;renderer 的 typed 旗標不傳過來,這裡不分。要帶 false 的是「沒有人在這台電腦按送出」的回合:
+  // 排程回合、雲端主機那邊發起的回合、任何自動回合——現在沒有這種呼叫端(runTurn 只有 send-message 一個入口),
+  // 加的時候就帶 false。雲端視角(viewing.env === "cloud")另外用 noUser 標:人在,但畫面上不是這台電腦的對話
+  if (fakeVerify) fakeVerify.arm();   // 這一輪的第一次搜尋先去假頁
+  try { brMount = await browser().beginTurn(win, sessionId, { userSent: true, noUser: !!viewing && viewing.env === "cloud" }); } catch (_) { brMount = null; }
   if (brMount) { require("./mcpcode").removeConfig(mcpFile); mcpFile = require("./mcpcode").writeConfig(mcpDir(), mcpMount, brMount); }
   const mcpServers = mcpFile ? [...(mcpMount ? ["blave"] : []), ...(brMount ? ["blave_browser"] : [])] : [];
+  // 上網只有內建瀏覽器一條路(e2e 0.1.8 #125):runtime 看到這個變數就把引擎自己的 WebSearch / WebFetch 關掉,
+  // 沒掛上時照 off(用戶在設定 › 隱私關的)/ unavailable(開著但這一輪起不來)給 agent 不同的說法
+  let brWanted = true; try { brWanted = browser().enabled(); } catch (_) { /* 連物件都建不起來:當成起不來 */ }
+  const brState = brMount && mcpFile ? "on" : brWanted ? "unavailable" : "off";
   const turnDone = () => { require("./mcpcode").removeConfig(mcpFile); if (_browser) _browser.endTurn(); };
   const env = {
     // venv/bin 放最前面:Claude Code 的 Bash 直接繼承這個 PATH,`python3` 就是我們的。
@@ -1691,6 +2099,8 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
     // 聊天裡的圖:見上面「聊天裡的圖」。接收端還沒起來(port 0)就不帶,notify 那邊會 no-op
     ...(imgPort ? { BLAVE_WEB_REPORT_URL: `http://127.0.0.1:${imgPort}/chat-image`,
                     BLAVE_WEB_REPORT_TOKEN: imgToken, BLAVE_WEB_SESSION: sessionId } : {}),
+    BLAVE_BROWSER: brState,
+    ...(TURN_NOTES.indexOf(note) >= 0 ? { BLAVE_TURN_NOTE: note } : {}),
     LANG: process.env.LANG || "zh_TW.UTF-8",
     ...PY_ENV,
   };
@@ -1723,6 +2133,7 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
   try { child.stdin.end(message); } catch (err) { try { child.kill(); } catch (_) { /* 已經不在了 */ } turnDone(); throw err; }   // 不留一支卡在讀 stdin 的子行程
   activeTurn = child;
   let buf = "";
+  const turnXp = [];   // 這一輪的轉出卡:回合結束才寫進 index(ts 要排在回覆之後)
   child.stdout.on("data", (d) => {
     turnLastOut = Date.now();
     buf += d.toString();
@@ -1730,7 +2141,11 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
     while ((i = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, i); buf = buf.slice(i + 1);
       if (line.startsWith("@@BLAVE@@")) {
-        try { const c = JSON.parse(line.slice(9)); if (c && c.type === "done") turnFinalized = true; win.webContents.send("turn-event", c); } catch (_) {}
+        try {
+          const c = JSON.parse(line.slice(9)); if (c && c.type === "done") turnFinalized = true;
+          if (c && c.type === "export") { const rec = noteExport(c, sessionId); if (rec) { c.id = rec.id; turnXp.push(rec); } }   // 卡重開要畫回來:快照先落地,id 給卡的「下載…」
+          win.webContents.send("turn-event", c);
+        } catch (_) {}
       }
     }
   });
@@ -1739,6 +2154,7 @@ async function runTurn(win, { sessionId, message, model: rawModel, effort: rawEf
   child.on("close", (code) => {
     turnDone();   // 這一輪結束:設定檔(裡面是接入碼 / 瀏覽器 token)立刻刪,瀏覽器 token 作廢
     activeTurn = null;
+    flushExports(sessionId, turnXp);
     // 視窗可能已經關掉了(結束時回合才收尾):送到已銷毀的 webContents 會丟例外
     if (!win.isDestroyed()) win.webContents.send("turn-end", { code, errTail: code === 0 ? "" : errTail });
   });
@@ -1804,6 +2220,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  quitOnSignals(process, () => app.quit());
   startImageServer();
   // 上一次回合中途 crash 留下的 MCP 設定檔(裡面是一顆可能還沒過期的接入碼):開 app 就清。
   // 只有拿到單一實例鎖的那一份做(稽核 S1,同 :syncOfficialOnUpdate):第二份 app 在結束前也會走到這裡,
@@ -1841,12 +2258,20 @@ app.whenReady().then(() => {
   handle("delete-strategy", (_e, name) => deleteStrategy(String(name || "")));
   handle("list-sessions", () => listSessions());
   handle("load-session-images", (_e, id) => loadSessionImages(id));
+  handle("save-turn-results", (_e, id, entry) => saveTurnResults(id, entry), false);
+  handle("load-turn-results", (_e, id) => loadTurnResults(id), []);
   handle("load-session", (_e, id) => loadSession(id));
   handle("delete-session", (_e, id) => deleteSession(id));
   handle("list-strategies", () => listStrategies());
   handle("load-strategy", (_e, name) => loadStrategy(String(name || "")));
+  handle("save-export", (e, ref) => saveExport(BrowserWindow.fromWebContents(e.sender), ref && typeof ref === "object" ? ref : null), { ok: false });
+  handle("load-session-exports", (_e, id) => loadSessionExports(id));
+  handle("reveal-export", (_e, token) => { const p = savedExports.get(String(token || "")); if (!p || !fs.existsSync(p)) return false; shell.showItemInFolder(p); return true; }, false);
+  handle("load-version", (_e, name, n) => loadVersion(String(name || ""), n), { code: "ERROR" });
+  handle("compare-versions", (_e, name, a, b) => compareVersions(String(name || ""), a, b), { code: "ERROR" });
   handle("model-options", (_e, kind) => modelOptions(kind));
   handle("account-status", () => accountStatus());
+  handle("balance", () => balanceHost().read());
   handle("public-pricing", () => publicPricing());
   // 花錢的動作只收自家畫面發的:renderer 會渲染 LLM 的文字,萬一有別的 frame 被帶進來,它不能替用戶開機
   ipcMain.handle("plan-start", (e) => (fromOurPage(e) ? planStart() : { error: "SERVER" }));
@@ -1882,9 +2307,23 @@ app.whenReady().then(() => {
   handle("cloud-performance", (_e, q) => cloudHost().performance(q && q.days, q && q.currency), { code: "UNREACH", perf: null });
   // 雲端單支策略的報告(側欄點一支打一次;同事件清單:不留在主行程、不落地)。回 { code: "OK" | "UNREACH", strategy }——OK + null = 雲端現在沒有這一份
   handle("cloud-strategy", (_e, q) => cloudHost().strategy(q && q.name), { code: "UNREACH", strategy: null });
+  // 雲端策略版本的單版 / 比較(/cloud/version):同單支策略,不留在主行程、不落地。回 { code: "OK" | "SYNCING" | "UNREACH", … }
+  handle("cloud-version", (_e, q) => cloudHost().version(q), { code: "UNREACH" });
   // 雲端的報告清單與本體(renderer/reports.js;同單支策略:不啟動輪詢、憑證只在主行程)。OK + report: null = 平台現在沒有這一份
   handle("cloud-reports", (_e, force) => cloudReports(force === true), { code: "UNREACH", reports: [] });
   handle("cloud-report", (_e, id, ver) => cloudReport(id, ver), { code: "UNREACH", report: null, images: {} });
+  // 報告公開分享(renderer/report-share.js):憑證、聲明 / 條款版本、本機報告的全文與圖都在主行程加;畫面只給 view / id / 掛名 / 有沒有勾
+  handle("share-state", (_e, view, id) => shareClient().state(view, id), { code: "UNREACH" });
+  handle("share-publish", (_e, view, id, a) => shareClient().publish(view, id, { byline: a && a.byline, confirmed: !!a && a.confirmed === true, update: !!a && a.update === true }), { code: "UNREACH" });
+  handle("share-revoke", (_e, view, id) => shareClient().revoke(view, id), { code: "UNREACH" });
+  // 設定 › 公開連結:清單與「只憑代碼取消」(原檔不在也撤得掉);憑證照樣只在主行程
+  handle("share-list", () => shareList(), { code: "UNREACH" });
+  handle("share-revoke-code", (_e, code) => shareClient().revokeCode(code), { code: "UNREACH" });
+  // 報告存成 PDF:畫面只給 view / id / 清單上的版本 / 介面語言;下面兩支只回應主行程自己開的那個列印視窗
+  handle("report-pdf", (e, view, id, ver, lang) => reportPdf().save(BrowserWindow.fromWebContents(e.sender), view, id, ver, lang,
+    () => { if (!e.sender.isDestroyed()) e.sender.send("report-pdf-saving"); }), { code: "FAIL" });
+  ipcMain.handle("print-payload", (e) => (_pdf ? _pdf.payload(e.sender) : null));
+  ipcMain.on("print-ready", (e, ok) => { if (_pdf) _pdf.ready(e.sender, ok); });
   /* 雲端(寫入):renderer 只說「送哪個指令」,憑證與 request_id 都在主行程(cloudcmd.js)。
      **這一支拒收 secrets**(cloudcmd.js 檔頭契約 ①:那個檔不是信任邊界,閘門在這裡):白名單直接砍掉 credentials,
      金鑰只由日後專用的連接 IPC 供應——renderer 被攻破也塞不進任意 ENV 名。
@@ -1985,10 +2424,13 @@ app.whenReady().then(() => {
   handle("browser-snapshot", (_e, sid, snap) => (okSessionId(sid) ? browser().snapshot(sid, snap) : null), null);
   handle("browser-history", (_e, sid) => (okSessionId(sid) ? browser().history(sid) : []), []);
   ipcMain.on("browser-block-visible", (e, on) => { if (fromOurPage(e) && _browser) _browser.setBlockVisible(on === true); });
-  handle("browser-open-external", (_e, id) => { const u = _browser && _browser.externalUrl(id); return u ? openWebSafe(u) : false; }, false);
+  // 用系統瀏覽器開這一頁:renderer 只給分頁 id(給別的型別一律不開),網址由主行程從那個分頁自己拿;內建那一頁不關、不動
+  handle("browser-open-external", (_e, id) => { const u = _browser && typeof id === "string" ? _browser.externalUrl(id) : null; return u ? openWebSafe(u) : false; }, false);
   handle("browser-prefs", () => browser().prefs(), { enabled: false });
   handle("browser-prefs-set", (_e, p) => browser().setPrefs({ enabled: !!(p && p.enabled === true) }), null);
   handle("browser-clear", () => (activeTurn ? false : browser().clearData()), false);
+  // 送進 TradingView(browser/pine.js):外殼自己貼,不開 agent 回合。renderer 只給 ref。流程停在交接:貼完之後沒有任何一支 IPC 會再讀那一頁
+  handle("pine-install", (_e, ref) => { const job = pineJob(ref && typeof ref === "object" ? ref : null); return job ? browser().pineInstall(job) : { state: "fail", why: "no_file" }; }, { state: "fail" });
   /* 自帶資料來源(datasrc.js;設定 › 資料來源)。金鑰的值只從 renderer 的表單經過 datasrc-save 一次,寫進 workspace 的 .env(拿 .env.lock);
      之後任何一支都不把值交回去——list 只有名稱與欄位名。四支都走 handle()(只收自家頁面,拒絕時回各自的形狀);參數在 datasrc.js 裡驗(名稱白名單、值不含換行與引號)。
      不 log、不進 argv / 環境、不寫 userData。這些名字都在 DATA_ 命名空間,機器端不把它們當交易所:永遠不會拿去下單。 */
@@ -2061,8 +2503,10 @@ app.whenReady().then(() => {
   startStep("trade host", tradeStartIfReady);   // 引擎早就裝好的人:一開 app 就有狀態可看(對帳器仍要他自己按啟動)
   // 視窗回前景 = 用戶可能剛在瀏覽器綁完卡、開完主機:「含不含資料」的答案作廢,下一輪重查
   // (不在這裡打 api——跟 LLM 共用每分鐘 30 次的桶,而且畫面那邊有卡片時本來就會重查)
-  app.on("browser-window-focus", () => { lastAcct = null; p1Badge = 0; if (app.dock) app.dock.setBadge(""); cloudHost().setForeground(true); });
-  app.on("browser-window-blur", () => cloudHost().setForeground(false));   // 背景時輪詢放慢到 60 秒
+  // 畫面自己的 blur 分不出「焦點進了內建瀏覽器那一頁」跟「整個視窗退到背景」,所以由這裡講
+  const tellActive = (w, on) => { if (w && !w.isDestroyed() && isOurPageUrl(w.webContents.getURL())) w.webContents.send("window-active", on); };
+  app.on("browser-window-focus", (_e, w) => { lastAcct = null; p1Badge = 0; if (app.dock) app.dock.setBadge(""); cloudHost().setForeground(true); tellActive(w, true); });
+  app.on("browser-window-blur", (_e, w) => { cloudHost().setForeground(false); tellActive(w, false); });   // 背景時輪詢放慢到 60 秒
   app.on("activate", () => showMain());   // 點 Dock:視窗被紅燈收起來的話把它叫回來
   startStep("tray", trayStart);
   startStep("telemetry", () => tm().start());
@@ -2112,6 +2556,7 @@ let tmLabels = { running: "Auto trading is running", paperVenue: "Paper trading"
   // Binance 金鑰重查(tm.key.*):空的 = renderer 還沒交,那一則通知不發(不拿英文退路塞給中文用戶;下一輪 24 小時重查 verdict 還在,畫面上看得到)
   key_ipTitle: "", key_ipBody: "", key_rejTitle: "", key_rejSameIpBody: "", key_rejUnknownBody: "", key_permTitle: "", key_permBody: "",
   stLocal: "", stCloud: "", stOn: "", stPaused: "", stUnknown: "", stMayTrade: "", stNotStarted: "", moneyPaper: "", moneyReal: "",
+  br_captchaTitle: "", br_captcha: "",   // 內建瀏覽器:搜尋要用戶過驗證(browserNotify);空的 = 還沒交字 = 不發
   pauseLocal: "", quitCloudNote: "", notifPrefixLocal: "", notifPrefixCloud: "", ...Object.fromEntries(Object.keys(MENU_EN).map((k) => [k, ""])) };
 const TT = require("./traytext");
 let uiLang = null, appMenuKey = "";   // renderer 交過來之前用系統語系猜(app.getLocale() 要等 ready 之後才有值,所以用的時候才算)
@@ -2352,6 +2797,16 @@ app.on("browser-window-created", (_e, win) => {
     if (trading && !hiddenSaid && tmLabels.hidden && Notification.isSupported()) { hiddenSaid = true; notifWatch(new Notification({ title: tmLabels.running, body: tmLabels.hidden }), "hidden").show(); }
   });
 });
+/* 結束訊號(SIGTERM / SIGINT / SIGHUP:kill、登出與關機、終端機 Ctrl+C)每一次都走 app.quit(),也就是每一次都過 before-quit 的攔截。
+   不自己接的話 Chromium 的處理只管第一次:它收到一次訊號就把處理還原成系統預設,第一次被攔下(用戶按了取消)之後,
+   第二次訊號直接殺掉行程——沒有框、daemon 沒收工、事件清單也沒記(實測 09-28)。要在 ready 之後掛:Chromium 的處理是啟動時裝的,
+   後掛的才算數。Windows 沒有這幾個訊號的同等語意,不掛。tests/check_shell_quit_again.js 從原文切出來跑 */
+function quitOnSignals(proc, quit) {
+  if (proc.platform === "win32") return [];
+  const sigs = ["SIGTERM", "SIGINT", "SIGHUP"];
+  for (const s of sigs) proc.on(s, () => quit());
+  return sigs;
+}
 // 結束前先讓 daemon 收工(對帳器要先撤掉自己掛在交易所的限價單);最多等 9 秒,之後不管怎樣都走。
 // 就算這段沒跑到(當機、被強殺),daemon 讀到 stdin EOF 也會自己收。
 let quitting = false;
@@ -2366,7 +2821,7 @@ app.on("before-quit", (e) => {
     dialog.showMessageBox(BrowserWindow.getAllWindows()[0] || undefined, { type: "warning", message: tmLabels.quitTitle,
       // 雲端也「確定在下單」時多一句:結束這個 app 不影響雲端。不確定就不說(那一句是在替雲端做保證)
       detail: TT.quitDetail(tmLabels.quitBody.replace("{venue}", () => venueName(live.venue)), TT.cloudTrading(cloudSt()) ? tmLabels.quitCloudNote : ""), buttons: [tmLabels.quitStay, tmLabels.quitGo], defaultId: 0, cancelId: 0 })
-      .then((r) => { quitAsking = false; if (r.response === 1) { quitConfirmed = true; app.quit(); } }, () => { quitAsking = false; });
+      .then((r) => { quitAsking = false; if (r.response === 1) { quitConfirmed = true; if (_tradeHost) _tradeHost.noteQuit(); app.quit(); } }, () => { quitAsking = false; });
     return;
   }
   // 本機 agent 回合還在跑(可能正在更新雲端主機):結束會把它斷掉,先問一次(同自動下單那一道;已經確認過就不再問)

@@ -4,10 +4,25 @@
 // 惡意頁可以塞 100 MB 的字串,等到主行程再截就來不及了。
 "use strict";
 
-/* 節點描述(給 gate.js 分級)。this = 目標元素。 */
+/* 用戶在這份文件裡改過欄位的紀錄(稽核 P2-3)。cdp.js 在每份新文件一開始就裝進 isolated world(Page.addScriptToEvaluateOnNewDocument):
+   主行程只看得到鍵盤(input-event),用滑鼠貼上、拖放、IME、自動填入都沒有 keyDown。
+   - window.__blaveEdited:這份文件有人(不是 agent)改過欄位
+   - 元素.__blaveTyped:那個欄位(與它的 contenteditable 宿主)被改過——expando 掛在 isolated world 的 wrapper 上,頁面看不到
+   - window.__blaveAgentInput:agent 自己在打字的窗口(index.js agentInput 前後設),窗口內的事件不算 */
+function watchEdits() {
+  const mark = (n) => { for (let e = n, i = 0; e && i < 50; e = e.parentElement, i++) { if (e.nodeType !== 1) continue; if (!e.isContentEditable && e !== n) break; try { e.__blaveTyped = true; } catch (_) { /* 唯讀 wrapper */ } } };
+  const on = (ev) => { if (window.__blaveAgentInput) return; window.__blaveEdited = true; const t = ev.target; if (t && t.nodeType === 1) mark(t); else if (t && t.parentElement) mark(t.parentElement); };
+  for (const type of ["input", "change", "paste", "drop"]) window.addEventListener(type, on, true);
+  return true;
+}
+function agentInput(on) { window.__blaveAgentInput = !!on; return true; }
+/* 節點描述(給 gate.js 分級)。this = 目標元素。
+   dirty:欄位留著跟載入時不一樣的內容或被用戶改過——input / textarea 比 defaultValue、select 比 defaultSelected、
+   contenteditable 只認 watchEdits 的紀錄(沒有載入時的基準可比);agent 自己填的(cdp.fill 記 __blaveAgentFilled、用戶沒再動過)與空欄位不算。dirtyFields 用同一條規則(兩份都要自給自足) */
 function describe() {
   const el = this, T = (s, n) => String(s == null ? "" : s).replace(/\s+/g, " ").trim().slice(0, n || 200);
   const tag = (el.tagName || "").toLowerCase();
+  const fieldDirty = (e) => { const g = (e.tagName || "").toLowerCase(); if (e.__blaveTyped) return true; if (e.__blaveAgentFilled) return false; if (g === "select") return Array.from(e.options || []).some((o) => o.selected !== o.defaultSelected); if (g === "input" || g === "textarea") return !!e.value && e.value !== e.defaultValue; if (e.isContentEditable && e.querySelectorAll) { for (const x of e.querySelectorAll("*")) if (x.__blaveTyped) return true; } return false; };
   const form = el.form || (el.closest && el.closest("form")) || null;
   let label = "";
   try { if (el.labels && el.labels.length) label = el.labels[0].innerText; } catch (_) { /* 不是可標籤元素 */ }
@@ -37,6 +52,7 @@ function describe() {
     labelForFile: !!(labelFor && labelFor.type === "file") || !!(lab && lab.querySelector("input[type=file]")),
     isSelect: tag === "select", editable: !!el.isContentEditable,
     options: tag === "select" ? Array.from(el.options).slice(0, 100).map((o) => T(o.text, 80)) : [],
+    dirty: fieldDirty(el), pageEdited: !!window.__blaveEdited,
   };
 }
 
@@ -138,6 +154,19 @@ function extract() {
     }
     return s;
   }
+  // 程式碼區塊每行一個區塊元素(行號對得上的那種檢視器)時逐行讀:innerText 會把空的行元素整個吃掉、
+  // 只放一個 <br> 的行又多算一行,讀的人數行號就跟畫面差一行。不是這種結構的照舊用 innerText。
+  function preText(pre) {
+    const texts = (b, any) => Array.from(b.childNodes).some((n) => n.nodeType === 3 && (any ? n.nodeValue : T(n.nodeValue)));
+    let box = pre;
+    while (box.children.length === 1 && !texts(box)) box = box.children[0];   // <pre><code>…
+    const rows = Array.from(box.children), rowish = /^(block|list-item|flex|grid|table-row)$/;
+    // 行與行之間夾著文字節點(在 pre 裡連換行都會畫出來)就不是這種結構
+    if (rows.length < 2 || rows.length > 5000 || texts(box, true) || !rows.every((r) => hidden(r) || rowish.test(getComputedStyle(r).display))) return String(pre.innerText).slice(0, 20000);
+    let s = "";
+    for (const r of rows) { if (s.length > 20000) break; if (!hidden(r)) s += (s ? "\n" : "") + String(r.innerText).replace(/\n+$/, ""); }
+    return s.slice(0, 20000);
+  }
   function block(el, depth) {
     if (total >= MAX || depth > 40) return;
     for (const n of el.childNodes) {
@@ -152,7 +181,7 @@ function extract() {
       if (tg === "p" || tg === "figcaption" || tg === "dd" || tg === "dt") { const tx = T(inline(n)); if (tx) blk(n, tx + "\n\n"); continue; }
       if (tg === "li") { const tx = T(inline(n)); if (tx) blk(n, "- " + tx + "\n"); continue; }
       if (tg === "ul" || tg === "ol") { block(n, depth + 1); push("\n"); continue; }
-      if (tg === "pre") { blk(n, "```\n" + String(n.innerText).slice(0, 20000) + "\n```\n\n"); continue; }
+      if (tg === "pre") { blk(n, "```\n" + preText(n) + "\n```\n\n"); continue; }
       if (tg === "blockquote") { const tx = T(inline(n)); if (tx) blk(n, "> " + tx + "\n\n"); continue; }
       if (tg === "table") {
         const rows = Array.from(n.querySelectorAll("tr")).slice(0, 200).map((r) => Array.from(r.children).slice(0, 20).map((c) => T(c.innerText).replace(/\|/g, "/").slice(0, 200)));
@@ -195,17 +224,25 @@ function extract() {
   meta.author = meta.author || mc("meta[name=author]");
   meta.site = mc("meta[property='og:site_name']");
   meta.description = mc("meta[name=description]") || mc("meta[property='og:description']");
+  // doc:這份文件是不是還會走(content.js isRelay 用):主文件載完了沒、有沒有 meta refresh 等著轉走
+  const refresh = !!document.querySelector("meta[http-equiv='refresh' i]");
   return { markdown: out, truncated: total >= MAX, headings: heads.slice(0, 200), links, meta, blocks, linkRects,
-    view: { sy: Math.round(sy0), vh: window.innerHeight, vw: window.innerWidth, docH: document.documentElement.scrollHeight } };
+    view: { sy: Math.round(sy0), vh: window.innerHeight, vw: window.innerWidth, docH: document.documentElement.scrollHeight },
+    doc: { complete: document.readyState === "complete", refresh } };
 }
 
-/* 搜尋結果頁:Google / DuckDuckGo html 版。不靠 Google 的 class 名(混淆、常換):主結果區裡「含 h3 的連結」就是一筆。 */
-function serp(engine) {
+/* 搜尋結果頁:Google / DuckDuckGo html 版。不靠 Google 的 class 名(混淆、常換):主結果區裡「含 h3 的連結」就是一筆。
+   vf = 這個引擎的驗證頁標記(verify.js 的表):只讀——看網址、找標記、比字,不點不填。認出是驗證頁就到此為止,不往下讀結果 */
+function serp(engine, vf) {
   const T = (s) => String(s == null ? "" : s).replace(/\s+/g, " ").trim();
   const text = T(document.body ? document.body.innerText : "").slice(0, 5000).toLowerCase();
   const out = { items: [], captcha: false, consent: false, url: location.href };
+  if (vf) {
+    const result = !!(vf.unless && document.querySelector(vf.unless));
+    out.captcha = new RegExp(vf.path).test(location.pathname) || (!result && (!!document.querySelector(vf.marks) || new RegExp(vf.text).test(text)));
+    if (out.captcha) return out;
+  }
   if (engine === "google") {
-    out.captcha = location.pathname.startsWith("/sorry") || !!document.querySelector("#captcha-form,form[action*='sorry'],iframe[src*='recaptcha']") || /unusual traffic|異常流量|异常流量/.test(text);
     out.consent = /(^|\.)consent\.google\./.test(location.hostname) || !!document.querySelector("form[action*='consent.google']");
     const area = document.querySelector("#rso") || document.querySelector("#search") || document.querySelector("[role=main]") || document.body;
     for (const a of area.querySelectorAll("a[href]")) {
@@ -217,7 +254,6 @@ function serp(engine) {
       if (out.items.length >= 30) break;
     }
   } else {
-    out.captcha = !!document.querySelector("form[action*='anomaly'],#challenge-form,.anomaly-modal") || (/bots use duckduckgo|not a robot|challenge/.test(text) && !document.querySelector(".result__a"));
     for (const a of document.querySelectorAll("a.result__a")) {
       const box = a.closest(".result");
       const s = box && box.querySelector(".result__snippet");
@@ -226,6 +262,15 @@ function serp(engine) {
     }
   }
   return out;
+}
+
+/* 讀得到了沒(主文件解析完、而且有一段像樣的正文):回正文字數。只數 40 字以上的段落——導覽列、按鈕、頁尾的短字不算。
+   廣告多的新聞站永遠等不到 load,但正文早就在了(index.js early) */
+function readable() {
+  if (document.readyState === "loading" || !document.body) return 0;
+  let n = 0;
+  for (const p of document.querySelectorAll("p, li, blockquote, pre, td, dd")) { const s = String(p.innerText || "").trim().length; if (s >= 40) n += s; if (n > 100000) break; }
+  return n;
 }
 
 /* 頁面上找字(browser_wait until=text)。 */
@@ -266,6 +311,7 @@ function quiet() { for (const m of document.querySelectorAll("video,audio")) { t
      "click"{ x, y }                  到點的點擊環(reduced 時不畫)
      "read" { rects, per, follow }    讀取帶依文件順序掃過這次讀進來的區塊(每塊 per ms),讀完留已讀線與捲軸軌標記;follow = 跟著捲
      "frames" { rects, stagger, hold } 看大綱 / 讀連結:被抽到的元素依序框一下
+     "unframe"                         收掉目標框與小標(擷取落地)
      "clear"
      "settle"                          密集判定(pace.js)切到瞬間模式:正在播的標記全部跳終態
    click 帶 instant = 靜止單幀環(22px 2px 墨環,不放大不淡出;canon 第 9 條瞬間模式)。
@@ -334,6 +380,7 @@ function mark(kind, data, reduced) {
     c.style.transform = "translate(" + x + "px," + y + "px)"; c.__x = x; c.__y = y;
     idle(c); return true;
   }
+  if (kind === "unframe") { for (const n of Array.from(root.querySelectorAll(".o,.t"))) n.remove(); return true; }   // 擷取落地:收框
   if (kind === "click") {
     for (const n of Array.from(root.querySelectorAll(".o,.t"))) n.remove();   // 點擊落地:收框
     const c = root.querySelector(".c"); if (c) idle(c);
@@ -425,9 +472,42 @@ function maskFields(idx, payHostRe) {
   (document.body || document.documentElement).appendChild(host);
   return n;
 }
+/* { n, edited }:n = 有幾個欄位留著跟載入時不一樣的內容(用戶填到一半的表單;規則同 describe 的 dirty),只回數量不回值;
+   edited = 這份文件有人改過欄位(watchEdits)。搜尋框、勾選框、按鈕、隱藏欄位不算;唯讀與停用的不算 */
+function dirtyFields() {
+  const SKIP = ["hidden", "checkbox", "radio", "button", "submit", "image", "reset", "file", "range", "color", "search"];
+  const fieldDirty = (e) => { const g = (e.tagName || "").toLowerCase(); if (e.__blaveTyped) return true; if (e.__blaveAgentFilled) return false; if (g === "select") return Array.from(e.options || []).some((o) => o.selected !== o.defaultSelected); if (g === "input" || g === "textarea") return !!e.value && e.value !== e.defaultValue; if (e.isContentEditable && e.querySelectorAll) { for (const x of e.querySelectorAll("*")) if (x.__blaveTyped) return true; } return false; };
+  const els = document.querySelectorAll("input, textarea, select, [contenteditable]");
+  let n = 0;
+  for (let i = 0; i < els.length && i < 2000; i++) {
+    const el = els[i];
+    if (el.disabled || el.readOnly) continue;
+    if (el.tagName === "INPUT" && SKIP.indexOf(String(el.type || "text").toLowerCase()) >= 0) continue;
+    if (el.hasAttribute && el.hasAttribute("contenteditable") && !el.isContentEditable) continue;
+    if (fieldDirty(el)) n++;
+  }
+  return { n, edited: !!window.__blaveEdited };
+}
 function unmaskFields() { const h = document.getElementById("__blave_mask"); if (h) h.remove(); return true; }
 
 /* 拍縮圖 / 來源快照 / 截圖前把頁面裡的 agent 標記藏起來(縮圖上的標記只由 app 那一層畫,不然會出現兩個游標) */
+/* 元素(this)自己或裡面還沒載完的圖有幾張(擷取用)。loading="lazy" 的圖捲進畫面才開始抓,PNG 由上往下解:
+   沒載完就拍,拿到的是上半張圖、下半是頁面底色。沒有來源的、看不見的(追蹤像素)不算;載失敗的(complete 但沒有尺寸)不會再來,也不算。
+   還沒載完的 lazy 圖順手改成 eager:lazy 要等頁面出畫面才判「進了可視區」,停在視窗外的分頁不出畫面,等再久也不會開始抓(實測) */
+function pendingPictures() {
+  const el = this, list = [];
+  if (el.tagName === "IMG") list.push(el);
+  if (el.querySelectorAll) for (const im of el.querySelectorAll("img")) { list.push(im); if (list.length >= 200) break; }
+  let n = 0;
+  for (const im of list) {
+    if (im.complete || !(im.currentSrc || im.getAttribute("src") || im.getAttribute("srcset"))) continue;
+    const r = im.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    if (im.loading === "lazy") im.loading = "eager";
+    n++;
+  }
+  return n;
+}
 function marksVisible(on) { const h = document.getElementById("__blave_agent_marks"); if (h) h.style.setProperty("visibility", on ? "visible" : "hidden", "important"); return true; }
 
-module.exports = { mark, marksVisible, describe, fieldCandidates, maskFields, unmaskFields, clearField, focusTarget, selectOption, extract, serp, hasText, scrollPage, progress, quiet };
+module.exports = { mark, marksVisible, pendingPictures, describe, fieldCandidates, dirtyFields, watchEdits, agentInput, maskFields, unmaskFields, clearField, focusTarget, selectOption, extract, serp, hasText, readable, scrollPage, progress, quiet };

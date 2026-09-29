@@ -1,5 +1,14 @@
 # Reports — publishing a rendered report to the workspace
 
+> **Building a report in chat? Do not read this file first.** The order is fixed: search the web
+> (Blave data may be fetched meanwhile) → build the data pack → write the narrative.
+> A request that names a template: call the template and read `pack.describe()`.
+> A report in the user's own words, or a research report: `python3 -c "from lib.report_templates
+> import quickstart; quickstart()"` prints the order, the recipe shape, every brick with its
+> arguments and every signature you need. Never grep lib source for a signature.
+> This file is reference: open one section when `publish()` refuses something its message does
+> not explain.
+
 A **report** is a JSON document this machine writes and the platform renders in the
 web workspace's Reports list (「報告」 in the sidebar): KPI rows, charts, tables and prose, laid out by the web from
 structured data — not a screenshot, not a wall of Telegram text. Use it for anything
@@ -10,19 +19,27 @@ The platform pushes a short summary notification once the report is stored, so t
 report reaches the user even when this machine is asleep — never send your own
 Telegram message about a report as well, that duplicates every alert.
 
-**A `research` or `morning` report (a morning brief, a close recap, a weekly, …) can be
-shared publicly, and only by the user; a `performance` report never can.** In the workspace,
+**Every report — `research`, `morning` (a morning brief, a close recap, a weekly, …) and
+`performance` — can be shared publicly, and only by the user. A `performance` report goes
+public with its account figures and positions in it.** In the workspace,
 the report's title bar has a 「分享」 button; the user confirms each report on its own (a
 consent checkbox, then confirm) and gets a link `blave.org/<lang>/r/<code>`. What is public is
-a snapshot of the report at that moment: writing the same id again later does not change it.
-While a report is public its title bar shows a public status row instead; once you have
-rewritten it, the workspace adds a notice with a 「檢查後更新公開版本」 button, which updates
-the public version under the same link. They can cancel at any time;
-sharing again after cancelling gives a new link. Deleting the machine or the account revokes
-every public link. The platform does not review content: whether a report is fit to publish
+a snapshot of the report at that moment: nothing written later changes it.
+While a report is public its title bar shows a public status row instead; if the report
+itself is rewritten afterwards (a same-turn correction, §1), the workspace adds a notice
+with a 「檢查後更新公開版本」 button, which updates the public version under the same link. They can cancel at any time;
+sharing again after cancelling gives a new link. The desktop app has the same 「分享」 button
+in a report's header, for reports on this computer and on the cloud machine alike; sharing a
+report on this computer uploads a snapshot of it, so editing or deleting the file afterwards
+changes nothing public — only 「取消分享」 does. Deleting the cloud machine or the account
+revokes every public link, including the ones shared from this computer. The platform does not review content: whether a report is fit to publish
 is the user's call, made in the consent checkbox. Nothing you write into a report (including
-`meta.shareable`, §7b B7) decides whether it can be shared, so never tell the user a research or
-morning report cannot be shared, and never hold one back for that reason.
+`meta.shareable`, §7b B7) decides whether it can be shared, so never tell the user a report
+cannot be shared, and never hold one back for that reason.
+When the user wants to make a `performance` report public, do not talk them out of it and do
+not refuse: it is their decision. You may say once, in one sentence, that the account figures
+and positions in it become public with it (the confirm box says the same), then help with
+what they asked.
 **You cannot share, update or cancel a report for the user** — there is no API or tool for it
 on this machine; point them to the button. Never promise view counts, a report-abuse flow,
 takedown notices or anything else not described here.
@@ -39,9 +56,38 @@ Write the report to `workspace/reports/<id>.json`. That is the whole contract: n
 token, no API call, no library needed. The runtime's uploader watches the directory
 and ships whatever lands there.
 
-- **`<id>` is the file name stem and the report id**: `[A-Za-z0-9_-]{1,64}`. Sending
-  the same id again **overwrites** that report on the platform — deterministic ids
-  make a re-run idempotent; date-stamped ids keep every run.
+- **`<id>` is the file name stem and the report id**: `[A-Za-z0-9_-]{1,64}`.
+- **A report is never overwritten.** Every report you produce is a new one. When the id
+  you ask for already has a report, `write_report` / `publish()` write this one under the
+  next free id (`research-btc-2`, `-3`, …; `…-2-auto` for a data-only id) and leave the
+  earlier report and its `<id>.files/` exactly as they were. They return the path they
+  wrote. The user sees titles and dates, never ids: **do not mention the id or the number
+  in the reply**, and do not treat the new id as something to fix.
+- **Correcting your own report, same turn only**: write it again with the same id and
+  `replace=True`. That rewrites what *this turn* wrote under that id and nothing else —
+  a report from an earlier turn, a scheduled run or another process is never replaced
+  (the call then writes a new report). Without `replace=True` a correction is one more
+  report in the user's list.
+- **Changing a report the user named**: when the user points at one report and asks for a
+  change to it (「把剛剛這份報告的標題改成…，其他不動」, rewrite one paragraph, fix a typo),
+  change that report itself with `lib.report.edit_report`:
+  `edit_report("<id>", title="…")`, or
+  `edit_report("<id>", change=lambda blocks: blocks[3].update(markdown="…"))`.
+  It keeps the id, `created_at` (the report stays where it is in the list) and the pictures,
+  and touches nothing the change did not name. **Never edit `reports/<id>.json` by hand** —
+  not with Python, not with an editor: that skips the checks, the schema version, the sweep
+  of unused captures and the ledger (`.written.jsonl`, where the change is recorded as an
+  edit with the time it was made). Changing a report does not make it this turn's: to change
+  it again call `edit_report` again — `replace=True` still only rewrites a report this turn
+  wrote, and on an earlier turn's report it writes a new one. A report nobody named is never
+  changed; 「再做一份」 / 「重做」 / 「更新一下」 with new data is a new report. A report
+  shared by public link keeps showing the version that was shared — the link is not
+  updated by the change; the user updates it themselves with 「檢查後更新公開版本」 in the
+  report's title bar. Say so only when the user asks about the link. `FileNotFoundError` = the report
+  is no longer on this machine: say it cannot be changed from here and offer a new one.
+- **Writing the file yourself** (no `lib/report.py`): pick an id that has no file in
+  `reports/` or `reports/sent/`. A file written over an existing one replaces that report
+  for good — that is the one way left to destroy a report, so do not.
 - **Write atomically**: write `<id>.json.tmp` (any name not ending in `.json` is
   ignored by the scan) and `os.replace()` it into place. Belt and braces on top of
   that: the uploader leaves any report whose own mtime — **or that of any picture in
@@ -95,7 +141,8 @@ produced and you are done — tell the user it has been produced and will show u
 Reports list (「報告」 in the workspace sidebar) shortly, then move on. **The chat reply is one
 or two sentences: the conclusion and the one thing to watch.** The report is the record; do not
 restate it in chat — no bullet list, no figure the report already shows (its lead and KPI row
-are right there). Shipping it is the runtime's job: a 2-minute
+are right there), no status line about the run (「Published successfully.」). In the desktop app
+a card under your reply opens the report: say it is ready, never that it is open. Shipping it is the runtime's job: a 2-minute
 timer picks the file up, so in the normal case the report appears within about two
 minutes. **Do not poll `status()`, and do not wait for `pending` to turn into `sent`
 before replying** — every extra tool call there is the user paying to watch a timer that
@@ -135,7 +182,7 @@ narrative instead).
 3. **Build once**: the default recipe **plus** bricks for those things, in one call —
    `crypto_market_brief(extra=[["coin_snapshot", {"symbol": "BGB"}], ["exchange_snapshot", {"exchange": "okx"}]])`.
    Any template or `build(recipe, extra=…)` takes `extra`. Event bricks: `coin_snapshot(symbol)`
-   (price and volume against its 20-day mean), `exchange_snapshot(exchange)` (that exchange's 24h
+   (90 daily candles and volume against its 20-day mean), `exchange_snapshot(exchange)` (that exchange's 24h
    liquidations, open interest, BTC funding — only exchanges Blave collects; others become a note),
    `relative_to(symbol, benchmark="BTC")` (never the benchmark against itself),
    `liq_map(symbol)` — a coin's liquidation profile over a continuous price axis (`bar_chart`
@@ -153,6 +200,13 @@ narrative instead).
    read / summary talks about: if you argue from it, show it (外資大砍友達 → 友達's 外資買賣超; a DOGE
    ETF closing → DOGE against BTC). What the data sources do not have degrades like any brick
    (`pack.missing` / notes) — never fetch it by hand.
+   **A brick about one instrument names it.** Every block title of a single-instrument brick
+   starts with the instrument (`2330 台積電 外資近 10 日賣超 …`, `SOL 資金費率 …`; the id alone when
+   no list knows the name), and outside that instrument's own report its KPI label and
+   `describe()` key carry it too (`2330 台積電 外資買賣超`, in 張) — 「外資買賣超」 with no
+   instrument in front is always the whole market's (億元). Cite each under its own name; never
+   write a stock's 張 as the market's flow. In `symbol_brief` / `research_pack` the KPI row and
+   the keys stay bare (every cell is that instrument).
 4. **Write the narrative**: the lead states the most important thing today (usually the one you
    built extras for); run down the checklist `describe()` prints.
 5. **Publish once**, with the conclusion as the title (`title=…`). If `publish` refuses, it lists every
@@ -210,9 +264,10 @@ publish(pack, narrative={
   five largest coins by market cap; the derivatives table (OI 24h change, funding, Binance
   account long/short ratio — directions, never coloured as gains); 24h liquidations by exchange;
   the day's movers (Binance's 100 most-traded perps, top / bottom 5, + Blave 異常漲跌); the
-  market-wide Blave indicators; the **news slot** (below); today's macro events.
+  market-wide Blave indicators (90-day chart; `lookback_days` only sets the N of the N-day
+  return column); the **news slot** (below); today's macro events.
 - `tw_market_brief()` — KPI row (加權指數, 成交值, 外資, 融資, 外資期貨, 夜盤), then: the TAIEX
-  chart (last 45 days drawn; the 60-day mean and prior-20 high still come from 90 days), 三大法人,
+  chart (last 90 sessions, the same as 收盤報告), 三大法人,
   the 10 largest 成交值 of the last session, 外資期貨淨部位, the day's 重大訊息, the **news slot**,
   and today's macro events with 除權息. 融資 is a KPI only (its chart stays in 收盤報告). The
   成交值 table and 重大訊息 come straight from TWSE open data and exist on the desktop only
@@ -220,11 +275,12 @@ publish(pack, narrative={
 - `symbol_brief("2330")` — Taiwan stock: close / volume / 外資買賣超 (張), recent highs / lows and
   moving averages (table 「近期高低與均線」: 前 20 日高/低 = the high / low of the 20 sessions before
   today, today excluded, so only today's bar can sit beyond it; 5/20/60 日均);
-  `symbol_brief("BTC")` — crypto perp: price, funding, 爆倉 / 巨鯨 / 多空力道.
+  `symbol_brief("BTC")` — crypto perp: price, funding, 爆倉 / 巨鯨 / 多空力道. Daily chart: 90 bars
+  (`research_pack`: 120).
 - `tw_close_brief()` — 台股收盤報告, for any 台股 收盤 / 盤後 request: the day's TAIEX close,
   turnover, 三大法人, 融資 and 外資期貨淨多單, with the same four slots and every rule on this page
-  that applies to `tw_market_brief`. Its id is `tw-close-YYYYMMDD` (Taipei date), so it never
-  overwrites that day's morning brief. The night session is not part of it; a question about
+  that applies to `tw_market_brief`. Its id is `tw-close-YYYYMMDD` (Taipei date), its own
+  series next to that day's morning brief. The night session is not part of it; a question about
   tonight's 夜盤 is answered on its own, labelled as live. 三大法人 / 融資 / 期貨法人 are published
   after the close, at different times; one that is not out yet is absent and named in
   `pack.notes`. Say it is not out yet; never quote the previous day's figure as today's. Asked in chat
@@ -340,8 +396,9 @@ publish(pack, narrative={
   narrative (data-only, `origin: scheduled`, one footnote line saying why). **On the desktop a
   scheduled run is data-only** (`run.py`, no agent) in this version, and so is every job without
   `agent_consent`. Never script a judgement into `run.py`: a canned sentence is a
-  view nobody formed. The data-only form gets an `-auto` suffix (`tw-market-20260902-auto`), so
-  it never overwrites a narrated report of the same day.
+  view nobody formed. The data-only form gets an `-auto` suffix (`tw-market-20260902-auto`;
+  a second run the same day is `tw-market-20260902-2-auto`) — the runtime tells a data-only
+  report from a narrated one by that ending, and every run is kept.
 - `pack.notes` lists what the source did not have (e.g. 期貨法人 not published yet, no night
   bars); the corresponding block is simply absent. Say so in the narrative if it matters;
   never fill the gap with a number.
@@ -356,7 +413,7 @@ publish(pack, narrative={
   - the user names a report kind that sounds like a template but has none, such as a 美股晨報
     or a 加密收盤報告 (「目前沒有這個範本,我手寫一份,可以嗎?」). Once they agree, it is a
     hand-written `morning` report (§7b) with its own id and title. Never publish it under a
-    template's id: the same id on the same day overwrites that template's report. A 台股 收盤 /
+    template's id: it would be filed as one more of that template's reports. A 台股 收盤 /
     盤後 report is not this case: use `tw_close_brief`.
 
   A research report or a report the user describes in their own words (their own 週報) has
@@ -388,9 +445,9 @@ What channel you search with depends on where you run:
 | Where | What you do |
 |---|---|
 | Desktop app (`BLAVE_AGENT_LOCAL=1`) with the browser tools mounted (`mcp__blave_browser__*`, `references/browser.md`) | Search and read with the built-in browser (any model). For headlines: `browser_open` a news list page → `browser_read(part="links")` → `browser_read(part="meta")` on the few you keep for the published time → `part="section"` only for the paragraph a figure comes from. Do not read whole articles. |
-| Desktop app without those tools (older app, or the browser switched off) | Use the engine's own web search if it has one; otherwise the `describe()` candidates only (Taiwan market brief), or none. |
+| Desktop app without those tools (the user switched the built-in browser off, or it could not be attached this turn) | No web at all, by any route — the runtime's *No web access* rule. The `describe()` candidates only (Taiwan market brief), or `"news": []` with `few_sources` saying the built-in browser is off; the reply says no news was looked up. |
 | Cloud machine, Claude model | The web search tool (billed per search from the user's credit, `references/billing.md`). |
-| Cloud machine, DeepSeek | No web search tool — read with WebFetch, and only your market's fixed sources. Taiwan: 鉅亨's licensed list page `https://news.cnyes.com/news/cat/headline`, the links on the `describe()` candidates (鉅亨's licensed feed), TWSE announcements `https://www.twse.com.tw/rwd/zh/news/newsList?response=json` and TAIFEX announcements `https://www.taifex.com.tw/cht/11/announcement`. Crypto: 鉅亨's licensed list page `https://news.cnyes.com/news/cat/bc_crypto`, Binance announcements `https://www.binance.com/en/support/announcement` and OKX announcements `https://www.okx.com/help/section/announcements-latest-announcements`. Each fetched with a short prompt. Other news sites' terms or robots.txt forbid automated AI access (checked 09-27: CoinDesk, Cointelegraph, Decrypt, 經濟日報, MoneyDJ, CoinMarketCap all do) — do not fetch them. Fewer than 3 sites: one sentence in `few_sources`, publish anyway. |
+| Cloud machine, DeepSeek | No web search tool — read with WebFetch, starting from your market's list. Taiwan: 鉅亨's licensed list page `https://news.cnyes.com/news/cat/headline`, the links on the `describe()` candidates (鉅亨's licensed feed), TWSE announcements `https://www.twse.com.tw/rwd/zh/news/newsList?response=json` and TAIFEX announcements `https://www.taifex.com.tw/cht/11/announcement`. Crypto: 鉅亨's licensed list page `https://news.cnyes.com/news/cat/bc_crypto`, Binance announcements `https://www.binance.com/en/support/announcement` and OKX announcements `https://www.okx.com/help/section/announcements-latest-announcements`. Each fetched with a short prompt. Any other news site is fine too (CoinDesk, Cointelegraph, Decrypt, 經濟日報, MoneyDJ). Fewer than 3 sites: one sentence in `few_sources`, publish anyway. |
 | Scheduled run | Cloud, a job with `agent_consent`: you run as in chat in an unattended turn (§8), same rows as above. Desktop, or no consent, or that turn failed: the data-only `run.py` lays out the licensed headlines as they are (no summary, no tag). |
 
 When no channel gives you anything, still write and publish the report: `"news": []` (the footnote
@@ -414,8 +471,8 @@ publish(pack, narrative={
 ```
 
 - **Collect** only news inside the report's window (a morning brief: since the last close).
-  Never use a source whose terms forbid AI agents or AI summaries (e.g. The Block), and never
-  exchange / broker back offices or banks.
+  Any public site may be a source, in chat and in a scheduled report alike. A page the browser
+  refuses (`blocked_policy`) → use another source. Never exchange / broker back offices or banks.
 - **`symbols` on every item**: the instruments it names (`["XRP"]`, `["2330"]`) — the extra-brick
   check reads them (it also spots common coin tickers and names in the title and summary).
 - **At least three sites**: read at least 3 different sites and give the news at least 3 different
@@ -431,8 +488,18 @@ publish(pack, narrative={
   `part="outline"` → `part="section"` for the one paragraph you need — about 3,000 characters per page,
   20,000 per report. With web search, read the result snippets first and open a page only to check a
   figure.
+- **Open what you will read, read what you opened**: `browser_open_many` takes only the pages you
+  are going to read, and every page it opened is read (`part="meta"` at least) before you write the
+  narrative. A page you will not use is not opened; one you opened by mistake is closed
+  (`browser_close`). The user sees every page that opened and takes it for a source.
+- **The original first; second-hand is marked**: for news and for every number, read the outlet's
+  own article or the official page. A forum post (CMoney 同學會, PTT, Dcard, Reddit, X), a repost,
+  a summary of someone else's article or an aggregator page is used only when the original cannot
+  be found or opened — and then it is marked: in a `news` item the source name ends with
+  `（轉述）` (`("CMoney 同學會（轉述）", "https://…")`), in a research footnote the item says
+  `轉述自 <who>`. A number that exists only second-hand is written with 「據…轉述」 in the sentence.
 - **Source quality, in this order**: mainstream financial and crypto media (Reuters, Bloomberg, CNBC,
-  The Block excepted — its terms forbid AI summaries; for Taiwan 鉅亨), official announcements
+  CoinDesk, The Block; for Taiwan 鉅亨, 經濟日報, 工商時報, MoneyDJ), official announcements
   (the project, the exchange, the regulator; for Taiwan TWSE / TAIFEX announcements), exchange research reports > aggregators > press-release
   sites (openPR, GlobeNewswire, PR Newswire) and SEO / price-prediction sites (247wallst-style "X price
   prediction", exchange blogs selling a coin). **A price-prediction article is never a source**; a press
@@ -457,7 +524,7 @@ publish(pack, narrative={
   article. A `describe()` candidate you keep is `channel="licensed"` and may have no link.
 - **The narrative does not repeat headlines.** `read` may cite one item as the cause of a
   figure, and then writes the figure too.
-- The block title is set for you (「綜合 N 家」 with ≥3 outlets, else the outlet names), and
+- The block title is set for you (「新聞 · 綜合 N 家」 with ≥3 outlets, else 「新聞 · 」 and the outlet names), and
   so is the footnote line (「新聞為 agent 於 HH:MM 蒐集整理；標籤依事件性質分類，不是股價預測」).
 - The 重大訊息 block (desktop) is built by the brick, tagged by the announcement's clause only.
 
@@ -473,9 +540,11 @@ publish(pack, narrative={
 - **R3 No price levels to trade at, no advice** (the rules above). News tags are not added up
   and are not thresholds; summaries carry no advice wording; no heading or label says 關鍵價位,
   支撐 or 壓力.
-- **R4 At most 8 data bricks** (the KPI row not counted), **at most 16 blocks**. Extra
-  information goes into a scannable table, not a paragraph. To cut, drop the bricks the lead
-  does not use first; never the ones the user asked for. `check_recipe` refuses a 9th brick.
+- **R4 At most 8 data bricks** (the KPI row not counted), **at most 16 blocks** (cited images
+  not counted). Extra information goes into a scannable table, not a paragraph. To cut, drop
+  the bricks the lead does not use first; never the ones the user asked for — a cited image
+  the user asked for is never what gives way. `check_recipe` refuses a 9th brick; going over
+  16 blocks only prints a note for you and the report is written as it is.
 - **R5 News**: every report written in chat searches first — the two briefs, 收盤報告, 單標的晨報,
   custom recipes, research; never a backtest report. Collect, de-duplicate, summarise, tag, cite
   — the section above. Tags stay display only (not summed, not a threshold, never a data series),
@@ -531,6 +600,11 @@ publish(pack, narrative={
 
 A report the user describes in their own words is built from bricks, starting from the nearest
 recipe — never as hand-written blocks with numbers you fetched yourself (R1).
+
+**Start from `quickstart()`, not from this file.** `python3 -c "from lib.report_templates import
+quickstart; quickstart()"` prints the fixed order of work, the recipe shape, every brick with its
+arguments and the signatures of `research_pack` / `build` / `publish` — taken from the code, so it
+is never behind. The rest of this section is reference for when something is refused.
 
 ```python
 from lib.report_templates import RECIPES, build, publish, check_recipe
@@ -598,9 +672,9 @@ reads `blave_api_key` / `blave_secret_key` from the workspace `.env` (see `refer
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | `"1.4"` when the report has a `news` block, any block with `private`, or a footnote item with `url`; otherwise `"1.3"` when the `meta` block carries `shareable` or `involves_futures` (`true` **or** `false`, §7b B7; 1.3 also covers `candlestick`); otherwise `"1.2"` when the report contains a `candlestick` block; `"1.1"` otherwise. `write_report` sets it for you; hand-written JSON must follow the same rule — anything under a version older than the one that introduced it is refused. |
+| `schema_version` | string | `"1.6"` when an `image` block carries `source` (§5 › Citing an image from the web); otherwise `"1.5"` when a `bar_chart` has `variant: "profile"`; otherwise `"1.4"` when the report has a `news` block, any block with `private`, or a footnote item with `url`; otherwise `"1.3"` when the `meta` block carries `shareable` or `involves_futures` (`true` **or** `false`, §7b B7; 1.3 also covers `candlestick`); otherwise `"1.2"` when the report contains a `candlestick` block; `"1.1"` otherwise. `write_report` sets it for you; hand-written JSON must follow the same rule — anything under a version older than the one that introduced it is refused. |
 | `id` | string | `[A-Za-z0-9_-]{1,64}`, equal to the file name stem. |
-| `type` | string | `performance` / `morning` / `research` — report list grouping. **Hard rule: any report that carries the user's account assets, positions, orders or live strategy P&L is `performance`, even when it is shaped as a morning brief or a close recap.** `research` and `morning` reports can be shared publicly by the user and `performance` cannot, so a wrong `type` publishes account numbers. |
+| `type` | string | `performance` / `morning` / `research` — report list grouping. **Hard rule: any report that carries the user's account assets, positions, orders or live strategy P&L is `performance`, even when it is shaped as a morning brief or a close recap.** All three types can be shared publicly by the user. Only a `performance` report keeps its `private` blocks on the public page, and only its confirm box tells the user that account figures go public — so a wrong `type` either shares account numbers without that notice or drops them from the public page. |
 | `title` | string | 1–200 chars. |
 | `created_at` | int | **unix seconds, UTC** — never milliseconds, never a string. |
 | `blocks` | array | 1–120 blocks. |
@@ -613,8 +687,10 @@ A block is `{"type": "<key>", ...props}`. The array is flat — blocks never nes
 **An unknown type or an unknown prop is refused (400), not ignored**: a typo in a
 field name loses the report, so copy names from this page rather than inventing them.
 Any block but `meta` and `footnote` may carry `private: true` (1.4): the public share page
-drops that block whole. A block that shows the user's holdings, cost prices or account
-figures is `private` — and such a report is `performance` anyway (§2).
+of a `research` or `morning` report drops that block whole; the public page of a
+`performance` report keeps it, because the account figures are the report. A block that
+shows the user's holdings, cost prices or account figures is `private` — and such a report
+is `performance` anyway (§2).
 Strings are ≤200 chars unless stated. `?` marks optional.
 
 Most visual blocks (`kpi_row`, all charts, `metric_table`, `table`, `code`, `image`)
@@ -652,12 +728,12 @@ caption.
 | `code` | `lang`, `source` | `lang` = `[A-Za-z0-9+#_.-]{1,20}` (`text` when there is no language); `source` ≤20000. |
 | `divider` | — | No props. **Neither de-duplicate them nor judge whether one belongs**: the web omits a divider whenever the next thing already opens itself (a block `title`, a markdown H2/H3, the head or foot of the report, a `footnote`, a second adjacent divider). Drop one wherever a break reads right; **a divider you inserted that does not appear is the expected outcome, not a bug** — do not go hunting for it. |
 | `callout` | `tone`, `text` | `tone` = `warning`/`info`; `text` ≤2000; optional `title` ≤120. |
-| `image` | `file` **or** `sha256`, plus `alt` | **Exactly one of the two references, never both** (both = refused here on the machine). `file` = a plain file name in `reports/<id>.files/` — `[A-Za-z0-9][A-Za-z0-9._-]{0,79}`, never a path; the extension picks the MIME type (`png`/`jpg`/`jpeg`/`webp`/`gif`) and each picture is 1 byte–2 MB. `sha256` = `[0-9a-f]{64}` of an image already on the platform (§5). One name referenced by several blocks uploads once. `alt` ≤200 is **required** (accessibility, no default). Optional `caption` ≤300. The platform adds `url` and the pixel `w`/`h` when the report is read back — **never send `w`/`h` yourself**, they are unknown props and the report is refused. |
+| `image` | `file` **or** `sha256`, plus `alt` | **Exactly one of the two references, never both** (both = refused here on the machine). `file` = a plain file name in `reports/<id>.files/` — `[A-Za-z0-9][A-Za-z0-9._-]{0,79}`, never a path; the extension picks the MIME type (`png`/`jpg`/`jpeg`/`webp`/`gif`) and each picture is 1 byte–2 MB. `sha256` = `[0-9a-f]{64}` of an image already on the platform (§5). One name referenced by several blocks uploads once. `alt` ≤200 is **required** (accessibility, no default). Optional `caption` ≤300. Optional `source` `{name ≤40, url}` (1.6) marks a **cited** image — a chart captured from a web page — and nothing else; rules in §5 › Citing an image from the web. The platform adds `url` and the pixel `w`/`h` when the report is read back — **never send `w`/`h` yourself**, they are unknown props and the report is refused. |
 
 **Price is drawn as a `candlestick`.** Any price chart in a report — an index, a stock, a
 coin — is a `candlestick`: never a `line_chart` of closes, never an `image` of a matplotlib
-plot. Daily candles: give 40–65 bars (a phone-width reading view fits ~68 full candles; past ~120 the bodies
-smear into a line, and 120 is the hard limit). Half a year or more is a trend, not candles —
+plot. Daily candles: 90 bars by default, up to 120 in a research report (120 is the hard limit). Past
+~72 bars a phone-width view draws high-low lines instead of full candles — expected; do not shorten for it. Half a year or more is a trend, not candles —
 use a `line_chart` of closes for that. **The chart kind follows the series kind, never taste**
 (the bricks have it fixed — `lib/report_bricks.CHART_KIND` — and a hand-built series follows the
 same table): a per-period flow (liquidation USD, net buying, volume — one bar = how much happened
@@ -810,6 +886,63 @@ nothing. On the report channel it means the old report that should have been evi
 could not be deleted, which does clear by itself, so it is retried like any other
 transient failure. Same status code, different channel, opposite handling.
 
+### Citing an image from the web (image block with `source`)
+
+- A cited image is an `image` block carrying `source` — a chart you saw in the
+  built-in browser and captured with `browser_capture(tab, ref, report)`
+  (`ref` from `browser_snapshot`; `report` = the report's id: `pack.report_id`
+  for a pack, else the id you will pass to `write_report`). It saves the
+  picture for that report and returns `{file, source}`. When the id already
+  has a report, the picture waits for the new one (§1: a report is never
+  overwritten) and `write_report` / `publish()` collect it — pass the same id
+  to both and never move a picture yourself.
+- **Where it goes.** A report built on a pack (a template, `research_pack`, a
+  custom recipe): `narrative["images"] = [{"file", "source", "alt"}]` —
+  `file` and `source` exactly as returned, `caption` optional. `publish()`
+  places the blocks after the data blocks, before the reading, and does not
+  count them against R4's 16 blocks. **Never add to `pack.blocks` yourself** —
+  `publish()` refuses a pack edited that way. A report you write by hand with
+  `write_report`: put `file` and `source` into an `image` block unchanged; do
+  not pass the picture through `write_report(images=…)`.
+- **A cited image the user asked for always goes in.** A capture that is not
+  in the report makes `publish()` refuse until you either cite it or give
+  `narrative["images_unused"]` (one sentence saying why); captures left out
+  are deleted when the report is written. Whenever the user asked for a cited
+  image and the report has none — nothing suitable, every capture refused,
+  left out on purpose — the reply says so in one plain sentence.
+- `source` is only `{name, url}`
+  (the domain is the top-level `host`, not part of `source`). Pages that are
+  not `https`, elements near the size of the whole view or larger, and a
+  picture that came out blank or cut off (`reason: "incomplete"` — the chart
+  had not finished loading; wait and capture again, or pick another) are
+  refused (`capture_refused`); nothing is saved. Your own generated figures
+  (matplotlib etc.) never carry `source`.
+- **At most 2 cited images per report**, and only when the image directly
+  supports a claim written in the text. Never decorative. `write_report` (and
+  `publish()`, which calls it) refuses a report with more than 2, before
+  anything is written.
+- **If Blave has the data, draw it yourself** (`candlestick`, `line_chart`,
+  `bar_chart`, …) — never cite a screenshot of numbers `lib/data.py` has.
+  Cited images are for what Blave cannot produce: on-chain dashboards,
+  third-party research figures, exchange-announcement charts.
+- `source.url` is the **page URL you read** (`source_url`), never the image
+  file URL. `source.name` is the site or publication name (≤40 characters).
+  The app's page snapshot is what lets the user check the citation — the URL
+  must match the page you actually read. The URL follows the same rules as a
+  news link (§3 `news`): `https://`, a host, no user name or password, ≤500
+  characters, no spaces — anything else refuses the report.
+- **Capture the single chart/figure element only**, cropped to it — never a
+  full-page screenshot, never surrounding article text, never browser UI.
+  Do not crop out the site's watermark or embedded attribution.
+- A page the browser refuses (`blocked_policy`) cannot be captured — use
+  another source.
+- Reports can be shared publicly with the image and its source line kept:
+  capture nothing you would not republish (no personal data, no account UI).
+- `alt` says what the chart shows, in the report's language (required; no
+  fallback). File rules unchanged (≤2MB); `browser_capture` already crops and
+  scales for the 680px column.
+- A report with a cited image is `schema_version` `"1.6"`; `write_report` sets it.
+
 ## 6. Structural rules worth re-reading before you write
 
 1. `meta` exactly once, first block.
@@ -827,6 +960,7 @@ transient failure. Same status code, different channel, opposite handling.
    is left as `text` so it stays neutral.
 9. Every `image` block carries `file` **or** `sha256`, never both; a `file` exists in
    `reports/<id>.files/` and was written before the report JSON.
+   `source` (a cited web image) is `{name, url}` only, in a `"1.6"` report, at most 2 per report.
 10. A `candlestick` holds 2–120 bars, its `t` strictly increasing, and every bar has
     `low ≤ min(open, close)` and `max(open, close) ≤ high`; it only appears in a report whose
     `schema_version` is `"1.2"` or `"1.3"`.
@@ -927,6 +1061,28 @@ the reader's time, the fabricated one loses them money. Every figure stays real 
   already have: a +0.08% annual return cannot sit next to half-year returns that add up to
   about +9.8% a year.
 
+### 7. A change is measured on one basis
+
+Measured on a live report: a 「台積電 ADR 換算溢價」 worked out by hand as ADR 9/23 ÷ 2330's 9/23
+close (13.31%) and then ADR 9/25 ÷ 2330's 9/24 close (15.72%), titled 「溢價從 13.31% 擴到
+15.72%」. The two sides used a different Taiwan close; on one basis (the 9/24 close) the
+earlier value is 14.45% and the change is 1.27 points, not 2.41.
+
+1. **Both values of a before / after comparison use the same basis and the same formula.** The
+   denominator, the FX rate and the reference price are each of the same date on both sides.
+   When any one of them changed date, the two numbers are not one measure at two moments:
+   never write them as 「從 A 到 B」, 「擴大／收斂 N 個百分點」 or a change column.
+2. **A figure you derived yourself** (no brick gave it, `describe()` does not list it): the
+   table or the caption states the formula and the date of every input. When an input on the
+   same basis cannot be had, the cell says 「—」 (the one way a report writes a missing value)
+   — do not compute it from what is at hand.
+   When the user asked for no estimates (「不要估」), a derived figure stays out of the title
+   and the lead.
+3. **A percentile is not a rank.** 「第 2 百分位」 is never written as 「第 2 低」, and a rank is
+   never written as a percentile.
+
+`quickstart()` and the publish checklist in `describe()` (item 13) carry the same three rules.
+
 ## 7b. Hand-written reports — presentation, and the research rules
 
 A report you build yourself with `write_report` — a research write-up, or a `morning` report
@@ -1004,7 +1160,7 @@ section headings in the report's language.
 **How to build one — about four minutes, never a hand-written fetch script:**
 1. **Search first**, before any code (§1b › Report flow, § News): 3+ sites, read lean (below).
 2. **`pack = research_pack("SOL", extra=[…], days=30, window="7d")`** (`lib.report_templates`; `days` = the
-   span the question is about, `window` = the OI window — `"7d"` unless the question is about today) — price candles and levels,
+   span the comparison against BTC covers (not the candle count: 120 bars), `window` = the OI window — `"7d"` unless the question is about today) — price candles and levels,
    volume against its 20-day mean, the coin against BTC, funding / open interest / long-short, Blave
    indicators; a Taiwan stock gets candles, levels and 外資買賣超. `topics=[…]` picks sections
    (`RESEARCH_TOPICS`); `extra` adds up to 3 bricks for what the news is about. Do not read lib
@@ -1195,8 +1351,8 @@ convenience):
   never applied on the side. A user instruction that names the change (「把 tw-weekly 刪掉」,
   「tw-weekly 改成 22:00」) or the web's edit flow (end of this section) is its own
   confirmation: do it and state the before → after in the reply.
-- **A hand-written report never reuses a job's report id** (`tw-weekly-20260911`): the same id
-  overwrites what the job published. Give it its own (`tw-weekly-narr-20260911`).
+- **A hand-written report never reuses a job's report id** (`tw-weekly-20260911`): it would
+  be filed as one more run of that job. Give it its own (`tw-weekly-narr-20260911`).
 - `prompt` is the user's own request, not your rewrite; the web shows it back as the
   report's description and hands it to you again when they edit it.
 - `schedule.cron` is standard 5-field cron — no `@daily`, no seconds field, no month/weekday
@@ -1271,8 +1427,8 @@ job's id. Nobody is watching it:
   exit or a run over 600 s is `failed` (the tail of `run.log` shows in the web, and the
   usual failure alert fires). Do not script a fixed judgement into it — `run.py` is the
   data-only form (§1b); the narration, where there is one, comes from the scheduled agent turn above.
-- Use date-stamped report ids (`perf-20260902-0800`) unless the re-run really should
-  overwrite the previous report.
+- Use date-stamped report ids (`perf-20260902-0800`). Every run is kept: a run that lands
+  on an id already used is written as `-2`, `-3`, … (§1), never over the earlier one.
 
 When the user edits a job from the web you receive 「請修改定期報告「{title}」（id：{id}）。
 新的描述：「…」。新的週期：「…」…」: change `run.py` and/or the schedule accordingly, call

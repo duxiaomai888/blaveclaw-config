@@ -150,7 +150,7 @@ if node:
     check(out["src"] == [["FRED", ["TOKEN"], True], ["POLYGON", ["TOKEN"], True], ["NEWSRC", ["API_KEY"], True]],
           f"datasrc.js lists the sources and fields the script wrote ({out['src']})")
 else:
-    print("skip node not found — datasrc.js round-trip not run")
+    print("SKIP  datasrc.js round-trip (node not found)")
 shutil.rmtree(WS)
 
 # ── 4. every command the reference shows
@@ -162,7 +162,7 @@ for l in DOC.splitlines():
         cmds.append(l.strip())
 cmds += [c for c in re.findall(r"`([^`\n]+)`", DOC) if re.match(r"(ssh|scp|grep|python3|rm|mkdir|mv|chmod) ", c)]
 ALLOWED_CHAIN = {
-    'ssh <SSH_OPTS> blaveagent@<host> "cd /opt/blave-agent/workspace && python3 strategies/<name>/strategy.py"',
+    'ssh <SSH_OPTS> blaveagent@<host> "cd /opt/blave-agent/workspace && python3 strategies/<dest>/strategy.py"',
     'ssh <SSH_OPTS> blaveagent@<host> "cd /opt/blave-agent/workspace && python3 -c \\"__import__(\'lib.guard\').guard.trip_halt(\'<reason>\', \'desktop-agent\')\\""',
     'ssh <SSH_OPTS> blaveagent@<host> "cd /opt/blave-agent/workspace && python3 - <name>" <<\'PY\'',
     'ssh <SSH_OPTS> blaveagent@<host> "cd /opt/blave-agent/workspace && mv strategies/<name>/<f>.handoff strategies/<name>/<f> && rm -f strategies/<name>/stats.json && python3 strategies/<name>/strategy.py"',
@@ -192,7 +192,7 @@ check(DOC.count("Drop `DATA_API_KEY` and `DATA_SECRET_KEY`") == 1, "5.2 names th
 check({c for c in cmds if "rm -r" in c and c != "rm -rf"} == {"rm -rf tmp/cloud-handoff", 'ssh <SSH_OPTS> blaveagent@<host> rm -rf "/tmp/oc-config"'},
       "the only recursive rm are the fixed tmp/cloud-handoff and the remote /tmp/oc-config clone")
 check(r"^[A-Za-z0-9_.-]{1,64}\.py$" in DOC and "rmdir" in DOC, "file-name allow-list and rmdir-only cleanup are stated")
-check(DOC.count("&&") == 8, f"'&&' appears only in the step 2.2 rule sentence and the registered commands ({DOC.count('&&')})")
+check(DOC.count("&&") == 7, f"'&&' appears only in the step 2.2 rule sentence and the registered commands ({DOC.count('&&')})")
 # one list of chained forms (step 2.2); any other sentence that counts them drifts when a form is added
 rule = re.search(r"chaining happens only inside the single quoted remote command of the forms this file spells out \(([^)]*)\)", DOC)
 check(rule is not None and [x.strip() for x in rule.group(1).split(",")] == ["step 2.5", "step 6", "*Anything else* item 4", "the HALT trip"]
@@ -202,7 +202,7 @@ check(not counted, f"no other sentence counts the chained forms itself ({counted
 check("chained remote forms step 2.2 lists" in DOC, "step 6 defers to the step 2.2 list")
 
 # ── 4b. the 4a trading check: a false "not trading" here lets the agent overwrite live code
-m = re.search(r"\n(import json, os, re, subprocess, sys\n.*?)\nPY\n", DOC, re.S)
+m = re.search(r"\n(import json, os, re, subprocess, sys\n.*?)\n```\n", DOC, re.S)
 check(m is not None, "step 4a carries the trading-check script")
 TW = tempfile.mkdtemp()
 os.makedirs(os.path.join(TW, "bin")); os.makedirs(os.path.join(TW, "strategies", "s1")); os.makedirs(os.path.join(TW, "manager")); os.makedirs(os.path.join(TW, "state"))
@@ -210,7 +210,7 @@ with open(os.path.join(TW, "bin", "crontab"), "w") as f:
     f.write('#!/bin/sh\ncase "$CRON" in\n  none) echo "no crontab for blaveagent" >&2; exit 1;;\n'
             '  broken) echo "crontab: permission denied" >&2; exit 1;;\n  *) printf "%s\\n" "$CRON";;\nesac\n')
 os.chmod(os.path.join(TW, "bin", "crontab"), 0o755)
-def trading_check(cron="none", amounts=None, deployments=None, name="s1"):
+def trading_check(cron="none", amounts=None, deployments=None, name="s1", start=None):
     for rel, obj in (("manager/portfolio_config.json", amounts), ("state/deployments.json", deployments)):
         p = os.path.join(TW, rel)
         if os.path.exists(p):
@@ -219,9 +219,9 @@ def trading_check(cron="none", amounts=None, deployments=None, name="s1"):
             with open(p, "w") as f:
                 f.write(obj if isinstance(obj, str) else json.dumps(obj))
     env = dict(os.environ, PATH=os.path.join(TW, "bin") + os.pathsep + os.environ["PATH"], CRON=cron)
-    r = subprocess.run([sys.executable, "-", name], input=m.group(1), cwd=TW, env=env, capture_output=True, text=True)
+    r = subprocess.run([sys.executable, "-", name] + ([start] if start else []), input=m.group(1), cwd=TW, env=env, capture_output=True, text=True)
     return r.returncode, (json.loads(r.stdout) if r.returncode == 0 else r.stderr)
-CLEAR = {"exists": True, "in_amounts": False, "deployed": False, "cron_lines": 0}
+CLEAR = {"exists": True, "in_amounts": False, "deployed": False, "cron_lines": 0, "free": "s1_2"}
 check(trading_check() == (0, CLEAR), "no config, no deployments, no crontab → exists and clear")
 check(trading_check(name="nope")[1]["exists"] is False, "a missing folder reports exists: false")
 check(trading_check(amounts={"amounts": {"s1": 0}})[1]["in_amounts"] is True, "a 0 amount is still picked (in_amounts)")
@@ -231,6 +231,15 @@ check(trading_check(cron="*/5 * * * * cd /opt/blave-agent/workspace && python3 s
       "a cron line running strategies/s1/ counts")
 check(trading_check(cron="*/5 * * * * python3 strategies/s1_v2/strategy.py\n0 * * * * run s10")[1]["cron_lines"] == 0,
       "s1_v2 / s10 are not s1 (whole-word, like grep -w)")
+# Wei 09-28:目的地同名一律改存新名字;free = 第一個沒被占(資料夾、下單設定、deployments、cron 都算)的 <name>_N
+os.makedirs(os.path.join(TW, "strategies", "s1_2"))
+check(trading_check()[1]["free"] == "s1_3", "s1_2 taken (folder) → free is s1_3")
+check(trading_check(amounts={"amounts": {"s1_3": 0}})[1]["free"] == "s1_4", "s1_3 only in amounts (no folder) is still taken → s1_4")
+check(trading_check(cron="0 * * * * python3 strategies/s1_3/strategy.py")[1]["free"] == "s1_4", "s1_3 only in crontab is taken → s1_4")
+check(trading_check(start="5")[1]["free"] == "s1_5" and trading_check(start="x")[1]["free"] == "s1_3", "the app's proposed N is the starting point; a bad N falls back to 2")
+long = "a" * 64
+check(trading_check(name=long)[1]["free"] == "a" * 62 + "_2", "a 64-char name is cut from the right so <name>_N still fits 64")
+shutil.rmtree(os.path.join(TW, "strategies", "s1_2"))
 rc, _ = trading_check(cron="broken")
 check(rc != 0, "a crontab error other than 'no crontab' exits non-zero (stop, never 'not trading')")
 rc, _ = trading_check(deployments="{not json")
@@ -624,11 +633,124 @@ for label, needle in {
     check(needle in DOC, f"source-report rule: {label}")
 check("stop and offer to run the backtest first" not in DOC and "offer to backtest it" not in DOC,
       "no leftover 'stop and offer to backtest' on a missing source report")
+# 電腦版送來的 Type B 那一句:這份文件引用的尾巴要跟 app 真的送出的字一樣(shell/i18n/*.po),兩邊一起改
+import re as _re
+for _lang, _keys in (("zh", ("ho.msgB.up", "ho.msgB.down")), ("en", ("ho.msgB.up", "ho.msgB.down"))):
+    _po = open(os.path.join(ROOT, "shell", "i18n", _lang + ".po"), encoding="utf-8").read()
+    for _k in _keys:
+        _s = _re.search(r'^msgid "' + _re.escape(_k) + r'"\nmsgstr "(.*)"$', _po, _re.M).group(1)
+        _tail = _s[_s.index("確認它"):] if _lang == "zh" else _s[_s.index("check that it starts"):]
+        if _lang == "en" and _k.endswith("down"):
+            _tail = "starts here"
+        check(_tail in DOC.split("## 0.")[0], f"Type B button sentence quoted as the app sends it: {_lang} {_k}")
+check("試跑一次，告訴我結果" not in DOC and "Run it once … and tell me the result" not in DOC,
+      "the old Type B button sentence (run it once) is no longer quoted")
+# e2e 0.1.8 H:Type B 也搬得過去(電腦版叫人「送上雲端」才能定時跑,agent 卻拒絕搬)。沒有回測可比 → 在目的地試跑一次;
+# 會下單的不跑、只檢查程式碼;排程不從這裡做(NEVER 那一條一個字都沒放寬)
 for label, needle in {
-    "1.3 Type B / trading source still stops": "A Type B script or a trading strategy is not handed off",
-    "4a trading destination still stops": "**Trading → stop and ask; never overwrite.**",
+    "1.3 Type B is handed off, never refused": "Never refuse a Type B handoff, and never say the move is only for strategies that can be backtested.",
+    "6B in place of 6, 7B in place of 7": "with **step 6B in place of step 6 and step 7B in place of step 7**",
+    "6B: an order-capable script is never run, whatever a flag says": "**A script that can place an order is never run** — not by this script and not by you in any other way",
+    "6C: a handoff schedules nothing, and sends the user nowhere else for it": "schedules nothing, on either side, whatever the strategy does",
+    # Wei 2026-09-28:電腦版 agent 可以在雲端主機上裝排程——先確認、只裝被要求的那一條
+    "7B: the closing sentence says where to ask": "「要讓它定時跑，切到雲端後跟我說一聲。」 / \"To run it on a schedule, switch to the cloud view and tell me.\"",
+    "7B: no pointer when the code can place an order": "When the trial was not run because the code can place an order, leave that sentence out (S1)",
+    "S: cloud machine only, the one strategy named, after they confirmed": "**on the cloud machine only, for the one strategy they named, after they confirmed.**",
+    "S1: order-placing code is not scheduled from here; Type A / C never": "`can_order: true` → it is not scheduled from here",
+    "S2: a request that names the schedule is not the confirmation": "names the schedule inside the request; it is not the confirmation",
+    "S2: act on the next message only": "Act on the user's next message only; anything but a yes → nothing is scheduled.",
+    "S3: no health check, nothing beside the one schedule": "No health-check schedule, no environment line, no second strategy, no tidying of what is already there",
+    "S4: the one form the runtime lets through": "only when the whole call is one plain `ssh <SSH_OPTS> blaveagent@<host> \"<remote command>\"`",
+    "S5: a refusal is not retried another way": "Otherwise stop: no rewording, no script around it, no split word, no other tool",
+    "S6: never hand the user a schedule line": "Never hand the user a schedule line to add themselves and never send them to a terminal",
+    "N: step 8 runs before the reply is written": "**Step 8 first, then the reply.**",
+    "N: the reply opens with what the user asked for": "**The reply's first sentence is about what the user asked for**",
+    "L: a finding is reported, never fixed on the side": "is a finding for the reply, never a thing to fix on the side",
+    "L: what the machine's own agent confirms first, the desktop agent confirms first": "**What that machine's own agent must confirm first, you confirm first too.**",
+    "N: step 8 prints nothing and nothing is run to look at it": "Both commands print nothing when they work, and nothing more is run to look at the result",
+    "N: the general-work report leaves step 8 out": "Step 8 is not part of the report: the reply never says it happened.",
+    "7B: no table, no backtest numbers": "No table, no backtest numbers, no Match / Differs state",
+    "NEVER: schedule is still forbidden on both sides": "- **NEVER start, pause, resume or schedule trading on either side**, and never clear a HALT. The strategy arrives as a backtest-only draft; going live is the user's own action on the destination (`AGENTS.md` › Deployment redline). **The one exception is tripping an emergency HALT**",
 }.items():
-    check(DOC.count(needle) == 1, f"existing safety stop kept: {label}")
+    check(DOC.count(needle) == 1, f"Type B handoff: {label}")
+check("A Type B script is not handed off" not in DOC, "the old Type B stop is gone")
+check("blave.org) or Telegram" not in DOC.split("## 6C.")[1].split("## 8.")[0] and "到雲端工作頁" not in DOC,
+      "M: after a Type B handoff the reply does not send the user to the web or Telegram to schedule it")
+SCHED = DOC.split("## A schedule on the cloud machine")[1].split("\n## ")[0]
+check("crontab" not in SCHED and "schtasks" not in SCHED and "* * *" not in SCHED and "```" not in SCHED,
+      "S: the section carries no schedule command to copy — the line comes from the machine's own deployment.md")
+check("清理完成" not in DOC and "連線已關閉" not in DOC,
+      "N: the rule no longer quotes the sentences it forbids (a quoted sentence is one the model can copy)")
+check("- **NEVER start, pause, resume or schedule trading on either side**" in DOC, "S: the NEVER line on scheduling trading is unchanged")
+m6b = re.search(r"\n```py\n(import json, os, re, subprocess, sys\nn, mode = sys\.argv\[1\], sys\.argv\[2\]\n.*?)\n```\n", DOC, re.S)
+check(m6b is not None and "crontab" not in m6b.group(1) and "schtasks" not in m6b.group(1) and "import lib" not in m6b.group(1),
+      "step 6B carries the trial script; it touches no scheduler and imports nothing from lib")
+BW = tempfile.mkdtemp(); BD = os.path.join(BW, "strategies", "w1"); os.makedirs(BD)
+def trial(files, mode="trial"):
+    for f in os.listdir(BD):
+        os.unlink(os.path.join(BD, f))
+    for f, body in files.items():
+        with open(os.path.join(BD, f), "w") as fh:
+            fh.write(body)
+    r = subprocess.run([sys.executable, "-", "w1", mode], input=m6b.group(1).replace("timeout=120", "timeout=2"), cwd=BW, capture_output=True, text=True)
+    return r.returncode, (json.loads(r.stdout) if r.returncode == 0 else r.stderr), os.path.exists(os.path.join(BD, "ran.txt"))
+RAN = "open(__file__.replace('strategy.py', 'ran.txt'), 'w').write('x')\n"
+rc, out, ran = trial({"strategy.py": "# Type: B (monitor only, no orders)\nfrom pathlib import Path\n" + RAN + "print('funding=0.01%')\n"})
+check(rc == 0 and out["ran"] is True and out["exit"] == 0 and "funding=0.01%" in out["tail"] and ran and out["can_order"] is False, "6B: a monitor-only script is run once; exit code and the last lines come back")
+rc, out, ran = trial({"strategy.py": RAN + "raise SystemExit(3)\n"})
+check(rc == 0 and out["ran"] is True and out["exit"] == 3 and ran, "6B: a failing run reports its exit code")
+for label, body in {"lib.order_ import": "from lib.order_binance import place\n", "lib.execute": "import lib.execute as ex\n", "from lib import order_x": "from lib import data, order_okx\n",
+                    "requests.post": "import requests\nrequests.post('https://x')\n", "session .post(": "s.post('https://x')\n", "create_order call": "ex.create_order('BTC')\n",
+                    "subprocess": "import subprocess\n", "a helper file": None}.items():
+    files = {"strategy.py": "# Type: B (monitor only, no orders)\nDRY_RUN = True\n" + RAN + (body or "")}
+    if body is None:
+        files["leg_a.py"] = "from lib.order_bybit import place\n"
+    rc, out, ran = trial(files)
+    check(rc == 0 and out["ran"] is False and out["can_order"] is True and out["order_lines"] and not ran and "exit" not in out,
+          f"6B: a script that can place orders is NOT run, whatever its header or DRY_RUN says ({label})")
+rc, out, ran = trial({"strategy.py": RAN + "def broken(:\n"})
+check(rc == 0 and out["ran"] is False and out["syntax_errors"] and not ran, "6B: a syntax error is reported and nothing runs")
+rc, out, ran = trial({"strategy.py": "import time\nprint('started', flush=True)\ntime.sleep(30)\n"})
+check(rc == 0 and out["ran"] is True and out["exit"] is None and out["stopped_after_s"] == 120, "6B: a script that never ends is stopped at the limit, reported as stopped — not as failed")
+rc, out, ran = trial({"strategy.py": RAN}, mode="check")
+check(rc == 0 and out["ran"] is False and not ran, "6B: check mode reads and compiles, never runs")
+rc, out, ran = trial({"strategy.py": RAN}, mode="schedule")
+check(rc != 0 and not ran, "6B: the script has no schedule mode")
+rc, out, ran = trial({"scan.py": RAN})
+check(rc != 0 and not ran, "6B: no strategy.py → error exit")
+shutil.rmtree(BW)
+check(DOC.count("**4a. Pick the destination name `<dest>` — never overwrite.**") == 1 and "stop and ask; never overwrite" not in DOC
+      and "its code is replaced entirely" not in DOC and "a later handoff replaces" not in DOC,
+      "4a: a taken destination name is auto-renamed, nothing is overwritten (no leftover overwrite path)")
+# 4c: the copy's STRATEGY_NAME is renamed before it runs — kept, the runner would write into / run live as the original
+m4c = re.search(r"\n```py\n(import os, re, sys\nn, d = sys\.argv\[1\], sys\.argv\[2\]\n.*?)\n```\n", DOC, re.S)
+check(m4c is not None, "step 4c carries the rename script")
+RW = tempfile.mkdtemp(); D = os.path.join(RW, "strategies", "s1_2"); os.makedirs(D)
+def rename_run(files):
+    for f in os.listdir(D):
+        os.unlink(os.path.join(D, f))
+    for f, body in files.items():
+        with open(os.path.join(D, f), "w") as fh:
+            fh.write(body)
+    r = subprocess.run([sys.executable, "-", "s1", "s1_2"], input=m4c.group(1), cwd=RW, capture_output=True, text=True)
+    return r.returncode, r.stdout, {f: open(os.path.join(D, f)).read() for f in os.listdir(D)}
+rc, out, got = rename_run({"strategy.py": 'STRATEGY_NAME = "s1"\nDISPLAY_NAME = "x"\n', "scan.py": "STRATEGY_NAME = 's1'\n", "validate.py": "p = 'strategies/s1/stats.json'\n", "leg_a.py": "x = 's10'\n"})
+check(rc == 0 and got["strategy.py"].startswith('STRATEGY_NAME = "s1_2"\n') and got["scan.py"] == 'STRATEGY_NAME = "s1_2"\n'
+      and got["leg_a.py"] == "x = 's10'\n" and "validate.py" in out and "leg_a.py" not in out and not any(f.endswith(".rename") for f in got),
+      "4c renames the STRATEGY_NAME line only, lists a file that still names the old one, leaves no temp file")
+# Wei 09-28:同一步把 DISPLAY_NAME 加同一個號碼——有中日韓字 → 全形「（N）」,否則 " (N)";沒有 DISPLAY_NAME 就不動;其餘一行都不改
+rc, out, got = rename_run({"strategy.py": 'STRATEGY_NAME = "s1"\nDISPLAY_NAME  = "比特幣 RSI"  # shown\nDESCRIPTION = "s1 RSI"\n', "scan.py": "STRATEGY_NAME = 's1'\nDISPLAY_NAME = 'BTC RSI'\n", "leg_a.py": 'DISPLAY_NAME = "x"\n'})
+check(rc == 0 and got["strategy.py"] == 'STRATEGY_NAME = "s1_2"\nDISPLAY_NAME  = "比特幣 RSI（2）"  # shown\nDESCRIPTION = "s1 RSI"\n'
+      and got["scan.py"] == "STRATEGY_NAME = \"s1_2\"\nDISPLAY_NAME = 'BTC RSI (2)'\n" and got["leg_a.py"] == 'DISPLAY_NAME = "x"\n',
+      "4c numbers DISPLAY_NAME with the same N (full-width for CJK, ' (N)' otherwise), only in a file whose STRATEGY_NAME it renamed; nothing else changes")
+rc, out, got = rename_run({"strategy.py": 'STRATEGY_NAME = "s1"\nx = 1\n'})
+check(rc == 0 and got["strategy.py"] == 'STRATEGY_NAME = "s1_2"\nx = 1\n', "4c: no DISPLAY_NAME → left alone")
+rc, out, got = rename_run({"strategy.py": 'NAME = "s1"\n'})
+check(rc != 0 and got["strategy.py"] == 'NAME = "s1"\n', "4c: no single STRATEGY_NAME line → exits non-zero, nothing renamed")
+shutil.rmtree(RW)
+# Wei 09-27:來源在下單照樣搬(只搬碼與 DATA_ 金鑰);shell 確認框同一條(tests/check_shell_handoff_msg.js)
+check("**Trading on the SOURCE does not block it**" in DOC and "not trading on the SOURCE" not in DOC and "a trading strategy is not handed off" not in DOC,
+      "1.3: a trading source hands off; no leftover source-trading stop")
 
 print("FAILED" if fails else "all ok")
 sys.exit(1 if fails else 0)

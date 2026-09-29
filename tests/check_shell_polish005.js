@@ -6,10 +6,11 @@
 // 跑法:node tests/check_shell_polish005.js(找不到 shell/node_modules 的 Electron 就 SKIP)
 const path = require("path"), fs = require("fs");
 const SHELL = path.join(__dirname, "..", "shell");
+const GATE = require("./_electron_gate");
 
 if (!process.versions.electron) {
-  const bin = path.join(SHELL, "node_modules", ".bin", "electron");
-  if (!fs.existsSync(bin)) { console.log("SKIP  找不到 shell/node_modules 的 Electron(先 cd shell && npm install)"); process.exit(0); }
+  const bin = GATE.bin(SHELL);
+  if (!bin) { process.exit(0); }
   const r = require("child_process").spawnSync(bin, [__filename], { stdio: "inherit" });
   process.exit(r.status == null ? 1 : r.status);
 }
@@ -88,7 +89,8 @@ app.whenReady().then(async () => {
     return { reasonShown: el.querySelector(".think-reason").getBoundingClientRect().height > 0, gone: !el.querySelector(".think-reason-show"), focus: document.activeElement === el.querySelector(".think-reason") }; })()`);
   ok("③ 按了才出思考文字;鈕收掉、焦點接到那段字", g.reasonShown && g.gone && g.focus);
   const n = await turn(false, true);
-  ok("③ 正常的回合:照舊收起(不自己攤開、沒有那顆鈕)", !n.open && n.aria === "false" && n.show === null);
+  // Wei 0928 第 2b 點:思考文字每一輪都先收著——正常的回合也有那顆鈕(在收起的面板裡),只是整塊不自己攤開
+  ok("③ 正常的回合:照舊收起(不自己攤開);思考文字一樣收在「顯示思考內容」後面", !n.open && n.aria === "false" && !n.reasonShown && n.show === (await js(`t("turn.showReason")`)));
   const e = await turn(true, false);
   ok("③ 出錯但沒有思考文字:攤開收據、不多一顆鈕", e.open && e.show === null);
   const src = fs.readFileSync(path.join(SHELL, "renderer", "app.js"), "utf8");

@@ -1,7 +1,7 @@
 // 內建瀏覽器的網址政策(純資料 + 純函式,不 require electron;tests/check_shell_browser_policy.js 逐條列舉)。
 // 契約:.claude/output/specs/desktop-browser-agent-tools-2026-09-26.md §3.1。分兩層:
 //   network(): 該 partition 的每個請求都過(用戶與 agent 一視同仁)——scheme、帳密、內網/本機、非 80/443、廣告追蹤。
-//   agent():   只管 agent 的工具呼叫,以分頁「當下」網址判——條款禁 AI 的來源、交易所/券商後台、銀行、金流、*.blave.org。
+//   agent():   只管 agent 的工具呼叫,以分頁「當下」網址判——有危害的網站、交易所/券商後台、銀行、金流、*.blave.org。
 // 用戶自己在分頁裡開交易所後台照常;agent 對那一頁什麼都讀不到、點不到(「用戶開、agent 讀」的繞法在這層關掉)。
 "use strict";
 
@@ -13,9 +13,8 @@ const MULTI_TLD = new Set([
   "co.kr", "or.kr", "com.sg", "com.my", "co.in", "com.br", "co.nz", "com.mx", "co.za", "com.tr", "com.vn", "co.id", "com.ph",
 ]);
 
-// 【工具層】條款明文禁止 AI 代理或 AI 摘要的來源(canon data-onboarding §9「仍然不用的」第一類)。
-// tradingview.com 刻意不在這裡(Wei 拍板放行)。其餘成員待數據研究員補。
-const AGENT_BLOCKLIST = ["theblock.co"];
+// 【工具層】有危害的網站(惡意程式、詐騙)。對方條款或 robots 禁 AI 不是列進來的理由(Wei 09-28 拍板),所以目前是空的。
+const AGENT_BLOCKLIST = [];
 
 // 【工具層】D3 交易所(Wei 09-26 拍板):**公開內容頁放行**(公告、新聞、學院、Square、行情 / 價格頁、說明中心、費率),
 // **後台照擋**(登入、帳戶、資產、下單 / 交易、API 管理、充提、設定等要登入的路徑)。判斷是「網域 × 路徑」三段:
@@ -121,9 +120,10 @@ function v6Private(h) {
 // 比正常瀏覽高一截,又低於夾帶一段文章或金鑰所需的長度。搜尋引擎的查詢網址照常放行(它本來就長、而且是 agent 自己的查詢字)。
 const EXFIL_TAIL_MAX = 200;
 const EXFIL_VALUE_MIN = 40;   // 參數值至少這麼長才去比對讀過的頁面(短的會撞到普通單字)
+const GOOGLE_HOST = /(^|\.)google\.(?:com|[a-z]{2}|com?\.[a-z]{2})$/;   // 同 verify.js 的 GOOGLE_HOST(tests/check_shell_browser_verify.js 釘住兩邊一致)
 function searchEngine(u) {
   const h = u.hostname.toLowerCase();
-  return (/(^|\.)google\.[a-z.]+$/.test(h) && /^\/(search|webhp)/.test(u.pathname)) || /(^|\.)duckduckgo\.com$/.test(h)
+  return (GOOGLE_HOST.test(h) && /^\/(search|webhp)/.test(u.pathname)) || /(^|\.)duckduckgo\.com$/.test(h)
     || (/(^|\.)bing\.com$/.test(h) && u.pathname.startsWith("/search"));
 }
 const squash = (x) => String(x || "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -388,4 +388,70 @@ function agent(raw) {
   return null;
 }
 
-module.exports = { network, agent, lookalike, SCAM_WORDS, privateHost, resolvesPrivate, exfilRisk, EXFIL_TAIL_MAX, registrable, hostOn, AGENT_BLOCKLIST, EXCHANGES, EXCHANGE_PUBLIC_SEGMENTS, EXCHANGE_BACKEND_SEGMENTS, BROKERS, BANKS, PAYMENTS, ADS };
+/**
+ * 【用戶自己按「用系統瀏覽器開」】這個網址能不能交給系統瀏覽器。回 null = 可以;否則 { reason, host }。
+ * 那是用戶自己的瀏覽器、自己的操作:agent 不准碰的敏感網域(交易所與券商後台、銀行、登入授權頁)、blave.org、廣告網域照開。
+ * 有危害的不開:不是 http(s)、網址帶帳密、本機 / 內網位址、非標準埠、相似網域、有危害的網站名單。
+ */
+const EXTERNAL_DENY = ["scheme", "credentials_in_url", "private_address", "port", "lookalike", "blocklist"];
+function external(raw) {
+  let u; try { u = new URL(String(raw)); } catch (_) { return { reason: "scheme" }; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return { reason: "scheme", host: lc(u.hostname) };
+  const a = agent(u.href);
+  return a && EXTERNAL_DENY.includes(a.reason) ? a : null;
+}
+/**
+ * 這個分頁要交給系統瀏覽器的網址,或 null(不開)。tab = 分頁紀錄;live = 分頁當下的網址(webContents.getURL())——
+ * 頁面自己換過網址(pushState)之後以它為準;被擋下、打不開的頁停在 about:blank,用紀錄的那個。
+ * 等用戶確認的網址(need.kind === "confirm")還沒放行:不開。renderer 只給分頁 id,網址從來不由它說。
+ */
+function externalUrl(tab, live) {
+  if (!tab || typeof tab !== "object") return null;
+  if (tab.need && tab.need.kind === "confirm" && !tab.userDone) return null;
+  const now = typeof live === "string" && /^https?:\/\//i.test(live) ? live : "";
+  const url = now || (typeof tab.url === "string" ? tab.url : "");
+  return url && !external(url) ? url : null;
+}
+
+/**
+ * 引用圖的出處網址(browser_capture):報告契約 1.6 的 image.source.url 規則照外部連結——https、有主機、不帶帳密、
+ * ≤500 字、不含空白與控制字元。在擷取當下擋:圖存下去之後才被 api 以 400 拒收,整份報告會進 failed/。
+ * 回 null = 可以引用;否則 "scheme" | "credentials" | "long" | "format"。
+ */
+function citable(raw) {
+  const s = String(raw == null ? "" : raw);
+  if (s.length > 500) return "long";
+  if (/[\s\p{Cc}]/u.test(s)) return "format";
+  let u; try { u = new URL(s); } catch (_) { return "scheme"; }
+  if (u.protocol !== "https:" || !u.hostname) return "scheme";
+  if (u.username || u.password) return "credentials";
+  return null;
+}
+
+/**
+ * 引用圖出處網址的清理(稽核 S1):報告會被公開分享,網址裡的祕密(簽章網址、OAuth 回跳留下的 token、私人儀表板的 key)
+ * 不能跟著出去。寧可多剝:剝掉之後頁面開不出同一個畫面,比 token 公開好。
+ * query:名稱命中的參數拿掉;fragment:看起來像參數串而且有一個命中,整段拿掉。解析不了就原樣回(由 citable 擋)。
+ */
+const SECRET_KEYS = new Set([
+  "token", "key", "apikey", "sig", "signature", "sign", "secret", "session", "sessionid", "sid", "auth", "authorization",
+  "password", "passwd", "pwd", "pass", "jwt", "otp", "ticket", "credential", "credentials",
+]);   // code / state 不列:一次性、短效,而且 ?code=2330 這種股票代號頁很常見
+const SECRET_TAILS = ["token", "secret", "signature", "apikey", "password", "sessionid"];
+const SECRET_HEADS = ["xamz", "xgoog"];
+function secretKey(k) {
+  const n = lc(k).replace(/[^a-z0-9]/g, "");
+  return SECRET_KEYS.has(n) || SECRET_TAILS.some((x) => n.endsWith(x)) || SECRET_HEADS.some((x) => n.startsWith(x));
+}
+function citeUrl(raw) {
+  const s = String(raw == null ? "" : raw);
+  let u; try { u = new URL(s); } catch (_) { return s; }
+  let cut = false;
+  for (const k of [...new Set(u.searchParams.keys())]) if (secretKey(k)) { u.searchParams.delete(k); cut = true; }
+  const f = u.hash.slice(1);
+  if (f.includes("=") && f.split(/[?&;]/).some((p) => secretKey(decodeSafe(p.split("=")[0])))) { u.hash = ""; cut = true; }
+  return cut ? u.href : s;
+}
+function decodeSafe(x) { try { return decodeURIComponent(x); } catch (_) { return x; } }
+
+module.exports = { GOOGLE_HOST, network, agent, external, externalUrl, EXTERNAL_DENY, citable, citeUrl, lookalike, SCAM_WORDS, privateHost, resolvesPrivate, exfilRisk, EXFIL_TAIL_MAX, registrable, hostOn, AGENT_BLOCKLIST, EXCHANGES, EXCHANGE_PUBLIC_SEGMENTS, EXCHANGE_BACKEND_SEGMENTS, BROKERS, BANKS, PAYMENTS, ADS };

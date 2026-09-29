@@ -273,7 +273,7 @@ const okc = (state, extra = {}) => ({ code: "OK", machine: { state }, strategies
   /* 雲端啟動**不順帶送 restart_reconciler**(規格 §4.2-2):那份報告可能是一分鐘前的,照它判等於瞎猜——
      多吃一格速率桶、多一筆稽核。本機那條不動。 */
   ok("trAskStart:雲端只送 resume / resume_wait;這台電腦照舊視 trRecRunning 補 restart_reconciler",
-    /cloud \? \[\(S\) => trSend\(S, cmd, \{\}\)\] : \[/.test(fn("trAskStart")) && /trRecRunning\(S\.st\) \? \{ ok: true \} : trSend\(S, "restart_reconciler", \{\}\)/.test(fn("trAskStart")));
+    /cloud \? \[\(S\) => trSend\(S, cmd, \{\}\)\.then\(sent\)\] : \[/.test(fn("trAskStart")) && /trRecRunning\(S\.st\) \? \{ ok: true \} : trSend\(S, "restart_reconciler", \{\}\)/.test(fn("trAskStart")));
   /* 緊急停止不可以被自己的過場態鎖住(規格 §1.3,Wei 拍板):前一個指令還在路上不是「不能停」的理由。
      重複送 halt 是安全的(api 有自己的速率桶、本機 daemon 沒跑時照樣排隊 daemon.js:149,而且重試沿用同一顆 request_id)。
      啟動方向照舊鎖住——那個重複送就是真的多開一次倉。 */
@@ -304,13 +304,13 @@ const okc = (state, extra = {}) => ({ code: "OK", machine: { state }, strategies
   // 寫進雲端的確認框要標明目的地(規格 §5:刻意講三次);本機不給那兩個參數,框逐位元組不變
   { const app2 = fs.readFileSync(path.join(R, "app.js"), "utf8"), html2 = fs.readFileSync(path.join(R, "index.html"), "utf8");
     ok("confirmBox 有 env / footWhere / lead 三個選用參數,DOM 兩個槽在,關框時一起收掉",
-      /function confirmBox\(\{ title, lines, ok, onOk, opener, alt, mark, markKind, extra, okDisabled, okWhy, env, footWhere, lead, single \}\)/.test(app2)
+      /function confirmBox\(\{ title, lines, ok, onOk, opener, alt, mark, markKind, extra, okDisabled, okWhy, env, footWhere, lead, single, cancel, choices, choicesLabel, keep, details, detailsOpen \}\)/.test(app2)
       && /<span class="envm" id="del-env" hidden><\/span>/.test(html2) && /<span class="del-where" id="del-where" hidden><\/span>/.test(html2)
       && /\$\("del-env"\)\.hidden = true; \$\("del-where"\)\.hidden = true; \$\("del-modal"\)\.querySelector\("\.modal-head"\)\.classList\.remove\("cloud"\); \$\("del-cancel"\)\.hidden = false;/.test(app2.slice(app2.indexOf("function delClose"))));
     ok("雲端的框:灰標題列 + 「雲端」記號 + 錢記號 + 鈕上方的目的地那一行;暫停與啟動都經過同一支",
       /o\.env = "cloud"; o\.mark = envMoneyText\(money\) \|\| null; o\.markKind = money \|\| null;/.test(fn("trCloudBox"))
       && /t\("tr\.cloud\.footWhere", \{ where: t\("env\.cloud"\), money: envMoneyText\(money\), venue: trVenueLabel\(id, true\) \}\)/.test(fn("trCloudBox"))
-      && /confirmBox\(trCloudBox\(\{/.test(fn("trAskStop")) && /confirmBox\(trCloudBox\(\{/.test(fn("trAskStart"))
+      && /confirmBox\(trCloudBox\(\{/.test(fn("trAskStop")) && /confirmBox\(trCloudBox\(Object\.assign\(\{/.test(fn("trAskStart"))
       && /if \(TR\.env !== "cloud"\) return o;/.test(fn("trCloudBox"))); }
 
   // ── 3. 雲端那一邊是哪一種 ──
@@ -504,23 +504,35 @@ const okc = (state, extra = {}) => ({ code: "OK", machine: { state }, strategies
     // ③ 系統行:只在對話有內容時插;切到哪一邊都插當前方向那條;連續切(上一條仍是最後一則)只留最新一條。真的把 chatSwitched 跑起來
     { const kids = [], box = { get children() { return kids; }, appendChild(el) { kids.push(el); el.parentNode = box; }, get lastElementChild() { return kids[kids.length - 1]; } };
       const doc = { createElement: () => ({ dataset: {}, remove() { const i = kids.indexOf(this); if (i >= 0) kids.splice(i, 1); this.parentNode = null; } }) };
-      const ctx = { $: () => box, document: doc, t: (k) => k, busyPin: () => {}, scrollChat: () => {}, swLine: null };
-      const run = new Function("ctx", "with (ctx) { " + appFn("chatSwitched").replace(/swLine/g, "ctx.swLine") + " return chatSwitched; }")(ctx);
+      const ctx = { $: () => box, document: doc, t: (k) => k, busyPin: () => {}, scrollChat: () => {}, swLine: null, swHeld: null, running: false };
+      const held = (s) => s.replace(/swLine/g, "ctx.swLine").replace(/swHeld/g, "ctx.swHeld").replace(/\brunning\b/g, "ctx.running");
+      const [run, flush] = new Function("ctx", "with (ctx) { " + held(appFn("chatSwitched")) + held(appFn("chatSwitchFlush")) + " return [chatSwitched, chatSwitchFlush]; }")(ctx);
       const sys = () => kids.filter((k) => k.className === "sysline").map((k) => k.dataset.i18n);
       run("local", "cloud"); ok("③ 對話沒有內容:不插", kids.length === 0);
       kids.push({ msg: 1 }); run("local", "cloud"); ok("③ 有內容:切到雲端插一條 chat.sw.cloud", kids.length === 2 && kids[1].dataset.i18n === "chat.sw.cloud" && kids[1].className === "sysline");
       run("cloud", "local"); ok("③ 切回這台電腦、中間沒有新訊息:上一條換成 chat.sw.local(一定插,只留一條)", kids.length === 2 && kids[0].msg === 1 && kids[1].dataset.i18n === "chat.sw.local" && kids[1].className === "sysline");
       run("local", "cloud"); run("cloud", "local"); ok("③ 連續切多次只留最新方向那一條", kids.length === 2 && kids[1].dataset.i18n === "chat.sw.local");
       kids.push({ msg: 2 }); run("local", "cloud"); ok("③ 中間有新訊息:舊的留著、新的一條 chat.sw.cloud", kids.length === 4 && kids[1].dataset.i18n === "chat.sw.local" && kids[2].msg === 2 && kids[3].dataset.i18n === "chat.sw.cloud");
-      run("cloud", "cloud"); ok("③ 同一邊(沒換)不動", kids.length === 4 && sys().join() === "chat.sw.local,chat.sw.cloud"); }
-    ok("③ envSwitch 記下切之前那一邊、切完叫 chatSwitched;換對話時 swLine 歸零", /const prev = ENV\.cur;/.test(fn("envSwitch")) && /chatSwitched\(prev, env\);/.test(fn("envSwitch")) && /liveBubble = null; busy = null; swLine = null;/.test(app));
+      run("cloud", "cloud"); ok("③ 同一邊(沒換)不動", kids.length === 4 && sys().join() === "chat.sw.local,chat.sw.cloud");
+      // e2e #23:回合進行中切視角,那一行不能插在同一輪的瀏覽卡與回覆中間——先記著,回合結束(回覆與卡都掛好)才插
+      kids.push({ msg: "you" }, { msg: "瀏覽卡" }); ctx.running = true; run("cloud", "local");
+      ok("③ 回合進行中切視角:當場不插(同一輪不被切開)", kids.length === 6 && kids[5].msg === "瀏覽卡" && !!ctx.swHeld);
+      kids.push({ msg: "回覆" }); ctx.running = false; flush();
+      ok("③ 回合結束才插,排在這一輪的回覆之後", kids.length === 8 && kids[6].msg === "回覆" && kids[7].dataset.i18n === "chat.sw.local" && ctx.swHeld === null, JSON.stringify(sys()));
+      kids.push({ msg: "you2" }); ctx.running = true; run("local", "cloud"); run("cloud", "local"); kids.push({ msg: "回覆2" }); ctx.running = false; flush();
+      ok("③ 回合中切出去又切回來 = 沒換:回合結束不插任何一條(e2e 那次插了兩條)", kids.length === 10 && kids[9].msg === "回覆2" && ctx.swHeld === null, JSON.stringify(sys()));
+      ctx.running = true; run("local", "cloud"); ctx.running = false; run("cloud", "local");
+      ok("③ 記著的那一筆沒等到回合結束(起不來的回合)、人又切回去:併成一次、不留到下一輪才冒出來", kids.length === 10 && ctx.swHeld === null);
+      flush(); ok("③ 沒有記著的東西時 flush 不動", kids.length === 10); }
+    ok("③ envSwitch 記下切之前那一邊、切完叫 chatSwitched;換對話時 swLine 歸零", /const prev = ENV\.cur;/.test(fn("envSwitch")) && /chatSwitched\(prev, env\);/.test(fn("envSwitch")) && /liveBubble = null; busy = null; swLine = null; swHeld = null;/.test(app)
+      && /if \(rt\) resTurnEnd\(rt, cloudTurn\);[^\n]*\n\s*chatSwitchFlush\(\);[^\n]*\n\}\);/.test(app));
     // 雲端中欄畫雲端那支的報告:#rp 共用、資料分兩袋;雲端列是鈕;「送上雲端」在雲端不畫;送出當下 viewing 指的是雲端那一份
     ok("雲端報告:envShowMain 雲端分支依 RPC 掀 #rp、收 #tr(沒主機可看時兩個都收);這台電腦那一半一個字沒變",
       /const gate = !\$\("cv-empty"\)\.hidden, rp = !gate && typeof RPC !== "undefined" && !!\(RPC\.name && RPC\.data\);/.test(fn("envShowMain")) && /\$\("rp"\)\.hidden = !rp; \$\("main-empty"\)\.hidden = true; \$\("tr"\)\.hidden = gate \|\| rp;/.test(fn("envShowMain"))
       && /const L = TR_BAGS\.local, rp = !L\.open && !!\(RP\.name && RP\.data\);/.test(fn("envShowMain")) && !/envShowLocalMain/.test(code + app));
-    ok("雲端報告:側欄雲端列是 button.strat-row(點了 rpCloudSelect)、選中的帶 aria-current;is-static 退場;#tr-nav 在雲端收掉雲端那支",
+    ok("雲端報告:側欄雲端列是 button.strat-row(點了 rpCloudSelect;再點選中那支經 sideReclick 收掉,見 check_shell_side_reclick)、選中的帶 aria-current;is-static 退場;#tr-nav 在雲端收掉雲端那支",
       /const wrap = trEl\("div", "strat-wrap cs-row"\), row = trEl\("button", "strat-row"\); row\.type = "button"; row\.dataset\.name = x\.name;/.test(fn("envPaintSide")) && /if \(x\.name === sel\) row\.setAttribute\("aria-current", "true"\);/.test(fn("envPaintSide"))
-      && /row\.addEventListener\("click", \(\) => \{ if \(typeof rpCloudSelect === "function"\) rpCloudSelect\(x\.name\); \}\);/.test(fn("envPaintSide")) && !/is-static/.test(code + html + css + fs.readFileSync(path.join(R, "app.css"), "utf8"))
+      && /if \(x\.name === RPC\.name\) sideReclick\(\(\) => rpCloudSelect\(null\)\); else rpCloudSelect\(x\.name\);/.test(fn("envPaintSide")) && !/is-static/.test(code + html + css + fs.readFileSync(path.join(R, "app.css"), "utf8"))
       && /else if \(typeof rpCloudSelect === "function"\) await rpCloudSelect\(null\);/.test(fn("trOpen")) && /rpCloudPrune\(C\.list\)/.test(fn("trPoll")));
     ok("雲端報告:rpCloudSelect 讀的是雲端那袋的 api、讀不到就在原地講(有快取就留著那份)、不退回去讀這台電腦的;rpShowTab / rpRepaint 畫現在這一邊那一袋;本機每輪的 stratRefresh 不拿 RP 蓋雲端報告的頁首",
       /const C = TR_BAGS\.cloud;/.test(appFn("rpCloudSelect")) && /const d = await C\.api\.loadStrategy\(name\);/.test(appFn("rpCloudSelect")) && /if \(!d\) \{\s*if \(cached\) return;/.test(appFn("rpCloudSelect")) && !/window\.blave\.loadStrategy/.test(appFn("rpCloudSelect"))

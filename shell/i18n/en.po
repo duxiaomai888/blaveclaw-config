@@ -12,6 +12,13 @@ msgstr "Use Blave AI"
 msgid "cn.blave.desc"
 msgstr "First card adds 100 TWD of AI credit, then pay per use"
 
+msgid "cn.blave.descSet"
+msgstr "Pay per use, charged to your Blave balance. A first card adds {q} TWD of AI credit."
+
+# 拿不到贈額數字時(離線、api 沒回)只講怎麼收錢那半句
+msgid "cn.blave.descSetNoNum"
+msgstr "Pay per use, charged to your Blave balance."
+
 msgid "cn.blave.btn"
 msgstr "Sign in to Blave"
 
@@ -92,6 +99,10 @@ msgstr "No strategies yet."
 
 msgid "ws.placeholder"
 msgstr "Message the agent"
+
+# 回合進行中、草稿非空時按 Enter:輸入框上方一行(e2e 0.1.8 #71)
+msgid "ws.waitTurn"
+msgstr "The previous turn is still running. Press Enter again when it finishes."
 
 msgid "ws.send"
 msgstr "Send"
@@ -179,7 +190,7 @@ msgid "act.schedule"
 msgstr "Setting up a schedule"
 
 msgid "act.order"
-msgstr "Placing an order"
+msgstr "Running an order command"
 
 msgid "act.account"
 msgstr "Checking the account"
@@ -201,6 +212,88 @@ msgstr "Writing code"
 
 msgid "act.need_user"
 msgstr "Waiting for you"
+
+# 展開的步驟清單:做完的步驟用完成式(對應 act.*;出錯的那一步不換)。缺 key 時畫面退回 act.*
+msgid "step.unknown"
+msgstr "Worked"
+
+msgid "step.fail"
+msgstr "Failed: {doing}"
+
+msgid "step.search"
+msgstr "Searched:"
+
+msgid "step.web_read"
+msgstr "Read"
+
+msgid "step.web_read_many"
+msgstr "Read {n} pages"
+
+msgid "step.web_act"
+msgstr "Used"
+
+msgid "step.docs"
+msgstr "Checked the docs"
+
+msgid "step.files"
+msgstr "Looked through files"
+
+msgid "step.file_read"
+msgstr "Read"
+
+msgid "step.strategy_read"
+msgstr "Read strategy"
+
+msgid "step.strategy_write"
+msgstr "Wrote strategy"
+
+msgid "step.file_write"
+msgstr "Edited"
+
+msgid "step.data"
+msgstr "Fetched data"
+
+msgid "step.backtest"
+msgstr "Backtested"
+
+msgid "step.live_tick"
+msgstr "Ran strategy"
+
+msgid "step.scan"
+msgstr "Scanned parameters"
+
+msgid "step.validate"
+msgstr "Validated"
+
+msgid "step.check"
+msgstr "Checked strategy code"
+
+msgid "step.report"
+msgstr "Built the report"
+
+msgid "step.watch"
+msgstr "Updated the watchboard"
+
+msgid "step.schedule"
+msgstr "Set up a schedule"
+
+msgid "step.order"
+msgstr "Ran an order command"
+
+msgid "step.account"
+msgstr "Checked the account"
+
+msgid "step.status"
+msgstr "Checked what's running"
+
+msgid "step.install"
+msgstr "Installed packages"
+
+msgid "step.cloud"
+msgstr "Connected to the cloud machine"
+
+msgid "step.delegate"
+msgstr "Delegated research"
 
 msgid "turn.busy"
 msgstr "The previous turn is still running."
@@ -262,6 +355,12 @@ msgstr "Default for {model}: {level}. Higher thinks longer and uses more."
 msgid "mp.none"
 msgstr "This model has no effort setting."
 
+msgid "mp.bill"
+msgstr "Pay per use, charged to your Blave balance"
+
+msgid "mp.billBal"
+msgstr "Balance {n} TWD"
+
 msgid "lv.low"
 msgstr "Low"
 
@@ -288,6 +387,16 @@ msgstr "Your account can't use {model}. This turn did not run — switched back 
 
 msgid "fault.noModelBtn"
 msgstr "Choose a Model"
+
+# 第八批 #4(e2e #187):用戶自己那個訂閱的用量上限。字是設計師定稿(用「AI」不用「引擎」:engine 在這個 app 裡指下單引擎)
+msgid "fault.limit"
+msgstr "Your {name} subscription has reached its usage limit. It resets at {when}. Until then, switch to another AI in Settings › Model access."
+
+msgid "fault.limitNoTime"
+msgstr "Your {name} subscription has reached its usage limit. Until it resets, switch to another AI in Settings › Model access."
+
+msgid "fault.limitBtn"
+msgstr "Switch AI"
 
 msgid "mp.na"
 msgstr "Not on your plan"
@@ -354,6 +463,9 @@ msgstr "No backtest data for this strategy."
 
 msgid "tr.empty"
 msgstr "This strategy has no entries or exits."
+
+msgid "tr.emptyPf"
+msgstr "A portfolio strategy shifts the weights of a basket at each rebalance, so there is no trade-by-trade record. The number of trades is under Backtest."
 
 msgid "tr.chartError"
 msgstr "Couldn't draw the chart. The entries and exits below are still available."
@@ -483,6 +595,13 @@ msgstr "Delete?"
 
 msgid "strat.del"
 msgstr "Move to Trash"
+
+# 策略列的兩段式刪除:武裝後的字講去向(刪策略是進系統垃圾桶,可復原;e2e 0.1.8 #73)。.win = Windows 的說法
+msgid "strat.delConfirm"
+msgstr "Move to Trash?"
+
+msgid "strat.delConfirm.win"
+msgstr "Move to Recycle Bin?"
 
 # 回測指標的 tooltip(定義照 lib/analysis.py、lib/runner.py 的算法)
 msgid "bt.tip.totalReturn"
@@ -616,7 +735,7 @@ msgid "fault.checking"
 msgstr "This turn didn’t run — checking your account."
 
 msgid "set.cat.plan"
-msgstr "Data & cloud plan"
+msgstr "Account & plan"
 
 msgid "plan.st.running"
 msgstr "Active · machine running"
@@ -629,6 +748,12 @@ msgstr "Stopped · balance too low"
 
 msgid "plan.bill"
 msgstr "Billing"
+
+msgid "plan.bal"
+msgstr "Blave balance"
+
+msgid "plan.balNa"
+msgstr "Balance unavailable right now"
 
 msgid "plan.month"
 msgstr "{p} TWD / month"
@@ -943,16 +1068,13 @@ msgid "pv.e.sub.old"
 msgstr "After that, data comes with the Blave Agent Cloud Plan at {p} TWD a month."
 
 msgid "pv.e.unknown"
-msgstr "This computer can’t reach Blave data yet. The account status couldn’t be checked. Open Data & Cloud Plan to check again."
+msgstr "This computer can’t reach Blave data yet. The account status couldn’t be checked. Check again under Settings › Account & plan."
 
 msgid "pv.e.btn"
-msgstr "Data & Cloud Plan"
+msgstr "Account & Plan"
 
 msgid "cn.blave.signinSwitch"
 msgstr "Sign In and Switch"
-
-msgid "set.cat.acct"
-msgstr "Account"
 
 msgid "cn.blave.name"
 msgstr "Blave AI"
@@ -969,17 +1091,15 @@ msgstr "Chats and strategies stay on this computer and aren’t affected."
 msgid "acct.out.3"
 msgstr "You’re using Blave AI, so signing out returns you to the AI picker. You’ll need to pick one again before you can carry on."
 
-msgid "acct.in.1"
-msgstr "Signing in is what gives you Blave data and the cloud plan."
+# 登出的確認框(登出鈕在「帳號與方案」最上面那一列;「登出會怎樣」按了才出)。acct.out.4 只在帳號有主機時出
+msgid "acct.cf.title"
+msgstr "Sign Out of Blave?"
 
-msgid "acct.in.2"
-msgstr "Signing in costs nothing and doesn’t change the AI you use."
+msgid "acct.cf.ok"
+msgstr "Sign Out"
 
-msgid "acct.toPlan"
-msgstr "Balance, card and the cloud plan are under Data & cloud plan."
-
-msgid "acct.toPlanBtn"
-msgstr "Open"
+msgid "acct.out.4"
+msgstr "Signing out doesn’t turn off your cloud machine. It keeps billing."
 
 msgid "acct.lbl"
 msgstr "Blave account"
@@ -1198,14 +1318,8 @@ msgstr "Pause, leave positions untouched"
 msgid "tr.stopFlat"
 msgstr "Pause and close positions"
 
-msgid "tr.startChoice"
-msgstr "Catch up places market orders now to match each strategy’s current signal — if a strategy is already in a position, you board it mid-trade. Wait for new signals places no orders now; each strategy starts trading only at its next entry, exit, or flip."
-
 msgid "tr.startWarn1"
 msgstr "Real orders resume immediately, moving your strategies’ positions to the current targets."
-
-msgid "tr.startOwnOnly"
-msgstr "Only Blave’s own share is traded. On the first reconcile, an existing same-side position counts as Blave’s in full if it’s at most 1.5× the target, otherwise up to the target; the rest is yours and won’t be closed. On a one-way account the exchange nets Blave’s orders against your own position in the same coin."
 
 msgid "tr.unmanaged"
 msgstr "Outside Blave"
@@ -1213,17 +1327,65 @@ msgstr "Outside Blave"
 msgid "tr.unmanagedTip"
 msgstr "Blave didn’t open this position; reconciling never touches it."
 
-msgid "tr.startWarn2"
-msgstr "Strategies and weights kept updating while paused, so the first reconcile may move several positions at once."
-
 msgid "tr.startCatchUp"
 msgstr "Start and catch up positions"
 
 msgid "tr.startWait"
 msgstr "Start, wait for new signals"
 
-msgid "tr.means.l"
-msgstr "Running on this computer means:"
+# 啟動下單框(先選再按):兩個選項各帶後果(真錢版講「真實委託」)、常駐安全句、「細節」裡的小標
+msgid "tr.opt.legend"
+msgstr "How to start"
+
+msgid "tr.opt.catch"
+msgstr "Catch up positions"
+
+msgid "tr.opt.catchDesc"
+msgstr "Places market orders now to bring each position to the strategy’s current signal; several positions may move at once. If a strategy is already in a trade, you join it mid-trade."
+
+msgid "tr.opt.catchDescReal"
+msgstr "Sends real market orders now to bring each position to the strategy’s current signal; several positions may move at once. If a strategy is already in a trade, you join it mid-trade."
+
+msgid "tr.opt.catchStale"
+msgstr "Signals didn’t update while Blave was closed: catching up now may still trade on the signal from before you closed it; each strategy switches to a fresh one after its next scheduled run."
+
+msgid "tr.opt.wait"
+msgstr "Wait for new signals"
+
+msgid "tr.opt.waitDesc"
+msgstr "No orders now. Each strategy starts trading only at its next entry, exit, or flip."
+
+msgid "tr.opt.waitDescReal"
+msgstr "No orders now. Each strategy sends real orders only at its next entry, exit, or flip."
+
+msgid "tr.keep.sleep"
+msgstr "While this computer sleeps, is shut down, or Blave is closed, no orders go out — exits and stops included."
+
+# 「只調整 Blave 自己那一份」跟著帳本基準分三種說法(只給真錢):讀不到 / 還沒建(第一次對帳會收編同方向的部位)/ 已建。
+# 三句同一個開頭與句號(設計師定稿);意思由後端依對帳邏輯定
+msgid "tr.keep.own"
+msgstr "Only Blave’s own share is traded."
+
+msgid "tr.keep.ownFirst"
+msgstr "Only Blave’s own share is traded. If you already hold a same-side position in the same coin, the first reconcile counts it in."
+
+msgid "tr.keep.ownBuilt"
+msgstr "Only Blave’s own share is traded. Positions you opened yourself aren’t counted as Blave’s and don’t offset a strategy’s target. On a one-way account the exchange nets Blave’s orders against your own position in the same coin."
+
+msgid "tr.det.own"
+msgstr "Which positions count as Blave’s"
+
+msgid "tr.det.ownRule"
+msgstr "On the first reconcile, an existing same-side position counts as Blave’s in full if it’s at most 1.5× the target, otherwise up to the target; the rest is yours and won’t be closed. On a one-way account the exchange nets Blave’s orders against your own position in the same coin."
+
+msgid "tr.det.local"
+msgstr "Running on this computer"
+
+msgid "tr.det.cloud"
+msgstr "Running in the cloud"
+
+msgid "cf.more"
+msgstr "Details"
 
 msgid "tr.means.1"
 msgstr "Auto-trading runs only while the computer is awake, Blave is open and the network is up."
@@ -1235,7 +1397,7 @@ msgid "tr.means.2p"
 msgstr "Sleep, a closed lid, shutdown or quitting Blave: auto-trading stops; paper positions stay open and are not closed."
 
 msgid "tr.means.3"
-msgstr "After you quit and reopen Blave, trading stays paused — no exits or stops either — until you press Start trading. After sleep or a dropped connection, it picks up on its own."
+msgstr "After you quit and reopen Blave, trading stays paused until you press Start trading. After sleep or a dropped connection, it picks up on its own."
 
 msgid "tr.means.4"
 msgstr "Stop orders placed on the exchange are not affected by this computer; consider placing them."
@@ -1311,6 +1473,12 @@ msgstr "No strategy is ready to trade yet. Ask the agent for one — once it has
 
 msgid "tr.typeC"
 msgstr "Portfolio strategies do not support auto-trading yet"
+
+msgid "tr.pick.twd"
+msgstr "Paper trading does not support TWD-priced instruments yet"
+
+msgid "tr.pick.twdKeep"
+msgstr "Paper trading does not support TWD-priced instruments yet; once unchecked, it can’t be added back"
 
 msgid "tr.gateHint"
 msgstr "Below the {m} {c} minimum entry — no position will open"
@@ -1867,14 +2035,8 @@ msgstr "Removes the exchange keys from the cloud machine — the order engine ca
 msgid "tr.cloud.footWhere"
 msgstr "{where} · {money} · {venue}"
 
-msgid "tr.cloud.means.l"
-msgstr "Running in the cloud means:"
-
 msgid "tr.cloud.means.1"
 msgstr "It runs on schedule as long as the machine is on. Shutting down this computer, closing the lid, losing the network, or quitting this app changes nothing."
-
-msgid "tr.cloud.means.2"
-msgstr "To pause, come back to this page and press Pause Trading."
 
 msgid "tr.cloud.means.3"
 msgstr "The machine takes {h} TWD from your balance every hour for as long as it exists. Under {m} TWD it stops: trading halts and positions stay at the exchange."
@@ -2435,32 +2597,23 @@ msgstr "Doesn’t move"
 msgid "ho.row.staysV"
 msgstr "Exchange keys, amounts, trading state"
 
-msgid "ho.over.up"
-msgstr "Replaces the strategy with the same name in the cloud."
+msgid "ho.rename.up"
+msgstr "The cloud already has {id}. This copy is saved as a new strategy, {to}; the original stays as it is."
 
-msgid "ho.over.down"
-msgstr "Replaces the strategy with the same name on this computer."
+msgid "ho.rename.down"
+msgstr "This computer already has {id}. This copy is saved as a new strategy, {to}; the original stays as it is."
 
-msgid "ho.over.maybeUp"
-msgstr "If the cloud already has a strategy with this name, it is replaced."
+msgid "ho.rename.maybeUp"
+msgstr "If the cloud already has a strategy with this name, this copy is saved under a new name; the original stays as it is."
 
-msgid "ho.block.up"
-msgstr "The one in the cloud is trading and can’t be replaced. Pause it there and set its amount to 0 first."
+msgid "ho.srcLive.up"
+msgstr "The one on this computer keeps trading. The cloud copy starts trading only after you give it an amount on the cloud’s Auto trading page."
 
-msgid "ho.block.down"
-msgstr "The one on this computer is trading and can’t be replaced. Pause it and set its amount to 0 first."
-
-msgid "ho.block.srcDown"
-msgstr "This strategy is in the cloud's order settings, so it can't be pulled back as is. To work on it here, ask the agent to copy it under a new name and pull that copy back; the cloud one stays as it is."
-
-msgid "ho.block.srcUp"
-msgstr "This strategy is in this computer's order settings, so it can't be sent to the cloud as is. Ask the agent to copy it under a new name and send that copy; the one here stays as it is."
+msgid "ho.srcLive.down"
+msgstr "The one in the cloud keeps trading. The copy here starts trading only after you give it an amount on this computer’s Auto trading page."
 
 msgid "ho.block.goCloud"
 msgstr "View in Cloud"
-
-msgid "ho.block.goLocal"
-msgstr "View on This Computer"
 
 msgid "ho.ok"
 msgstr "Confirm"
@@ -2487,10 +2640,16 @@ msgid "ho.back.btn"
 msgstr "Back to This Computer"
 
 msgid "ho.msg.up"
-msgstr "Send the strategy {id} to my cloud machine. Re-run the backtest there once it’s moved, and show me both sets of numbers side by side."
+msgstr "Send the strategy {id} to my cloud machine as {to}. Re-run the backtest there once it’s moved, and show me both sets of numbers side by side."
 
 msgid "ho.msg.down"
-msgstr "Bring the strategy {id} from my cloud machine back to this computer. Re-run the backtest here afterwards, and show me both sets of numbers side by side."
+msgstr "Bring the strategy {id} from my cloud machine back to this computer as {to}. Re-run the backtest here afterwards, and show me both sets of numbers side by side."
+
+msgid "ho.msgB.up"
+msgstr "Send the strategy {id} to my cloud machine as {to}. Once it’s moved, check that it starts there, and tell me the result."
+
+msgid "ho.msgB.down"
+msgstr "Bring the strategy {id} from my cloud machine back to this computer as {to}. Once it’s back, check that it starts here, and tell me the result."
 
 msgid "up.about"
 msgstr "About"
@@ -2597,6 +2756,12 @@ msgstr "The agent moves it, re-runs the backtest on your cloud machine, and show
 msgid "ho.note.down"
 msgstr "The agent brings it back, re-runs the backtest on this computer, and shows both sets of numbers side by side in the chat."
 
+msgid "ho.noteB.up"
+msgstr "The agent moves it and checks that it starts on your cloud machine."
+
+msgid "ho.noteB.down"
+msgstr "The agent brings it back and checks that it starts on this computer."
+
 msgid "strat.delInPf"
 msgstr "This strategy is still in your auto-trading portfolio, so it can’t be deleted. Remove it under Auto trading › Positions first, then come back."
 
@@ -2608,6 +2773,9 @@ msgstr "{name} ({id})"
 
 msgid "rp.noBt"
 msgstr "This strategy has no backtest results yet, so only the code is shown. To see the numbers, ask the agent on the right to run a backtest."
+
+msgid "rp.noBtB"
+msgstr "Alerts, screeners, grids and similar strategies aren’t backtested, so only the code is shown."
 
 msgid "cx.ip.cloudNote"
 msgstr "This is the cloud machine’s current public IP."
@@ -2625,7 +2793,7 @@ msgid "cx.chk.incompletePass"
 msgstr "The API key, secret key and passphrase have to come together. Not all three arrived, so nothing was saved. Fill in all three and connect again."
 
 msgid "cx.chk.clockCloud"
-msgstr "The cloud machine’s clock is out of step with Binance’s, so the key couldn’t be checked and was not saved. Try again in a while; if it keeps happening, contact us."
+msgstr "The cloud machine’s clock is out of step with Binance’s, so the key couldn’t be checked and was not saved. Try again in a while; if it keeps happening, email info@blave.org."
 
 msgid "cx.chk.networkCloud"
 msgstr "The cloud machine couldn’t reach Binance, so the key couldn’t be checked and was not saved. Try again in a while."
@@ -2750,9 +2918,6 @@ msgstr "Strategies are recomputing on post-restart data. Catch up becomes availa
 
 msgid "tr.orderFailedLastWhy"
 msgstr "Last order failed: {why}"
-
-msgid "tr.startWarn2Local"
-msgstr "Nothing ran while Blave was closed, so strategy signals didn’t update. Catch up trades on the signals as they stand now, which may still be from before you closed Blave; each strategy switches to a fresh signal after its next scheduled run. To trade only on fresh signals, choose Start, wait for new signals."
 
 msgid "tr.cloud.haltReasonUnconfirmed"
 msgstr "An old version of the trading program may still be running. Press Check for updates first to bring the machine up to date; if you’re not sure why it paused, ask the agent in chat."
@@ -3353,7 +3518,7 @@ msgid "lib.buy.charge"
 msgstr "Charge & Purchase"
 
 msgid "lib.buy.noCard"
-msgstr "Not enough balance, and this account has no card on file. Add a card under Settings › Data & cloud plan, then come back."
+msgstr "Not enough balance, and this account has no card on file. Add a card under Settings › Account & plan, then come back."
 
 msgid "lib.buy.inProgress"
 msgstr "This purchase is already being processed. Check back in a moment."
@@ -3370,14 +3535,8 @@ msgstr "USD"
 msgid "lib.fxNote"
 msgstr "Amounts shown in USD; billed in TWD."
 
-msgid "lib.note.owned"
-msgstr "Purchased."
-
 msgid "lib.gate.signedOutBuy"
 msgstr "Sign in to Blave to buy it and download to this computer."
-
-msgid "lib.note.free"
-msgstr "Free."
 
 msgid "lib.note.billed"
 msgstr "If the backtest uses Blave data, the data fee is charged per clock hour of use."
@@ -3493,7 +3652,7 @@ msgid "rpt.new.descLabel"
 msgstr "What the report should cover"
 
 msgid "rpt.new.descPh"
-msgstr "Describe the report you want — e.g. a daily TW-stock holdings brief after the close, including institutional net buying."
+msgstr "Describe the report you want — e.g. a brief on my TW-stock holdings today, including institutional net buying."
 
 msgid "rpt.new.examples"
 msgstr "Examples:"
@@ -3508,7 +3667,7 @@ msgid "rpt.new.chip.close"
 msgstr "TW Market Close"
 
 msgid "rpt.new.tpl.close"
-msgstr "TW market close: today's TAIEX close and volume, the three institutional investors and margin balance (noted if not yet published), foreign net long positions in TAIEX futures, plus today's read and what to watch. No report on market holidays."
+msgstr "TW market close: today's TAIEX close and volume, the three institutional investors and margin balance (noted if not yet published), foreign net long positions in TAIEX futures, plus today's read and what to watch."
 
 msgid "rpt.new.chip.crypto"
 msgstr "Crypto Market Brief"
@@ -3516,20 +3675,8 @@ msgstr "Crypto Market Brief"
 msgid "rpt.new.tpl.crypto"
 msgstr "Crypto market brief: BTC/ETH price action, funding rates, liquidations and Blave market indicators, plus today's read."
 
-msgid "rpt.new.chip.symbol"
-msgstr "Single-Symbol Brief"
-
-msgid "rpt.new.tpl.symbol"
-msgstr "Single-symbol brief (2330): overnight moves, recent highs/lows and moving averages (statistics), flows, plus what to watch and under what conditions."
-
-msgid "rpt.new.chip.research"
-msgstr "Research Report"
-
-msgid "rpt.new.tpl.research"
-msgstr "Research report: look into a market question — <e.g. does 'Sell in May' hold for Taiwan stocks / how many days does a stock take on average to recover its ex-dividend gap / how did the TAIEX move over the next 10 days after foreign investors sold 5 days in a row>. Give me a falsifiable conclusion, the data for and against it, robustness checks, and what would overturn it."
-
 msgid "rpt.new.honest"
-msgstr "The first report is not instant; it shows up in the Reports list when done."
+msgstr "This makes one report, not a recurring one. It isn’t instant; it shows up in the Reports list when done."
 
 msgid "rpt.new.send"
 msgstr "Ask the Agent"
@@ -3540,8 +3687,57 @@ msgstr "Sending…"
 msgid "rpt.new.msgLead"
 msgstr "Write me a report"
 
-msgid "rpt.new.msgOnce"
-msgstr "Produce it once — no schedule needed."
+# 聊天結果卡(renderer/results.js;spec-desktop-result-card-0.1.8 §9):{v} = .mono 的 v8、{n} = 收起的張數
+msgid "res.open.report"
+msgstr "Open report"
+
+msgid "res.open.bt"
+msgstr "View backtest"
+
+msgid "res.open.scan"
+msgstr "View scan"
+
+msgid "res.open.code"
+msgstr "View code"
+
+msgid "res.open.strat"
+msgstr "View strategy"
+
+msgid "res.kind.new"
+msgstr "New strategy"
+
+msgid "res.kind.bt"
+msgstr "Backtest {v}"
+
+msgid "res.kind.btUpd"
+msgstr "Backtest updated"
+
+msgid "res.kind.scan"
+msgstr "Parameter scan"
+
+msgid "res.kind.code"
+msgstr "Code changed"
+
+msgid "res.kind.cloudUpd"
+msgstr "Strategy updated"
+
+msgid "res.noBt"
+msgstr "No backtest"
+
+msgid "res.notRerun"
+msgstr "Not re-run yet"
+
+msgid "res.later"
+msgstr "Updated since"
+
+msgid "res.gone.report"
+msgstr "This report was deleted"
+
+msgid "res.gone.strat"
+msgstr "This strategy was deleted"
+
+msgid "res.more"
+msgstr "{n} more"
 
 # 兩個表單 modal 共用:submitMessage 回 false(引擎失敗 / 被擋)時腳的那一句;原因由對話講
 msgid "modal.sendFailed"
@@ -3596,6 +3792,179 @@ msgstr "Neutral"
 
 msgid "rb.estModel"
 msgstr "Est. liquidation (model)"
+
+# image block 引用圖的來源行前綴(spec-report-image-cite-0.1.8 §2)
+msgid "rb.imageSource"
+msgstr "Source"
+
+# 報告公開分享(spec-share-0.1.8 DT1–DT5;renderer/report-share.js)。未另註的字逐字同 web 的 workspace_share_*
+msgid "shr.btn"
+msgstr "Share"
+
+msgid "shr.live"
+msgstr "Public"
+
+msgid "shr.copy"
+msgstr "Copy link"
+
+msgid "shr.copied"
+msgstr "Copied"
+
+msgid "shr.revoke"
+msgstr "Stop sharing"
+
+msgid "shr.version"
+msgstr "Public version: {time}. Anyone with the link can view it; stopping breaks the link right away."
+
+msgid "shr.stale"
+msgstr "The agent updated this report at {time}; the public page still shows the {day} version."
+
+msgid "shr.updateCheck"
+msgstr "Review and update public version"
+
+msgid "shr.revokeTitle"
+msgstr "Stop sharing this report?"
+
+msgid "shr.revokeBody"
+msgstr "The link stops working right away; publishing again creates a new link. Copies already reposted or cached in link previews can't be recalled."
+
+msgid "shr.revokeOk"
+msgstr "Stop sharing"
+
+# 取消分享確認框的取消鈕(mockup DT4;「取消 / 取消分享」並排讀不出哪顆是留著;公開連結清單的取消框共用)
+msgid "shr.keep"
+msgstr "Keep sharing"
+
+msgid "shr.revokeFailTitle"
+msgstr "Couldn't stop sharing"
+
+msgid "shr.revokeFailBody"
+msgstr "The link is still live. Try again in a while."
+
+msgid "shr.dlgTitle"
+msgstr "Publish this report"
+
+msgid "shr.dlgTitleUpdate"
+msgstr "Update the public version"
+
+msgid "shr.introSame"
+msgstr "The link stays the same."
+
+msgid "shr.lpvLabel"
+msgstr "Link preview"
+
+# 連結預覽的 og:title 前綴與縮圖標籤行(= web rs_og_prefix / rs_og_prefix_morning 與 og 固定圖)
+msgid "shr.ogPrefix.research"
+msgstr "Research report | "
+
+msgid "shr.ogPrefix.morning"
+msgstr "Market report | "
+
+msgid "shr.ogPrefix.performance"
+msgstr "Performance report | "
+
+msgid "shr.ogTag.research"
+msgstr "Research report · Produced by a user's Blave Agent"
+
+msgid "shr.ogTag.morning"
+msgstr "Market report · Produced by a user's Blave Agent"
+
+msgid "shr.ogTag.performance"
+msgstr "Performance report · Produced by a user's Blave Agent"
+
+# 績效報告的確認框提醒句(只在 type = performance 出;同意區第一段);逐字同 web workspace_share_perf_note
+msgid "shr.perfNote"
+msgstr "This report shows your account balance and positions. Once it's public, anyone with the link can see them."
+
+# 揭露小字:本機報告版(web 的刪機句對本機檔不為真;spec DT2);雲端視角逐字同 web workspace_share_note_must
+msgid "shr.noteLocal"
+msgstr "Reposted or preview-cached copies can't be recalled. What goes public is a snapshot taken at upload; later edits to this report won't change the public version. Deleting the file on this computer doesn't stop sharing — use Stop sharing to take it down; deleting your cloud machine or your account removes it too."
+
+msgid "shr.noteCloud"
+msgstr "Copies already reposted or cached in link previews can't be recalled; if your machine is deleted or replaced (including when your balance reaches zero), all your public links are removed."
+
+msgid "shr.author"
+msgstr "Author"
+
+msgid "shr.anon"
+msgstr "Anonymous"
+
+msgid "shr.named"
+msgstr "Display name"
+
+msgid "shr.nameHint"
+msgstr "Your name is shown exactly as it is."
+
+# 帳號沒有名稱(api 回的名字是空的 / NO_DISPLAY_NAME):radio 收起來、換上這句。系統預設名、含推薦碼的名稱都算有名稱,原樣掛
+msgid "shr.noName"
+msgstr "This account has no name yet. To be credited, add one in your account settings on blave.org."
+
+# legal: 勾選三行,字面一改就換 report-share 的 DISCLAIMER_VERSION(契約 §1);逐字同 web
+msgid "shr.ack"
+msgstr "I confirm all three points"
+
+msgid "shr.ack1"
+msgstr "I've read it; it contains nothing I don't want public, and no one else's personal data or content I have no right to publish."
+
+msgid "shr.ack2"
+msgstr "This content was produced by my Blave Agent; publishing it is my decision and my responsibility, and Blave has not reviewed it."
+
+msgid "shr.ack3"
+msgstr "I am not affiliated with a securities or futures advisory enterprise; I received no compensation for publishing this and won't use it to solicit anyone to paid strategies, paid groups, or other paid services."
+
+msgid "shr.tosBefore"
+msgstr "If these are broken, Blave may take it down under the "
+
+msgid "shr.tosLink"
+msgstr "Terms of Service"
+
+msgid "shr.tosAfter"
+msgstr "."
+
+msgid "shr.send"
+msgstr "Publish and copy link"
+
+msgid "shr.sendUpdate"
+msgstr "Update public version"
+
+msgid "shr.sending"
+msgstr "Publishing…"
+
+# 送出失敗:框留著、可原樣重送(spec DT2)。failedCloud = web workspace_share_failed(雲端要機器在跑)
+msgid "shr.failed"
+msgstr "Publishing failed. Check your connection and try again."
+
+msgid "shr.failedCloud"
+msgstr "Couldn't publish. Publishing and updating need your machine running; please try again shortly."
+
+msgid "shr.notShareable"
+msgstr "This report can't be published."
+
+# api 拒收內容(BAD_CONTENT / BAD_IMAGE):自動修不了才會走到;逐字同 web workspace_share_bad_content
+msgid "shr.badContent"
+msgstr "One part of this report couldn't be fixed automatically, so it wasn't published. In chat, ask the agent to \"tidy up this report\", then publish again."
+
+# api 回 TOO_LARGE(413):{n} 張、{mb} MB 由程式帶入;逐字同 web workspace_share_too_large
+msgid "shr.tooLarge"
+msgstr "This report is too large, so it wasn't published. It can hold up to {n} images, {mb} MB in total. Ask the agent to use fewer images or shorten it, then publish again."
+
+# api 507 IMAGE_QUOTA / 429:spec 沒給字,待設計師確認
+msgid "shr.quota"
+msgstr "Your account's image storage is full, so this report wasn't published."
+
+msgid "shr.rate"
+msgstr "Too many attempts. Try again in a while."
+
+# 未登入(只會發生在本機視角;spec DT3)
+msgid "shr.gate"
+msgstr "Public links are tied to your Blave account. Sign in to publish."
+
+msgid "shr.gateGo"
+msgstr "Sign in"
+
+# 勾選列在捲動區外又還沒勾時,訊息槽的那一句(第十八批 DF2;同 web workspace_share_scroll_hint)
+msgid "shr.scrollHint"
+msgstr "Scroll down and tick the box to publish."
 
 # ── 新增策略 modal(spec-desktop-0.1.6 §4;renderer/newstrategy.js;字逐字抄 web 的 workspace_ns_*)──
 msgid "ns.title"
@@ -3687,7 +4056,7 @@ msgid "lib.gate.noBalance"
 msgstr "The data fee for this hour couldn't be charged, so the agent can't reach the library. Top up and it's back right away."
 
 msgid "lib.gate.unknown"
-msgstr "The account's data status couldn't be checked, so the agent may not reach the library. Open Data & Cloud Plan to check again."
+msgstr "The account’s data status couldn’t be checked, so the agent may not reach the library. Check again under Settings › Account & plan."
 
 msgid "br.h"
 msgstr "Browser"
@@ -3697,6 +4066,12 @@ msgstr "Agent browsing"
 
 msgid "br.readWord"
 msgstr "read"
+
+msgid "br.unread"
+msgstr "Unread"
+
+msgid "br.unread.stat"
+msgstr "Loaded fine. The agent didn’t read this page"
 
 msgid "br.waiting"
 msgstr "Waiting for you"
@@ -3762,7 +4137,7 @@ msgid "br.need.submit"
 msgstr "Ready to submit"
 
 msgid "br.need.captcha"
-msgstr "Robot check needed"
+msgstr "Search needs a robot check"
 
 msgid "br.need.file"
 msgstr "File needed"
@@ -3770,8 +4145,8 @@ msgstr "File needed"
 msgid "br.relay"
 msgstr "Stopped at a redirect page, no content"
 
-msgid "br.notRead"
-msgstr "Not read"
+msgid "br.cantRead"
+msgstr "Couldn’t read"
 
 msgid "br.youPress"
 msgstr "Your turn"
@@ -3798,19 +4173,22 @@ msgid "br.ask.consent.h"
 msgstr "This page wants your cookie choice"
 
 msgid "br.ask.captcha.h"
-msgstr "A robot check is in the way"
+msgstr "Search needs a robot check first"
 
 msgid "br.ask.p"
 msgstr "You type any passwords. While you're in control, the agent pauses and doesn't read this page."
 
 msgid "br.ask.captcha.p"
-msgstr "You solve the check yourself; the agent never does."
+msgstr "After several searches in a row, {engine} asks to confirm a person is there. You do the check yourself; the agent never does it for you. Once it passes, the search picks up on its own."
 
 msgid "br.ask.skip"
 msgstr "Skip"
 
 msgid "br.ask.ddg"
 msgstr "Use DuckDuckGo"
+
+msgid "br.ask.noSearch"
+msgstr "Skip this search"
 
 msgid "br.ask.meLogin"
 msgstr "I'll sign in"
@@ -3824,6 +4202,9 @@ msgstr "I'll pick the file"
 msgid "br.ask.meVerify"
 msgstr "I'll do the check"
 
+msgid "br.notif.captcha"
+msgstr "Search needs a robot check. Come back to Blave to continue."
+
 msgid "br.dl"
 msgstr "Download blocked: {name} was not saved to this computer."
 
@@ -3834,7 +4215,7 @@ msgid "br.blk.domain.p"
 msgstr "Exchange and broker account areas and bank sites are never operated by the agent."
 
 msgid "br.blk.list.p"
-msgstr "This site's terms don't allow AI agents to read it."
+msgstr "This site is on the harmful-site list, so the agent does not open it."
 
 msgid "br.blk.blave.p"
 msgstr "The agent reads Blave data directly, not through the website."
@@ -3847,6 +4228,10 @@ msgstr "Local, private-network and non-http(s) addresses are never opened."
 
 msgid "br.openSystem"
 msgstr "Open in system browser"
+
+# 網址列右端那顆 icon 鈕的 tooltip(名稱用 br.openSystem)
+msgid "br.openSystem.tip"
+msgstr "Open this page in your system browser. Sign-ins don’t carry over, so you may need to sign in again."
 
 msgid "br.back"
 msgstr "Back"
@@ -3888,7 +4273,10 @@ msgid "br.set.switch"
 msgstr "Built-in browser"
 
 msgid "br.set.lead"
-msgstr "The agent can open web pages on this computer to look things up, and every page it opens shows up in the chat. It never opens exchange or broker account areas or bank sites; you press sign-in, submit and pay yourself."
+msgstr "The agent can search the web and open pages to look things up, and every page it opens shows up in the chat. It never opens exchange or broker account areas or bank sites; you press sign-in, submit and pay yourself. Turn it off and the agent stops going online to look anything up."
+
+msgid "br.set.leadOff"
+msgstr "Off. The agent doesn’t search the web or open any page; it answers from Blave data and the files on this computer. Strategies still fetch data and place orders as usual."
 
 msgid "br.set.clear"
 msgstr "Clear browsing data"
@@ -4230,16 +4618,7 @@ msgid "cap.ho.promptRead"
 msgstr "My Capital setup in the desktop app is stuck at the “Read accounts” step. Please check the Capital setup status on the cloud machine and help me fix it. When done, confirm read-only that the account can be read, and don't place any orders yet."
 
 msgid "br.openPanel"
-msgstr "View pages"
-
-msgid "br.closePanel"
-msgstr "Close"
-
-msgid "br.listShow"
-msgstr "Show list"
-
-msgid "br.listHide"
-msgstr "Hide list"
+msgstr "View Pages"
 
 msgid "br.readDone"
 msgstr "Read"
@@ -4255,3 +4634,484 @@ msgstr "This site hasn't come up this turn, and the address carries a block of d
 
 msgid "br.ask.openAnyway"
 msgstr "Open anyway"
+
+# 策略轉出(renderer/export.js;spec-desktop-strategy-export-0.1.8)。觸發器、選單、確認框、轉出卡的字照 web 工作頁 workspace_xp_*
+msgid "xp.btn"
+msgstr "Export Code"
+
+msgid "xp.lang.xq"
+msgstr "XS language"
+
+msgid "xp.lang.mc"
+msgstr "PowerLanguage"
+
+msgid "xp.lang.pine"
+msgstr "Pine Script"
+
+msgid "xp.off.crypto"
+msgstr "XQ has no crypto market"
+
+msgid "xp.off.portfolio"
+msgstr "Single-symbol strategies only"
+
+msgid "xp.off.nosignal"
+msgstr "Backtested strategies only"
+
+msgid "xp.why.tm"
+msgstr "Viewing {v}. Only the current version can be exported."
+
+msgid "xp.cf.title.xq"
+msgstr "Export to XQ (XS)"
+
+msgid "xp.cf.title.mc"
+msgstr "Export to MultiCharts (PowerLanguage)"
+
+msgid "xp.cf.title.pine"
+msgstr "Export to TradingView (Pine)"
+
+msgid "xp.cf.body"
+msgstr "Compile and backtest the exported code in {platform} before using it."
+
+msgid "xp.cf.ok"
+msgstr "Export"
+
+msgid "xp.msg.xq"
+msgstr "Convert strategy {id} to XQ XS and save it as a workspace file."
+
+msgid "xp.msg.mc"
+msgstr "Convert strategy {id} to MultiCharts PowerLanguage and save it as a workspace file."
+
+msgid "xp.msg.pine"
+msgstr "Convert strategy {id} to TradingView Pine Script and save it as a workspace file."
+
+msgid "xp.dl"
+msgstr "Download"
+
+msgid "xp.capHonest"
+msgstr "AI-generated from a template, not compiled in {platform} — compile and backtest it there before use."
+
+msgid "xp.view"
+msgstr "Open in Code tab"
+
+msgid "xp.saved"
+msgstr "Saved to {dir}"
+
+msgid "xp.dlDir"
+msgstr "Downloads"
+
+msgid "xp.reveal"
+msgstr "Show in Finder"
+
+msgid "xp.revealWin"
+msgstr "Show in File Explorer"
+
+msgid "xp.saveFail"
+msgstr "Couldn't save the file. Try again."
+
+msgid "xp.copy"
+msgstr "Copy Code"
+
+msgid "xp.copied"
+msgstr "Copied"
+
+msgid "xp.meta"
+msgstr "Exported {date} · Translated from a template, not compiled"
+
+msgid "xp.stale"
+msgstr "The strategy changed after this export; this code doesn't reflect it."
+
+msgid "xp.again"
+msgstr "Export Again"
+
+msgid "xp.honest"
+msgstr "Data, fills and fees differ, so {platform}'s backtest won't match Blave's. Compare trade dates, not returns."
+
+msgid "xp.files"
+msgstr "Code files"
+
+msgid "xp.steps"
+msgstr "Steps for {platform}"
+
+msgid "xp.steps.pine.1"
+msgstr "Open a {sym} {ivl} chart — symbol and timeframe aren't part of the script."
+
+msgid "xp.steps.pine.1n"
+msgstr "Open a chart with the strategy's symbol and timeframe — they aren't part of the script."
+
+msgid "xp.steps.pine.2"
+msgstr "Open the Pine Editor, replace everything with this code, add it to the chart (needs a TradingView account)."
+
+msgid "xp.steps.pine.3"
+msgstr "Check the trade list in the Strategy Tester. Fees and slippage are in the header comment."
+
+msgid "xp.steps.xq.1"
+msgstr "In the XS editor, create a trading script, paste, compile."
+
+msgid "xp.steps.xq.2"
+msgstr "In the auto-trading center, add a strategy on {sym}, frequency {ivl}, adjusted prices."
+
+msgid "xp.steps.xq.2n"
+msgstr "In the auto-trading center, add a strategy with the strategy's symbol and frequency, adjusted prices."
+
+msgid "xp.steps.xq.3"
+msgstr "Daily strategies need auto tick-replay checked to save; set per-side cost from the header comment."
+
+msgid "xp.steps.mc.1"
+msgstr "In PowerLanguage Editor, create a new Signal, paste, compile."
+
+msgid "xp.steps.mc.2"
+msgstr "Apply it to a {sym} {ivl} chart{extra}."
+
+msgid "xp.steps.mc.2n"
+msgstr "Apply it to a chart with the strategy's symbol and timeframe{extra}."
+
+msgid "xp.steps.mc.3"
+msgstr "Set commission, slippage and Maximum Bars Back in Strategy Properties — values are in the header comment."
+
+msgid "xp.steps.mc.crypto"
+msgstr " (add the Binance data source in QuoteManager first)"
+
+msgid "xp.ivl.m"
+msgstr "{n}-min"
+
+msgid "xp.ivl.h"
+msgstr "{n}h"
+
+msgid "xp.ivl.d"
+msgstr "daily"
+
+msgid "xp.ivl.w"
+msgstr "weekly"
+
+msgid "ver.menuLbl"
+msgstr "Versions (one per backtest)"
+
+msgid "ver.current"
+msgstr "Current"
+
+msgid "ver.live"
+msgstr "Live"
+
+msgid "ver.drift"
+msgstr "Live · file changed"
+
+msgid "ver.driftLocal"
+msgstr "strategy.py no longer matches this version: the file was edited without a new backtest."
+
+msgid "ver.driftCloud"
+msgstr "strategy.py no longer matches this version: the file was edited without a new backtest. This flag can take up to 2 minutes to reach here."
+
+msgid "ver.compareOpen"
+msgstr "Compare two versions…"
+
+msgid "ver.oneHint"
+msgstr "Your next backtest is saved as {next}. Then you can compare and restore."
+
+msgid "ver.winNote"
+msgstr "Saved with data through {saved}. The page keeps updating with new data, now through {page}."
+
+msgid "ver.statP"
+msgstr "p"
+
+msgid "ver.aria"
+msgstr "Version {v}, {label}"
+
+msgid "ver.viewing"
+msgstr "Viewing {v}"
+
+msgid "ver.readonly"
+msgstr "— read-only"
+
+msgid "ver.back"
+msgstr "Back to current version"
+
+msgid "ver.backShort"
+msgstr "Back to current"
+
+msgid "ver.restore"
+msgstr "Restore this version"
+
+msgid "ver.frozenTab"
+msgstr "This version kept no trade-by-trade record. To see one, ask the agent to re-run this version."
+
+msgid "ver.syncing"
+msgstr "This version is still syncing — check back shortly."
+
+msgid "ver.readErr"
+msgstr "Couldn’t load this version."
+
+msgid "ver.mcptTipSigNoN"
+msgstr "After random shuffling, only {pct} of the results beat it; below 0.05 is the usual bar."
+
+msgid "ver.mcptTipNsNoN"
+msgstr "After random shuffling, {pct} of the results beat it — above the usual 0.05 bar, so this result can’t be told apart from luck."
+
+msgid "ver.cmpTitle"
+msgstr "Compare versions"
+
+msgid "ver.cmpA"
+msgstr "First version to compare"
+
+msgid "ver.cmpB"
+msgstr "Second version to compare"
+
+msgid "ver.cmpVs"
+msgstr "vs"
+
+msgid "ver.cmpMetric"
+msgstr "Metric"
+
+msgid "ver.cmpDelta"
+msgstr "Change"
+
+msgid "ver.cmpWindow"
+msgstr "The two runs cover different backtest windows ({a} vs {b}): the data window grows over time, so the total returns are not directly comparable."
+
+msgid "ver.cmpCode"
+msgstr "Code changes ({n})"
+
+msgid "ver.cmpNoDiff"
+msgstr "The code is identical in both versions."
+
+msgid "ver.cmpTruncated"
+msgstr "The diff is too long — only the first part is shown."
+
+msgid "ver.cmpSameVersion"
+msgstr "Pick two different versions."
+
+msgid "ver.cmpSyncing"
+msgstr "{v} is still syncing — check back shortly."
+
+msgid "ver.rsTitle"
+msgstr "Restore {v}"
+
+msgid "ver.rsB1"
+msgstr "This copies {v}'s code back into the strategy file, re-runs the backtest right away and mints a new version number."
+
+msgid "ver.rsB2"
+msgstr "{cur} does not disappear — you can go back to it at any time."
+
+msgid "ver.rsOk"
+msgstr "Restore"
+
+msgid "ver.where"
+msgstr "Cloud machine · {name}"
+
+msgid "ver.guardTitle"
+msgstr "This strategy is trading"
+
+msgid "ver.guardLead"
+msgstr "{name} currently has {amt} running on {cur}. Swapping the code for {v} takes effect on the next bar and could flip a live position with no warning."
+
+msgid "ver.guardS1"
+msgstr "Create a new strategy from {v}'s code; the original keeps trading untouched"
+
+msgid "ver.guardS2"
+msgstr "Backtest the new strategy and let one signal run, so it has a state.json"
+
+msgid "ver.guardS3"
+msgstr "After you confirm, save once in Auto-trading: fund the new strategy and set the original's amount to 0 (keep it selected so you can roll back)"
+
+msgid "ver.guardNote"
+msgstr "Same symbol and direction: the reconciler swaps old for new in one round, with little or no trading. Opposite direction: a full close and re-entry."
+
+msgid "ver.guardOk"
+msgstr "Create a new strategy from {v}"
+
+msgid "ver.msgRestore"
+msgstr "Please restore strategy {display_name} ({name}) to version {n} and re-run the backtest — no further confirmation needed."
+
+msgid "ver.msgFork"
+msgstr "Please create a new strategy from version {n} of strategy {display_name} ({name}), leaving the original untouched; backtest the new one and run one signal so it has a state.json, then stop so I can switch the funding in Auto-trading — no further confirmation needed."
+
+# 報告存成 PDF(spec-report-pdf-0.1.8 DT2;鈕在閱讀層頁首最右)
+msgid "pdf.btn"
+msgstr "Save as PDF"
+
+msgid "pdf.saving"
+msgstr "Saving…"
+
+msgid "pdf.saved"
+msgstr "Saved"
+
+msgid "pdf.failTitle"
+msgstr "Couldn't save the PDF"
+
+msgid "pdf.failBody"
+msgstr "The file wasn't saved. Try another location, or try again later."
+
+# legal: PDF 每頁頁尾短版與文末長版聲明(spec P2;字面由 Wei 定稿)。disc2 / disc3a / disc3c = web rs_disc_3 / 4a / 4c 的文件版
+msgid "pdf.footShort"
+msgstr "Produced by Blave Agent. Not reviewed by Blave. Not investment advice."
+
+msgid "pdf.discTitle"
+msgstr "Disclaimer"
+
+msgid "pdf.disc1"
+msgstr "This document was produced by a Blave user's Blave Agent (an AI agent) and saved as a PDF by that user. It reflects only that user's and their agent's analysis and does not represent the views of WuChi Technology Company Limited (Blave). Blave has not reviewed its content or conclusions. Blave provides data and tools, not investment advice. WuChi Technology is not a licensed securities investment advisory or futures advisory enterprise."
+
+msgid "pdf.disc2"
+msgstr "This document is not a recommendation to buy or sell any security, futures contract, option, or virtual asset, and it does not guarantee any performance. Historical data and backtests do not indicate future results. Futures, leveraged products, and virtual assets are highly volatile; you may lose all or more than your initial capital."
+
+msgid "pdf.disc3a"
+msgstr "AI output may contain errors, omissions, or stale data."
+
+msgid "pdf.disc3b"
+msgstr "The notes in this document list the data sources used, so you can check them."
+
+msgid "pdf.disc3c"
+msgstr "Make your own decisions and bear your own gains and losses."
+
+msgid "pdf.stamp"
+msgstr "Saved on {time}. This is a copy of that version; later updates to the report won't change it."
+
+msgid "pdf.tableNote"
+msgstr "This table is scaled down to fit the page. Open the report in Blave to see it at full size."
+
+# 設定 › 公開連結(spec-share-list-0.1.8 A1 / C / D / E)
+msgid "set.cat.shares"
+msgstr "Public links"
+
+msgid "shl.title"
+msgstr "Public reports"
+
+msgid "shl.count"
+msgstr "{n} / {max}"
+
+msgid "shl.countAria"
+msgstr "{n} of {max} public reports"
+
+msgid "shl.kind.research"
+msgstr "Research report"
+
+msgid "shl.kind.morning"
+msgstr "Market report"
+
+msgid "shl.kind.performance"
+msgstr "Performance report"
+
+msgid "shl.src.here"
+msgstr "This computer"
+
+msgid "shl.src.desktop"
+msgstr "Desktop"
+
+msgid "shl.src.cloud"
+msgstr "Cloud"
+
+msgid "shl.gone"
+msgstr "The original file isn't on this computer; the public version is still live."
+
+# 逐字同 web workspace_share_source_gone
+msgid "shl.goneCloud"
+msgstr "The original report was removed by the storage limit; the public version is still live."
+
+msgid "shl.empty"
+msgstr "No public reports right now. To publish one, open a report and choose Share."
+
+msgid "shl.loadFail"
+msgstr "Couldn't load your public links. Check your connection and try again."
+
+msgid "shl.gate"
+msgstr "Public links are tied to your Blave account. Sign in to see them."
+
+# 取消成功後讀屏念的那一句(畫面上不出字)
+msgid "shl.revoked"
+msgstr "Sharing stopped."
+
+msgid "shr.limitLive"
+msgstr "You've reached the limit of {n} public reports. Stop sharing a few, then publish this one."
+
+msgid "shr.limitLiveGo"
+msgstr "View public links"
+
+msgid "shr.limitDaily"
+msgstr "You've published {n} times today, the daily limit. Try again tomorrow."
+
+# 送進 TradingView(renderer/pine-install.js;spec-desktop-pine-install-0.1.8)
+msgid "tv.send"
+msgstr "Send to TradingView"
+
+msgid "tv.sending"
+msgstr "Pasting into TradingView"
+
+msgid "tv.sentHint"
+msgstr "Pasted into the Pine Editor. You press “Add to chart”. If it doesn’t compile, paste the error into the chat and the agent can fix it and export again."
+
+msgid "tv.err.editor"
+msgstr "Couldn't find the Pine Editor — TradingView may have changed its layout."
+
+msgid "tv.err.narrow"
+msgstr "The middle column is too narrow: at this width TradingView doesn’t show the Pine Editor button. Widen it and try again."
+
+msgid "tv.err.busy"
+msgstr "The agent is replying. Try again in a moment."
+
+msgid "tv.err.unknown"
+msgstr "That did not go through. Try again."
+
+msgid "tv.planHint"
+msgstr "TradingView’s Free and Basic plans allow 2 indicators or strategies per chart. If you’re blocked, remove the others first."
+
+msgid "tv.agentPaste"
+msgstr "Ask Agent to Paste"
+
+msgid "tv.retry"
+msgstr "Try Again"
+
+msgid "tv.st.chart"
+msgstr "Opening the {sym} chart"
+
+msgid "tv.st.chartN"
+msgstr "Opening the chart"
+
+msgid "tv.st.editor"
+msgstr "Opening the Pine Editor"
+
+msgid "tv.st.paste"
+msgstr "Pasting {id}"
+
+msgid "tv.st.nf"
+msgstr "Couldn't find the Pine Editor"
+
+msgid "tv.ho.h"
+msgstr "The code is in — you press “Add to chart”"
+
+msgid "tv.ho.p"
+msgstr "It’s in a new script; your existing scripts are untouched. Once pasted, this page isn’t read again. Signing in and naming the script are yours to do."
+
+msgid "tv.ho.switch"
+msgstr "The chart's symbol or interval wasn't set automatically. Switch to the ones this strategy uses before you press “Add to chart”."
+
+msgid "tv.nf.h"
+msgstr "Couldn't find the Pine Editor"
+
+msgid "tv.nf.p"
+msgstr "TradingView may have changed its layout. The agent can look for it on screen, or download the file and paste it yourself."
+
+msgid "tv.nf.narrow.p"
+msgstr "When the middle column is this narrow, TradingView doesn’t show the Pine Editor button. Widen it (or narrow the chat) and try again."
+
+msgid "tv.err.unsaved"
+msgstr "The current script has unsaved changes. Save or discard them in TradingView, then try again."
+
+msgid "tv.st.unsaved"
+msgstr "The current script has unsaved changes"
+
+msgid "tv.unsaved.h"
+msgstr "The current script has unsaved changes"
+
+msgid "tv.unsaved.p"
+msgstr "Save or discard them in TradingView, then try again. Whether to keep them is your call — nothing is pressed for you."
+
+msgid "tv.msg.paste"
+msgstr "Use the built-in browser to paste strategy {id}'s Pine version into TradingView's Pine Editor: open a new script, paste it there, and stop at “Add to chart” so I can press it."
+
+msgid "tv.cf.stale.h"
+msgstr "Send to TradingView"
+
+msgid "tv.cf.stale.p"
+msgstr "This is the version exported on {date}. If the strategy changed after that, this code does not reflect those changes."
+
+msgid "tv.cf.stale.ok"
+msgstr "Send It"

@@ -8,6 +8,7 @@
 // 跑法:node tests/check_shell_robust.js(找不到 shell/node_modules 的 Electron 時 ② SKIP,①③ 照跑)
 const path = require("path"), fs = require("fs"), vm = require("vm");
 const SHELL = path.join(__dirname, "..", "shell");
+const GATE = require("./_electron_gate");
 let red = 0; const ok = (n, c) => { console.log((c ? "PASS  " : "FAIL  ") + n); if (!c) red++; };
 
 // 3×3:尖峰 (0,0) 孤立高;(1..2, 1..2) 平原;(2,0) 沒交易
@@ -56,7 +57,7 @@ if (!process.versions.electron) {
   ok("③ app.js:rpShowTab / rpBodyPaint 的分頁清單含 rob,rob 交給 renderRobust(t / busy / onScan / buildMeta 都從外面交進去);index.html 有分頁鈕、面板、css、js", (app.match(/\["bt", "tr", "rob", "code"\]/g) || []).length === 2
     && /R\.renderRobust\(\$\("rp-rob"\), \{ stats: B\.data\.stats, scan: B\.data\.scan \|\| null, code: B\.data\.code, name: B\.name \}, rpRobOpts\(\)\)/.test(app)
     && /return \{ t, busy: running, turn: turnSeq, scope: rpBag\(\) === RPC \? "cloud" : "local", onScan: rpRobAsk, buildMeta: R\.buildMeta \};/.test(app)
-    && /data-tab="rob" data-i18n="rp\.tab\.rob"/.test(html) && /id="rp-rob" role="tabpanel" hidden/.test(html) && /report-robust\.css/.test(html) && /<script src="report-robust\.js"><\/script>\s*(?:<script src="(?:report-blocks|reports|newstrategy)\.js"><\/script>\s*)*<script src="trade\.js">/.test(html));
+    && /data-tab="rob" data-i18n="rp\.tab\.rob"/.test(html) && /id="rp-rob" role="tabpanel" hidden/.test(html) && /report-robust\.css/.test(html) && /<script src="report-robust\.js"><\/script>\s*(?:<script src="(?:md|report-blocks|reports|report-share|report-sharelist|report-pdf|newstrategy)\.js"><\/script>\s*)*<script src="trade\.js">/.test(html));
   ok("③ app.js:掃描鈕走確認框 → submitMessage(不覆寫 viewing:chatViewing 在雲端視角本來就回 env:cloud + strategy)、resolve 回合序號;回合開始 / 結束三處都叫 rpRobSync(就地改鈕,不重畫);每輪 turnSeq++",
     /onOk: \(\) => submitMessage\(t\("rob\.msgScan", \{ name \}\)\)\.then\(\(ok\) => \{ if \(ok\) trackFeature\("scan_requested"\); resolve\(ok \? turnSeq : false\); \}\)/.test(app) && !/viewing/.test(app.slice(app.indexOf("function rpRobAsk"), app.indexOf("function rpRobSync"))) && (app.match(/rpRobSync\(\);/g) || []).length === 3
     && /R\.robSync\(\$\("rp-rob"\), rpRobOpts\(\)\)/.test(app) && /UPD\.turnCloud = false; turnSeq\+\+;/.test(app));
@@ -68,8 +69,8 @@ if (!process.versions.electron) {
     && /\.rob-tbl td \.rob-glyph \{[^}]*position: absolute;\s*left: 4px;\s*top: 2px;/.test(css) && /\.rob-empty-txt \{[^}]*font-size: 13px;[^}]*color: var\(--ink-3\);/.test(css) && !/\.rob-tipwrap/.test(css));
 
   // ── ② 交給 Electron ──
-  const bin = path.join(SHELL, "node_modules", ".bin", "electron");
-  if (!fs.existsSync(bin)) { console.log("SKIP  ② 找不到 shell/node_modules 的 Electron(先 cd shell && npm install)"); console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0); }
+  const bin = GATE.bin(SHELL, "②");
+  if (!bin) { console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0); }
   const r = require("child_process").spawnSync(bin, [__filename], { stdio: "inherit" });
   const sub = r.status == null ? 1 : r.status;
   console.log(red || sub ? `\n${red + sub} 紅` : "\nALL PASS");
@@ -157,6 +158,10 @@ app.whenReady().then(async () => {
     const tip = document.querySelector(".rob-tip"); const on = tip.classList.contains("is-on") && tip.textContent; b.dispatchEvent(new FocusEvent("blur"));
     return { on, off: !tip.classList.contains("is-on"), inline: window.__box.querySelectorAll(".rob-cmp-tbl .tip").length, aria: b.getAttribute("aria-describedby") === tip.id }; })()`);
   ok("② 比較表欄頭「鄰域平均」的說明也走同一顆 body 層單例(表可橫捲不會裁到它);blur 收;沒有行內 .tip", r.on === (await tf("rob.cmp.nbrTip", { k: "3" })) && r.off && r.inline === 0 && r.aria);
+  r = await js(`(() => { const b = window.__box.querySelector(".rob-cmp-tbl th button.mp-tip"), tip = document.querySelector(".rob-tip"); b.dispatchEvent(new FocusEvent("focus"));
+    document.dispatchEvent(new PointerEvent("pointermove")); const stays = tip.classList.contains("is-on");
+    window.__box.style.display = "none"; document.dispatchEvent(new PointerEvent("pointermove")); const off = !tip.classList.contains("is-on"); window.__box.style.display = ""; return { stays, off }; })()`);
+  ok("② 錨點還在畫面上時滑鼠動不收;錨點不在畫面上了(換頁 / 重畫,收不到 blur)下一次滑鼠動就收", r.stays && r.off, JSON.stringify(r));
   r = await js(`(() => { window.__box.style.width = "400px"; const cols = Array.from({ length: 12 }, (_, i) => Math.round(10 * (i + 1)) / 100); const row = cols.map((_, j) => (j === 11 ? 2.5 : 0.3));
     window.__render({ stats: ${JSON.stringify(STATS)}, scan: { row_param: "A", col_param: "B", row_vals: [1, 2], col_vals: cols, grid: [row, row.map((v) => v * 0.9)], window: 1 }, code: "A = 1\\nB = 1.2", name: "s1" }, false);
     const f = window.__box.querySelector(".rob-frame"); const td = window.__box.querySelector(".rob-tbl td.is-current"); const r = td.getBoundingClientRect(), fr = f.getBoundingClientRect();

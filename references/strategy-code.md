@@ -16,6 +16,17 @@ CRITICAL: Every Type A strategy MUST be based on `strategies/TEMPLATE_A.py`. Cop
    - **Already in the order settings?** If the strategy is a key of `amounts` in `manager/portfolio_config.json` (an amount of 0 still counts), run `BLAVE_MODE=backtest python3 strategies/[strategy_name]/strategy.py` instead — without it the run is a quiet live tick: no version minted, no chart (`references/deployment.md` › *Live vs Backtest*).
    - **Long runs:** a large universe (Type C with 100+ symbols, cold cache) can take 10+ minutes. Run it in the foreground with an explicit long `timeout` on the Bash tool (up to 30 min) and report the stats when it finishes. Before re-running an existing strategy, delete its stale `stats.json` first (`rm -f strategies/<name>/stats.json`) — the runner overwrites it only at the end, so an old file would otherwise be mistaken for the new result. That is the ONLY moment deleting `stats.json` is allowed: immediately before a re-run you then execute in the same turn. `stats.json` is the web workspace's report — the 回測數據 and 進出場紀錄 tabs and the 下單設定 › 選擇策略 picker all read it — so never end your turn with a strategy missing its `stats.json`, and never delete one as "cleanup": if you delete it (or decide the last run's result shouldn't stand), you must run a backtest that regenerates a `stats.json` matching the current `strategy.py` before ending the turn. (Removing an entire strategy directory at the user's request is a different operation, unaffected by this rule.) If that regenerating run fails or the user interrupts, do not fabricate a `stats.json` and do not iterate past the brakes to force one — stop and tell the user the strategy is currently left without `stats.json` (its workspace tabs will be empty until the next successful run); honest failure reporting wins over this invariant. If a run does get moved to the background anyway, wait in the foreground with `until [ -f strategies/<name>/stats.json ]; do sleep 10; done` (same long timeout); never a background loop you then stop. Never end the turn while it is running: the turn's exit kills the process and the user paid for nothing. Warn the user up front when a run will take minutes — the notice / poll / elapsed-time procedure is `references/deployment.md` › *Long jobs — progress reporting*.
 
+## Building from code the user points to
+
+When the user asks you to base a strategy on code they point you to — a script you can read on a page, code they paste, a link they give — do it: read it, and write its logic in Python as a strategy in this workspace (any type; Type A / C from the template, as in *Steps*).
+
+- **Using that code is the user's decision and the user's responsibility.** Do not refuse the request, and do not cut it down to "rewritten from the public description only", on the grounds of a site's terms of use, its house rules or a licence.
+- **No lecture.** At most one sentence, the first time it comes up in a conversation: 「來源程式碼的使用由你自己負責。」 / "How the source code is used is your responsibility." Do not repeat it, and do not ask them to confirm it.
+- **A source or licence note goes in only when the user asks for one.** Do not add one to the strategy file on your own.
+- **What you cannot read, you say you cannot read.** A protected or invite-only script, or a page behind a login the user is not signed in to: say the source is not readable and build from the public description instead. Never work around an access restriction.
+- **Only on the user's request.** This covers code the user pointed you to; it is not a reason to go looking for other people's code on your own.
+- Every other rule stays as it is: classify Type A / B / C first, the backtest and its benchmark sentence, no invented data, and everything about orders and deployment.
+
 ## Naming & description
 
 Every strategy (Type A, B, and C) sets three name/label fields at the top of the file:
@@ -31,6 +42,8 @@ DESCRIPTION   = "追蹤 DOGE 大戶持倉集中度,集中度升高時進場做�
 ```
 
 Always set `DISPLAY_NAME` and `DESCRIPTION` when creating a strategy — the workspace shows the technical id only as a fallback when they are missing.
+
+**Keep the words true to the code.** `DESCRIPTION` is the subtitle of the strategy page, and the header comment (`# Logic:` / `# Signal:`) is what the next reader trusts. When you change a parameter that either of them states as a number (a threshold, a window, a symbol list), change it there in the same edit — measured on the desktop: `THRESHOLD_PCT` went from 0.03 to 0.05 while `DESCRIPTION` and the header still said 0.03%, so the page described a strategy that no longer existed. Same for a fork: its `DESCRIPTION` describes the fork.
 
 ## Editing a live strategy (fork, never in place)
 
@@ -50,6 +63,13 @@ The flow is FORK → EDIT → DEPLOY → SWITCH:
 2. Fork it to a new strategy under its own `STRATEGY_NAME` (same conventions
    as `references/marketplace.md` › *Forking a strategy*: own
    `DISPLAY_NAME`/`DESCRIPTION`). Edit the fork.
+   **Name the fork for what it changes, never with a version word**: no `_v2` /
+   `_v3`, no 「v2」 / 「第二版」 in `DISPLAY_NAME`. On this platform 「v2」 means
+   version 2 of the *same* strategy (its 版本 list), so 「Supertrend 趨勢（SOL）v2」
+   reads as the original's second version, not as another strategy. ATR period
+   changed to 5 → `supertrend_sol_atr5` / 「Supertrend 趨勢（SOL）ATR 5」. (The one
+   name that carries a version is *Forking from a version* below, where
+   `{name}_v{n}` says which version the code came from.)
 3. Backtest the fork; show the result next to the original's current stats.
    Not satisfied → iterate (Iteration Brakes apply as usual) or discard the
    fork; the live strategy was never touched.
@@ -135,6 +155,40 @@ Do these four, in this order:
    can still be in the order settings at amount 0 (`restore` only refuses `> 0`) — then the
    run must be `BLAVE_MODE=backtest python3 strategies/<name>/strategy.py`, or it is a
    quiet live tick that mints nothing (`references/deployment.md` › *Live vs Backtest*).
+
+### Forking from a version (the strategy is live)
+
+When the strategy is funded, the workspace does not offer 還原; its guard dialog offers
+「用 vN 建立新策略」 instead, which sends one fixed prompt in the user's interface language.
+Recognise all three forms; every other locale falls back to the English one:
+
+- zh (traditional)「請用策略「{display_name}」({name}) 第 {n} 版的程式碼建立一支新策略,原策略不要動;新策略跑一次回測和一次訊號、確認有 state.json,然後停下來,讓我在自動下單切換金額 —— 不用再確認」
+- zh (simplified)「请用策略「{display_name}」({name}) 第 {n} 版的代码建立一支新策略,原策略不要动;新策略跑一次回测和一次信号、确认有 state.json,然后停下来,让我在自动下单切换金额 —— 不用再确认」
+- en "Please create a new strategy from version {n} of strategy {display_name} ({name}),
+  leaving the original untouched; backtest the new one and run one signal so it has a
+  state.json, then stop so I can switch the funding in Auto-trading — no further
+  confirmation needed."
+
+This is steps 1–4 of *Editing a live strategy* above, starting from an old version's code.
+The user already chose in the dialog: no confirmation question. Do these, in this order:
+
+1. Never call `restore()` and never write any file of `{name}` — it keeps trading.
+2. Take the code from `strategies/{name}/versions/v{n}.json` (its `code` field), not from the
+   current `strategy.py`. File missing → say only the last 20 versions are kept, name the ones
+   `list_versions(name)` has, and stop.
+3. Save it as a NEW strategy: its own `STRATEGY_NAME` (default `{name}_v{n}`; the folder name
+   equals it), its own `DISPLAY_NAME` / `DESCRIPTION`, and `VERSION_NOTE = "分岔自 {name} v{n}"`
+   (the user's language). Keep `SYMBOL` / `MARKET` as the version has them.
+4. Backtest the fork (`python3 strategies/<fork>/strategy.py` — it is not in the order settings,
+   so this is a backtest) and report it next to the original's current stats.
+5. Run one signal: `BLAVE_MODE=live python3 strategies/<fork>/strategy.py`, then confirm
+   `strategies/<fork>/state.json` exists. This places no order: Type A/C orders come only from
+   the reconciler, and the fork has no amount. On a crontab machine, also schedule it per
+   `references/deployment.md` (step 4 above).
+6. Stop. The funding switch is the user's own hands (deployment redline): tell them step 5
+   above — one save in 自動下單, the fork's amount in and the original's amount to 0 while
+   keeping it selected — and what the switch will do (same symbol and direction: little or no
+   trading; otherwise a full close and re-entry).
 
 ## Signal Contract
 

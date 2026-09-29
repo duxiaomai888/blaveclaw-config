@@ -6,8 +6,11 @@
 // 跑法:node tests/check_shell_report_news.js(沒有 monorepo 版面 / git / Electron 時對應段 SKIP)
 const fs = require("fs"), path = require("path"), os = require("os"), vm = require("vm");
 const SHELL = path.join(__dirname, "..", "shell"), R = path.join(SHELL, "renderer"), FIX = path.join(__dirname, "fixtures");
+const GATE = require("./_electron_gate");
 const MONO = path.join(__dirname, "..", "..");
-const NEWS_FIX = path.join(MONO, "api", "tests", "fixtures", "report_news.json");
+// api 的 fixture:BLAVE_API_DIR 優先(測試樹不在 monorepo 版面時指過去),再退 monorepo 的 ../api
+const apiFile = (...p) => [process.env.BLAVE_API_DIR, path.join(MONO, "api")].filter(Boolean).map((d) => path.join(d, ...p)).find((f) => fs.existsSync(f)) || path.join(MONO, "api", ...p);
+const NEWS_FIX = apiFile("tests", "fixtures", "report_news.json");
 const WEB_RB = path.join(MONO, "web", "app", "static", "js", "agent", "report_blocks.js");
 // news 進來之前那一版渲染器(desktop 0.1.6):舊報告零變化的比對基準
 const BASE_REV = "4957ea6";
@@ -37,8 +40,8 @@ if (!process.versions.electron) {
 
   let base = null;
   try { base = require("child_process").execFileSync("git", ["show", BASE_REV + ":shell/renderer/report-blocks.js"], { cwd: path.join(__dirname, ".."), stdio: ["ignore", "pipe", "ignore"] }).toString(); } catch (_) { base = null; }
-  const bin = path.join(SHELL, "node_modules", ".bin", "electron");
-  if (!fs.existsSync(bin)) { console.log("SKIP  ② 找不到 shell/node_modules 的 Electron"); console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0); }
+  const bin = GATE.bin(SHELL, "②");
+  if (!bin) { console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0); }
   if (!fs.existsSync(NEWS_FIX)) console.log("SKIP  ② news fixture(需要 monorepo 版面:../api/tests/fixtures/report_news.json)");
   const baseFile = base ? path.join(fs.mkdtempSync(path.join(os.tmpdir(), "blave-rbnews-")), "base.js") : "";
   if (base) fs.writeFileSync(baseFile, base); else console.log("SKIP  ② 舊報告零變化(git 裡找不到 " + BASE_REV + ")");
@@ -52,8 +55,17 @@ if (!process.versions.electron) {
 const { app, BrowserWindow } = require("electron");
 app.setPath("userData", fs.mkdtempSync(path.join(os.tmpdir(), "blave-rbnews-")));
 const NEWS = process.env.RB_NEWS ? JSON.parse(read(process.env.RB_NEWS)) : null;
+// published_at_precision "day" 是契約 1.4 的一部分(report-blocks.md §3);api 那份 fixture 還沒帶這個項目時(檢出的 api 較舊)
+// 在這裡把 web 管道那一則標成 day——那一條斷言照樣跑,不因 api 版本而 SKIP
+if (NEWS && !NEWS.blocks.some((b) => b.type === "news" && b.items.some((it) => it.published_at_precision === "day"))) {
+  const it = NEWS.blocks.find((b) => b.type === "news").items.find((x) => x.channel === "web");
+  it.published_at_precision = "day"; it.published_at = Math.floor(it.published_at / 86400) * 86400 + 43200;   // 只有日期的來源存當天 12:00 UTC
+  console.log("INFO  ② api fixture 沒有 published_at_precision=day 的項目(" + process.env.RB_NEWS + "):測試自己把 web 那一則標成 day");
+}
 const WEEKLY = JSON.parse(read(path.join(FIX, "report_weekly.json"))), MCPT = JSON.parse(read(path.join(FIX, "report_mcpt.json")));
-const MORNING = fs.existsSync(path.join(MONO, "api", "tests", "fixtures", "report_morning.json")) ? JSON.parse(read(path.join(MONO, "api", "tests", "fixtures", "report_morning.json"))) : null;
+const MORNING_FIX = apiFile("tests", "fixtures", "report_morning.json");
+const MORNING = fs.existsSync(MORNING_FIX) ? JSON.parse(read(MORNING_FIX)) : null;
+if (!MORNING) console.log("SKIP  ② 舊報告零變化的晨報樣本(需要 monorepo 版面:../api/tests/fixtures/report_morning.json)");
 const BAD = ["http://news.example.com/a", "https://u:p@news.example.com/", "https://user@news.example.com/", "https://news.example.com\\evil.com/", "https:\\\\evil.com", "https://例子.com/", "https://news.example.com/\u200b",
   "javascript:alert(1)", "https:evil.com", "https:/evil.com", " https://news.example.com/", "https://", "", "data:text/html,x", "file:///etc/passwd", 123, null, { href: "https://evil.com" }];
 const EVIL = { schema_version: "1.4", id: "x-evil", type: "research", title: "evil", created_at: 1790380800, blocks: [

@@ -11,6 +11,7 @@
 // 跑法:node tests/check_shell_library.js(找不到 shell/node_modules 的 Electron 時 ④ SKIP,①②③ 照跑)
 const fs = require("fs"), path = require("path"), vm = require("vm"), os = require("os");
 const SHELL = path.join(__dirname, "..", "shell"), R = path.join(SHELL, "renderer");
+const GATE = require("./_electron_gate");
 let red = 0; const ok = (n, c, d) => { console.log((c ? "PASS  " : "FAIL  ") + n + (c || d === undefined ? "" : "  ← " + String(d).slice(0, 2000))); if (!c) red++; };
 const read = (f) => fs.readFileSync(f, "utf8");
 const src = read(path.join(R, "library.js")), appSrc = read(path.join(R, "app.js")), trSrc = read(path.join(R, "trade.js"));
@@ -139,9 +140,9 @@ if (!process.versions.electron) {
       && /const report = libReportSanitize\(r\.body\);\s*if \(!report\) return null;/.test(lr) && /ck = `\$\{id\}:\$\{lang\}`/.test(lr) && /Date\.now\(\) - hit\.at < ACCT_FRESH_MS/.test(lr)); }
 
   // ── ③ 接線 ──
-  ok("③ index.html:側欄「策略庫」在「自動下單」後、同一個 #side-nav 裡;歡迎頁多一顆 #chat-lib 在 #chat-eg 前;#lib 在 #rp 後、#main-empty 前;library.css;library.js 在 handoff.js 後、app.js 前",
+  ok("③ index.html:側欄「策略庫」在「自動下單」後、同一個 #side-nav 裡;歡迎頁多一顆 #chat-lib 在 #chat-eg 前;#lib 在 #rp 後、#main-empty 前;library.css;library.js 在 handoff.js 後(中間只許 export.js)、app.js 前",
     html.indexOf('id="lib-nav"') > html.indexOf('id="tr-nav"') && html.indexOf('id="lib-nav"') < html.indexOf("</nav>") && html.indexOf('id="chat-lib"') < html.indexOf('id="chat-eg"') && html.indexOf('id="chat-lib"') > html.indexOf('class="wc-chips"')
-    && html.indexOf('id="lib"') > html.indexOf('id="rp"') && html.indexOf('id="lib"') < html.indexOf('id="main-empty"') && /<link rel="stylesheet" href="library\.css">/.test(html) && /<script src="handoff\.js"><\/script>\s*<script src="library\.js"><\/script>\s*<script src="app\.js">/.test(html));
+    && html.indexOf('id="lib"') > html.indexOf('id="rp"') && html.indexOf('id="lib"') < html.indexOf('id="main-empty"') && /<link rel="stylesheet" href="library\.css">/.test(html) && /<script src="handoff\.js"><\/script>\s*(?:<script src="export\.js"><\/script>\s*)?<script src="library\.js"><\/script>\s*<script src="app\.js">/.test(html));
   ok("③ #lib 的骨架:region + aria-labelledby 到 h5、h5 tabindex=-1、分段 group 三顆、返回鈕、#lib-body tabindex=0、#lib-state role=status", /<div class="lib" id="lib" role="region" aria-labelledby="lib-h" hidden>/.test(html) && /<h5 class="main-head-name" id="lib-h" tabindex="-1" data-i18n="lib\.nav">/.test(html)
     && (html.match(/data-mkt="(all|crypto|tw)"/g) || []).length === 3 && /<button class="lib-back" id="lib-back" type="button" hidden>/.test(html) && /<div class="lib-body" id="lib-body" tabindex="0">/.test(html) && /<p class="lib-state" id="lib-state" role="status" hidden>/.test(html));
   ok("③ 社群段拆了(0.1.6 §2):index.html / library.js / library.css 沒有 lib-comm、字串表沒有 lib.comm.*;閘門卡的殼 #lib-gate 在 #lib-rows 之前(預設 hidden)", !/lib-comm/.test(html) && !/lib-comm|\.comm\b|library_comm/.test(src) && !/lib-comm/.test(read(path.join(R, "library.css")))
@@ -154,8 +155,9 @@ if (!process.versions.electron) {
   ok("③ 開別的視圖就 libLeave:trOpen(那一邊)、stratSelect(本機,選了才)、rpCloudSelect(雲端,選了才)", /if \(typeof libLeave === "function"\) libLeave\(S\.env\);/.test(cutFn(trSrc, "trOpen"))
     && /if \(name && typeof libLeave === "function"\) libLeave\("local"\);/.test(cutFn(appSrc, "stratSelect")) && /if \(name && typeof libLeave === "function"\) libLeave\("cloud"\);/.test(cutFn(appSrc, "rpCloudSelect")));
   ok("③ 回合的三個出口(上鎖、失敗解鎖、turn-end)都叫 libSync;turn-end 等 stratRefresh(true) 回來才 libTurnEnd;trPoll 每次讀到雲端清單都叫 libCloudChanged(緊接 rpCloudPrune)", (appSrc.match(/if \(typeof libSync === "function"\) libSync\(\);/g) || []).length === 3
-    && /stratRefresh\(true\)\.catch\(\(\) => \{\}\)\.then\(\(\) => \{ if \(typeof libTurnEnd === "function"\) libTurnEnd\(\); if \(typeof rptTurnEnd === "function"\) rptTurnEnd\(\); \}\);/.test(appSrc.slice(appSrc.indexOf("window.blave.onTurnEnd(")))
+    && /stratRefresh\(true\)\.catch\(\(\) => \{\}\)\.then\(\(\) => \{ if \(typeof libTurnEnd === "function"\) libTurnEnd\(\);/.test(appSrc.slice(appSrc.indexOf("window.blave.onTurnEnd(")))
     && /rpCloudPrune\(C\.list\);[^\n]*\n\s*if \(typeof libCloudChanged === "function"\) libCloudChanged\(C\.list\);/.test(cutFn(trSrc, "trPoll")));
+  ok("③ 已購:鈕下不寫說明句(lib.note.owned 連字串一起拿掉);未購的付費策略照舊 lib.note.paid", !/lib\.note\.owned/.test(src) && !("lib.note.owned" in STR.zh) && !("lib.note.owned" in STR.en) && /case "owned": [^\n]*libAsk\(s, b\)\)\); break;/.test(src) && STR.zh["lib.note.paid"] === "從 Blave Agent 餘額扣款。");
   ok("③ 快取作廢的四個事件都接了:登出 / 兩條登入路徑 → libInvalidate;設定關掉 → libRefresh;主行程登出(clearToken)與換 token 都清 libCache;購買成功後 libRefresh", (appSrc.match(/if \(typeof libInvalidate === "function"\) libInvalidate\(\);/g) || []).length === 3
     && /if \(typeof libRefresh === "function"\) libRefresh\(\);/.test(cutFn(appSrc, "setClose")) && /libCache = null;/.test(cutFn(mainSrc, "clearToken")) && (mainSrc.match(/^\s*libCache = null;/gm) || []).length === 3
     && /libSend\(s\); libRefresh\(\); return;/.test(src) && /function libRepaint\(\) \{ if \(\$\("lib"\)\.hidden\) return; LIB\.reports\.clear\(\); libPaint\(\); if \(LIB\.data && LIB\.data\.lang !== LANG\) libLoad\(false\); \}/.test(src) && /window\.addEventListener\("focus", \(\) => libRefresh\(\)\);/.test(src));
@@ -177,8 +179,8 @@ if (!process.versions.electron) {
   ok("③ tokens.css 多綠 tag 那一對(亮暗各一組);library.css 只引變數、沒有 hex", (read(path.join(R, "tokens.css")).match(/--color-greenLight:/g) || []).length === 2 && (read(path.join(R, "tokens.css")).match(/--color-greenBlack:/g) || []).length === 2 && !/#[0-9a-fA-F]{3,6}\b/.test(read(path.join(R, "library.css"))));
 
   // ── ④ 交給 Electron ──
-  const bin = path.join(SHELL, "node_modules", ".bin", "electron");
-  if (!fs.existsSync(bin)) { console.log("SKIP  ④ 找不到 shell/node_modules 的 Electron(先 cd shell && npm install)"); console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0); }
+  const bin = GATE.bin(SHELL, "④");
+  if (!bin) { console.log(red ? `\n${red} 紅` : "\nALL PASS"); process.exit(red ? 1 : 0); }
   const r = require("child_process").spawnSync(bin, [__filename], { stdio: "inherit" });
   const sub = r.status == null ? 1 : r.status;
   console.log(red || sub ? `\n${red + sub} 紅` : "\nALL PASS");
@@ -255,7 +257,7 @@ app.whenReady().then(async () => {
       && s.kv === "總報酬|年化|Sharpe|最大回撤|樣本|上架天數|安裝 / +312.50%|+24.61%|1.50|−20.00%|6.5 年|107|7".replace("107", String(Math.max(0, Math.floor((Date.now() - Date.parse("2026-06-10T00:00:00")) / 86400000))))
       && s.gates === "誠實回測=通過[假設 0.05%;交易所 0.04%]|統計顯著=通過[p < 0.001]|參數穩健=通過[鄰域保留 91%]" && s.lead === null
       && s.how === "第一段。\n第二段。" && s.dl === "2020-01-01 — 2026-06-30|BTC/USDT 永續 · 5 分 K|純做多|1 倍" && s.period === "2020-01-01 — 2026-06-30" && s.steps === 0 && s.focus === "lib-back", JSON.stringify(s));
-    ok("④ 免費態:主鈕「用這支」、說明句只講價格", s.cta === (await T("lib.use")) && s.note === (await T("lib.note.free")), JSON.stringify(s.note)); }
+    ok("④ 免費態:主鈕「用這支」、沒有說明句(免費不寫)", s.cta === (await T("lib.use")) && s.note === "", JSON.stringify(s.note)); }
   ok("④ /report 回來(問一次、帶語言):只換曲線(#lib-chart 還在、LIB.chart 換新、canvas 在)與回測期間(backtest_start — backtest_end、.mono);頭部 / CTA / 焦點都沒重畫", JSON.stringify(r.after.calls) === "[[101,\"zh\"]]" && r.after.swapped && r.after.chart === 1 && r.after.canvas >= 1
     && r.after.period === "2019-12-02 — 2026-06-30" && r.after.periodMono === 1 && r.after.focus === "lib-back" && r.after.h5 === 1 && r.after.cta === (await T("lib.use")), JSON.stringify(r.after));
   // 降級:主行程回 null / 打不到 → 停在 spark、回測期間留曲線區間、不出任何錯誤字;下次進詳情再問(失敗不記)
@@ -298,7 +300,7 @@ app.whenReady().then(async () => {
   await js(`hasToken = false; libSync();`); r = await cta();
   ok("④ 未登入(0.1.6 §3.2 末):主鈕「登入 Blave」、閘門句升一階、沒有文字鈕", r.btn === (await T("cn.blave.btn")) && r.dis === false && r.up && r.quiet === "" && r.note === (await T("lib.gate.signedOut")), JSON.stringify(r));
   r = await js(`(async () => { const q = (x) => [...document.querySelectorAll(x)]; q("#lib-cta .btn-fill")[0].click(); await new Promise((r) => setTimeout(r, 60)); const out = { set: !document.getElementById("set-scrim").hidden, cat: (document.querySelector('.set-cat[aria-current="true"]') || { dataset: {} }).dataset.setCat }; setClose(); return out; })()`);
-  ok("④ 「登入 Blave」→ 設定 › 帳號", r.set && r.cat === "acct", JSON.stringify(r));
+  ok("④ 「登入 Blave」→ 設定 › 帳號與方案", r.set && r.cat === "plan", JSON.stringify(r));
   // 付不出資料費(0.1.6 §3.2):主鈕照 why 分流、鈕下說明升一階;試用天數來自 planVars().t(acct.trial_days),不寫死
   await js(`hasToken = true; LIB.data.dataAccess = "none"; LIB.data.why = "no_card"; acct = { trial_eligible: true, trial_days: 14 }; libSync();`); r = await cta();
   ok("④ no_card 有試用:主鈕「綁卡，送 14 天資料」、說明只有「還沒綁卡…」(天數鈕字已講,不接 data.noCardSub);沒有文字鈕", r.btn === (await T("lib.gate.bindCard", { t: 14 })) && r.dis === false && r.up && r.quiet === "" && r.note === (await T("lib.gate.noCard")), JSON.stringify(r));
@@ -309,7 +311,7 @@ app.whenReady().then(async () => {
   await js(`LIB.data.why = "no_balance"; libSync();`); r = await cta();
   ok("④ no_balance:「儲值」+ 說明「這一小時付不出…儲值後馬上恢復」", r.btn === (await T("lib.gate.topup")) && r.note === (await T("lib.gate.noBalance")), JSON.stringify(r));
   await js(`LIB.data.why = "unknown"; libSync();`); r = await js(`(() => { const q = (x) => [...document.querySelectorAll(x)]; return { fill: q("#lib-cta .btn-fill").length, out: q("#lib-cta .btn-out").map((b) => b.textContent).join(), note: q("#lib-cta .note")[0].textContent }; })()`);
-  ok("④ unknown:描邊「資料與雲端方案」(查不到狀態不擺要錢的主鈕)+ 說明「現在查不到…」", r.fill === 0 && r.out === (await T("set.cat.plan")) && r.note === (await T("lib.gate.unknown")), JSON.stringify(r));
+  ok("④ unknown:描邊「帳號與方案」(鈕字是 pv.e.btn;查不到狀態不擺要錢的主鈕)+ 說明「現在查不到…」", r.fill === 0 && r.out === (await T("pv.e.btn")) && r.note === (await T("lib.gate.unknown")), JSON.stringify(r));
   r = await js(`(async () => { const q = (x) => [...document.querySelectorAll(x)]; q("#lib-cta .btn-out")[0].click(); await new Promise((r) => setTimeout(r, 60)); const a = { set: !document.getElementById("set-scrim").hidden, cat: (document.querySelector('.set-cat[aria-current="true"]') || { dataset: {} }).dataset.setCat }; setClose();
     document.getElementById("lib-back").click(); LIB.data.why = "no_balance"; document.getElementById("lib-h").focus(); libPaintList(); const g = document.getElementById("lib-gate");
     const b = { hidden: g.hidden, text: g.querySelector("p") && g.querySelector("p").textContent, btn: g.querySelector("button") && g.querySelector("button").textContent + ":" + g.querySelector("button").className, rows: q("#lib-rows .lib-row").length, focus: document.activeElement && document.activeElement.id, above: g.getBoundingClientRect().bottom <= q("#lib-rows .lib-row")[0].getBoundingClientRect().top };
@@ -320,7 +322,7 @@ app.whenReady().then(async () => {
     && !r.b.hidden && r.b.text === (await T("lib.gate.noBalance")) && r.b.btn === (await T("lib.gate.topup")) + ":btn-fill" && r.b.rows === 8 && r.b.focus === "lib-h" && r.b.above && r.c.hidden && r.d.lib && r.d.hidden && r.e.hidden, JSON.stringify(r));
   await js(`LIB.data.dataAccess = "billed"; libSync();`); r = await cta();
   let a = await js(`(async () => { const q = (x) => [...document.querySelectorAll(x)]; q("#lib-cta .btn-fill")[0].click(); const o = { lines: q("#del-body p").map((p) => p.textContent), where: document.getElementById("del-where").hidden }; document.getElementById("del-cancel").click(); await new Promise((r) => setTimeout(r, 40)); return o; })()`);
-  ok("④ 按小時付資料費的帳號:鈕下只有「免費。」;lib.note.billed 在確認框第三行、本機不出腳的目的地句", r.btn === (await T("lib.use")) && r.note === (await T("lib.note.free")) && a.lines.length === 3 && a.lines[2] === (await T("lib.note.billed")) && a.where, JSON.stringify([r, a]));
+  ok("④ 按小時付資料費的帳號:鈕下沒有說明句;lib.note.billed 在確認框第三行、本機不出腳的目的地句", r.btn === (await T("lib.use")) && r.note === "" && a.lines.length === 3 && a.lines[2] === (await T("lib.note.billed")) && a.where, JSON.stringify([r, a]));
   a = await js(`(async () => { const q = (x) => [...document.querySelectorAll(x)]; ENV.cur = "cloud"; libAsk({ id: 101, title: "BTC 通道動能共振" }); const o = { lines: q("#del-body p").map((p) => p.textContent), notes: q("#del-body .cf-note").length, where: document.getElementById("del-where").hidden ? null : document.getElementById("del-where").textContent, env: !document.getElementById("del-env").hidden }; document.getElementById("del-cancel").click(); ENV.cur = "local"; await new Promise((r) => setTimeout(r, 40)); return o; })()`);
   ok("④ 雲端視角的下載確認框:內文兩段(l1 不帶目的地、雲端不出 billed)、lib.cf.cloudNote 在腳的 .del-where(不在內文 .cf-note)、「雲端」記號", a.lines.length === 2 && a.lines[0] === (await T("lib.cf.l1")) && a.notes === 0 && a.where === (await T("lib.cf.cloudNote")) && a.env, JSON.stringify(a));
   await js(`LIB.data.dataAccess = "included"; running = true; libSync();`); r = await cta();
@@ -333,14 +335,14 @@ app.whenReady().then(async () => {
   ok("④ 「用這支」→ 確認框(標題帶策略名、兩段、「下載並回測」、焦點在取消、本機不掛雲端記號)→ 確認 → 送出的就是 web 那一句(逐字)、viewing.env=local → 進行中態",
     r.open && r.title === (await T("lib.cf.title", { title: "BTC 通道動能共振" })) && r.full === r.title && !/…/.test(r.title) && r.lines.length === 2 && r.lines[0] === (await T("lib.cf.l1")) && r.okTxt === (await T("lib.cf.ok")) && r.env && r.focus === "del-cancel"
     && r.sent.length === 1 && r.sent[0][0] === "幫我下載官方策略「BTC 通道動能共振」（#101），跑一次回測看看結果" && r.sent[0][1] === "local" && r.sent[0][2] && r.pending === 101 && r.btn === (await T("lib.pending")) && r.dis && r.note === (await T("lib.note.pending")) && r.running, JSON.stringify(r));
-  // turn-end:本機多了一支 → 記對照表;stratRefresh(true) 選中新策略(策略庫收起)
+  // turn-end:本機多了一支 → 記對照表;回合結束不換頁(結果卡 spec §1:新策略不自動選中,由 results.js 出卡,見 check_shell_results.js)
   r = await js(`(async () => { window.__lib.strats = [{ name: "btc_channel", displayName: "BTC 通道", mtime: 5, hasBacktest: true }]; running = false;
     await stratRefresh(true); libTurnEnd(); await new Promise((r) => setTimeout(r, 40));
     const libHidden = document.getElementById("lib").hidden, rp = document.getElementById("rp").hidden, sel = RP.name;
     await libOpen(); await new Promise((r) => setTimeout(r, 40)); const q = (x) => [...document.querySelectorAll(x)]; const b = q("#lib-cta .btn-fill")[0];
     return { patches: window.__lib.patches, installed: LIB.installed, libHidden, rp, sel, pending: LIB.pending, btn: b.textContent, quiet: q("#lib-cta .btn-quiet").map((x) => x.textContent).join(), note: q("#lib-cta .note")[0].textContent, detail: libBag().detail }; })()`);
-  ok("④ turn-end:本機清單多了 btc_channel → 對照表記 101 → btc_channel(寫進主行程)、報告頁蓋掉策略庫;再開回到同一支詳情 → 已安裝態(打開這支策略 + 再下載一份)",
-    JSON.stringify(r.patches) === '[{"id":101,"name":"btc_channel"}]' && r.installed["101"] === "btc_channel" && r.libHidden && !r.rp && r.sel === "btc_channel" && r.pending === null && r.detail === 101
+  ok("④ turn-end:本機清單多了 btc_channel → 對照表記 101 → btc_channel(寫進主行程)、不自動選中新策略(策略庫留著、報告頁不出現);同一支詳情 → 已安裝態(打開這支策略 + 再下載一份)",
+    JSON.stringify(r.patches) === '[{"id":101,"name":"btc_channel"}]' && r.installed["101"] === "btc_channel" && !r.libHidden && r.rp && r.sel === null && r.pending === null && r.detail === 101
     && r.btn === (await T("lib.open")) && r.quiet === (await T("lib.again")) && r.note === (await T("lib.note.installed", { where: await T("lib.where.local") })), JSON.stringify(r));
   r = await js(`(async () => { const q = (x) => [...document.querySelectorAll(x)]; document.getElementById("lib-back").click(); const tag = q('#lib-rows .lib-row[data-id="101"] .tag').map((x) => x.textContent).join("|"), focus = document.activeElement && document.activeElement.dataset.id;
     window.__lib.strats = []; await stratRefresh(false); await new Promise((r) => setTimeout(r, 40));
@@ -396,9 +398,9 @@ app.whenReady().then(async () => {
   ok("④ 成功 → 關框、不再開下載框、直接送 lib.msgPaid(逐字)、進行中態、purchased=true", r.del && r.sent.length === 2 && r.sent[1] === "幫我下載已購買的策略「Cash-and-Carry <img onerror=x> Arbitrage」（#5），跑一次回測看看結果" && r.pending === 5 && r.purchased === true && r.btn === (await T("lib.pending")) && r.buys === 5, JSON.stringify(r));
   // 已購:用這支 → msgPaid,不開購買框
   r = await js(`(async () => { running = false; LIB.pending = null; libSync(); document.getElementById("lib-back").click(); const q = (x) => [...document.querySelectorAll(x)]; q('#lib-rows .lib-row[data-id="9"]')[0].click();
-    const btn = q("#lib-cta .btn-fill")[0].textContent, note = q("#lib-cta .note")[0].textContent; q("#lib-cta .btn-fill")[0].click(); const title = document.getElementById("del-title").textContent; document.getElementById("del-ok").click(); await new Promise((r) => setTimeout(r, 60));
-    return { btn, note, title, last: window.__lib.sent[window.__lib.sent.length - 1].message, buys: window.__lib.buys.length }; })()`);
-  ok("④ 已購的付費策略:主鈕「用這支」、說明 lib.note.owned、走下載框(不是購買框)、送 lib.msgPaid", r.btn === (await T("lib.use")) && r.note === (await T("lib.note.owned")) && r.title === (await T("lib.cf.title", { title: "已買的社群策略" })) && r.last === "幫我下載已購買的策略「已買的社群策略」（#9），跑一次回測看看結果" && r.buys === 5, JSON.stringify(r));
+    const btn = q("#lib-cta .btn-fill")[0].textContent, note = q("#lib-cta .note")[0].textContent, noteHidden = q("#lib-cta .note")[0].hidden; q("#lib-cta .btn-fill")[0].click(); const title = document.getElementById("del-title").textContent; document.getElementById("del-ok").click(); await new Promise((r) => setTimeout(r, 60));
+    return { btn, note, noteHidden, title, last: window.__lib.sent[window.__lib.sent.length - 1].message, buys: window.__lib.buys.length }; })()`);
+  ok("④ 已購的付費策略:主鈕「用這支」、鈕下沒有說明句(那一段收著)、走下載框(不是購買框)、送 lib.msgPaid", r.btn === (await T("lib.use")) && r.note === "" && r.noteHidden && r.title === (await T("lib.cf.title", { title: "已買的社群策略" })) && r.last === "幫我下載已購買的策略「已買的社群策略」（#9），跑一次回測看看結果" && r.buys === 5, JSON.stringify(r));
   // en
   r = await js(`(async () => { running = false; LIB.pending = null; libFind(5).purchased = false; setLang("en"); applyStatic(); await new Promise((r) => setTimeout(r, 30)); const q = (x) => [...document.querySelectorAll(x)];
     const h = document.getElementById("lib-h").textContent; document.getElementById("lib-back").click(); q('#lib-rows .lib-row[data-id="5"]')[0].click(); const tag5 = q('#lib-cta').length;
@@ -424,7 +426,7 @@ app.whenReady().then(async () => {
     ENV.cur = "local"; envShowMain(); await new Promise((r) => setTimeout(r, 60)); const l = { h5: q("#lib-det h5")[0] && q("#lib-det h5")[0].textContent, where: q("#lib-cta .note")[0].textContent, painted: LIB.paintedEnv };
     LIB.bags.cloud.open = false; LIB.bags.cloud.detail = null; return { c, l }; })()`);
   ok("④ 兩邊都開著策略庫:切到雲端畫雲端那袋的詳情(#72、說明句講雲端主機、停機 / 讀不到那句);切回本機回到 #101、說明句講這台電腦", r.c.lib && r.c.h5 === "DOGE 籌碼集中度" && r.c.painted === "cloud" && (r.c.where === (await T("ho.gate.stale")) || r.c.where === (await T("ho.gate.stopped")))
-    && r.l.h5 === "BTC 通道動能共振" && r.l.painted === "local" && r.l.where === (await T("lib.note.free")), JSON.stringify(r));
+    && r.l.h5 === "BTC 通道動能共振" && r.l.painted === "local" && r.l.where === "", JSON.stringify(r));
   // 雲端視角的「已安裝」(Windows 真機補測):送出時記雲端清單(名字 → mtime)、回合結束比不到就掛著等、輪詢帶新清單來才記;不寫檔、不打端點;那支從雲端消失就拿掉;等太久就放掉。
   // 清單「缺席」(strategies_ok 不為 true)那一輪:不刪、不記、不動;等待中再送第二支 → 第一支的等待放掉;回合結束當場比到 → 清單當場重畫;同名 mtime 變了(再下載一份)→ 也算、也重畫;登出清掉
   r = await js(`(async () => { const q = (x) => [...document.querySelectorAll(x)]; running = false; LIB.pending = null; LIB.bags.cloud.open = true; LIB.bags.cloud.detail = null; document.getElementById("cv-empty").hidden = true; ENV.cur = "cloud";

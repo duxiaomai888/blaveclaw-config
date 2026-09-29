@@ -46,6 +46,7 @@
     metaBenchmark: "Benchmark",
     calloutRisk: "Risk",
     imageError: "Image failed to load",
+    imageSource: "Source",
     footnoteRef: "Note",
     segOther: "Other",
     newsPos: "Positive News",
@@ -640,14 +641,17 @@
   // ------------------------------------------------------------------ blocks
   var BLOCKS = {};
 
+  var TYPE_CODES = ["research", "morning", "performance"];
+
   BLOCKS.meta = function (b, ctx) {
     var head = el("header", "rb-meta");
     var title = str(b.title);
     var h1 = el("h1", "rb-title");
     monoShapes(h1, title);
     // 標題已含類型時不重複渲染 tag(型錄:週報標題自帶「績效週報」→ 無 tag)
+    // 產出端沒給 report_type 時填的是 type 代號,不是給人看的字
     var rtype = str(b.report_type);
-    if (rtype && title.indexOf(rtype) < 0) {
+    if (rtype && TYPE_CODES.indexOf(rtype) < 0 && title.indexOf(rtype) < 0) {
       h1.appendChild(el("span", "rb-type-tag", rtype));
     }
     head.appendChild(h1);
@@ -717,21 +721,25 @@
     var hasDelta = items.some(function (it) {
       return it && it.delta;
     });
-    // 格數進 class:一行最多 5 格,6 格(契約上限)固定折成 3+3 等寬網格,
-    // 不放任自由 wrap 折出 5+1 孤兒
+    // 格數進 class:6 格(契約上限)焦點格獨佔一列、其餘 3+2(排法在 CSS)
     var row = el(
       "div",
       "rb-kpi is-n" + items.length + (hasDelta ? " has-delta" : "")
     );
     items.forEach(function (it, i) {
-      var cell = el("div", "rb-kpi-cell" + (i === 0 ? " is-focus" : ""));
+      // 20px mono 的值到 11 個字元,加單位就超過兩欄網格的半欄:那一格獨佔一列(只在兩欄網格生效)
+      var wide = i > 0 && str(it.value).length >= 11;
+      var cell = el("div", "rb-kpi-cell" + (i === 0 ? " is-focus" : "") + (wide ? " is-wide" : ""));
       cell.appendChild(monoLabel(el("div", "rb-kpi-label"), str(it.label)));
       var tone = it.tone === "pos" ? " rb-up" : it.tone === "neg" ? " rb-dn" : "";
       // 有 delta 的格子:tone 上在 delta,值維持墨色(價格水位本身沒有漲跌);沒有 delta 才讓值上色
       var val = el("div", "rb-kpi-value" + (it.delta ? "" : tone));
       monoShapes(val, dispMinus(str(it.value)));
       // unit 是值的度量,貼在值後同一行;不吃 tone 色(語意色只屬於數字)
-      if (it.unit) val.appendChild(monoShapes(el("span", "rb-kpi-unit"), str(it.unit)));
+      if (it.unit) {
+        var unit = str(it.unit);
+        val.appendChild(monoShapes(el("span", "rb-kpi-unit" + (unit.length > 8 ? " is-long" : "")), unit));
+      }
       cell.appendChild(val);
       // delta 是另一件事(值=現況、delta=變化)→ 另起第三行;有 delta 時漲跌色只上在它。列內
       // 任一格有 delta 就全列補這一行,否則底對齊會把缺席那格的值往下拉
@@ -993,6 +1001,22 @@
     pending.forEach(function (w, host) {
       var rec = widthHosts.get(host);
       if (rec && host.isConnected) rec.draw(w);
+    });
+  }
+
+  // 列印頁用:不等觀測與下一幀,當場量、當場畫——印的那一刻不保證已經過了一幀,沒畫到的圖
+  // 在 PDF 裡只剩標題與圖說。量 clientWidth:紙面在螢幕上被 transform 縮小時排版寬不變。
+  // 之後觀測回報同一個寬度,draw 自己略過
+  function drawChartsNow() {
+    widthHosts.forEach(function (rec, host) {
+      if (!host.isConnected) return;
+      rec.seen = true;
+      widthPending.delete(host);
+      try {
+        rec.draw(host.clientWidth);
+      } catch (e) {
+        if (global.console) console.warn("[report] chart failed:", e);
+      }
     });
   }
 
@@ -1378,6 +1402,16 @@
     });
   }
 
+  // 直條的值標撞到右下角浮水印時的新基線:浮水印落點不動(型錄裁示 5),讓的是值標——
+  // 正值抬到浮水印之上、負值降到之下;沒撞到回原 y。wmX = 浮水印右緣、wmY = 它的基線(字級 11px)
+  function dodgeWatermark(cx, y, text, up, wmX, wmY) {
+    var half = textWidth(text) / 2;
+    var wmLeft = wmX - textWidth("blave.org") * 1.1;
+    if (cx + half < wmLeft - 4 || cx - half > wmX + 4) return y;
+    if (y < wmY - 12 || y > wmY + 14) return y;
+    return up ? wmY - 13 : wmY + 13;
+  }
+
   function verticalBars(b, d, W, H) {
     var top = 24, bottom = plotBottom(24, H - 52), nameY = H - 18;
     top = plotTopOf(top, bottom);
@@ -1386,7 +1420,8 @@
 
     var s = chartSvg(b, W, H, true);
     // bars 變體不給浮水印例外(型錄裁示 5):同樣最底層繪、落點固定右下
-    watermark(s, W - 8, bottom - 7);
+    var wmX = W - 8, wmY = bottom - 7;
+    watermark(s, wmX, wmY);
     s.appendChild(svgEl("line", { class: "rb-grid", x1: 0, y1: zeroY, x2: W, y2: zeroY }));
 
     var slot = W / d.rows.length;
@@ -1404,8 +1439,9 @@
           height: Math.max(1, h),
         })
       );
+      var valY = dodgeWatermark(cx, up ? zeroY - h - 8 : zeroY + h + 15, r.val, up, wmX, wmY);
       s.appendChild(
-        svgText(cx, up ? zeroY - h - 8 : zeroY + h + 15, r.val, {
+        svgText(cx, valY, r.val, {
           class: up ? "rb-val-up" : "rb-val-dn",
           "text-anchor": "middle",
         })
@@ -2283,6 +2319,28 @@
       ? ctx.imageUrl(ref)
       : /^[0-9a-f]{64}$/.test(sha) ? ctx.apiBase + "openclaw/agent/strategy_image/" + sha : "";
     wrap.appendChild(img);
+    // 引用圖(契約 1.6 的 source):來源行掛在 wrap 上、不在圖上——載入失敗換成失敗框時它照留,那時連結是讀者唯一的出口。
+    // 前綴「來源」:單獨一行掛在圖下沒有 news 清單的語境,少了它會被讀成第二個 caption
+    var src = b.source && typeof b.source === "object" ? b.source : null;
+    var srcName = src ? str(src.name) : "";
+    var sx = src ? safeUrl(src.url) : null;
+    if (srcName || sx) {
+      wrap.className += " is-cited";
+      var line = el("div", "rb-image-src");
+      line.appendChild(el("span", "rb-image-src-l", ctx.i18n.imageSource));
+      if (sx && srcName && srcName.trim().toLowerCase().replace(/^www\./, "") === hostOf(sx)) {
+        // 名稱就是網域(站沒有給站名時擷取工具退回網域):再接一次 mono 網域會讀成兩個來源(同 web report_blocks.js)
+        var only = linkTo(sx, "rb-xlink", ctx);
+        only.appendChild(el("span", "rb-xlink-nm", srcName));
+        line.appendChild(only);
+      } else if (sx && srcName) line.appendChild(extLink(sx, srcName, ctx));
+      else if (sx) {
+        var dom = linkTo(sx, "rb-xlink is-dom mono", ctx);
+        dom.textContent = hostOf(sx);
+        line.appendChild(dom);
+      } else line.appendChild(el("span", "rb-image-src-nm", srcName)); // scheme 驗不過:名稱純文字、不給網域(同 news)
+      wrap.appendChild(line);
+    }
     return wrap;
   };
 
@@ -2427,4 +2485,5 @@
 
   global.renderAgentReport = renderAgentReport;
   global.renderReportBlock = renderReportBlock;
+  global.drawReportCharts = drawChartsNow;
 })(window);
