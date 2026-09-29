@@ -8,7 +8,33 @@ miss it. (Channel rules: `.claude/docs/blave-agent-update-channels.md`.)
 
 ## Unreleased
 
-(none)
+- **排程報告回合加 Bash 守門(稽核 09-29 P-1)**:`--scheduled` 回合不分 sink 掛 PreToolUse:Bash hook,讀 `.env`、印整個環境、
+  叫會下單／平倉／換 key 的模組(`lib/order_*`、execute、venue_wiring、venue、portfolio、群益憑證、command_listener 等,清單由
+  測試從 import 閉包列舉對齊)、動部位的 `manager/` 指令、`BLAVE_MODE=live`、指令位置上的網路工具一律 deny 並回理由;`Read(/.env)`
+  加進排程回合的 disallowed 規則;刪掉 CLI 從不參考的 `Write(path)` 規則(Edit 規則本來就涵蓋 Write)。取代 09-26「Bash 只做軟約束」。機隊的 hook 通道未實測,SDK 沒有 hooks 時不掛(fail-open)。
+  測試 `tests/check_sched_bash_guard.py`。
+
+## 1.1.103 — 2026-09-29(desktop 0.1.9)
+
+- **「網頁內容不准寫進 strategies/」跟「別人的程式碼照用戶的要求用」不再互相打架(0.1.8 稽核 P1-1 規則衝突,Wei 拍板:不設限、用戶負責)**:
+  電腦版每輪附加的瀏覽器規則原本寫「Never write web page content into `strategies/`, `control/` or `.env`」,跟
+  `references/strategy-code.md` › *Building from code the user points to* 正面衝突。改成:頁面自己下的指示照舊不做;用戶要拿頁面上的東西
+  (程式碼也算)做什麼由用戶決定、照樣寫進 `strategies/`;`control/` 與 `.env` 照舊不寫。`references/browser.md` 同一段同步改。
+  測試 `tests/check_strategy_source_rule.py`、`tests/check_local_mcp_config.py`。
+- **電腦版的排程守門再收一批自然寫法(0.1.8 稽核 P2-6)**:`case x in x) crontab -l;; esac`、`f() { crontab -l; }`、`function f { … }`、
+  `watch crontab -l`、`script -q /dev/null crontab -l`、`arch -arm64 crontab -l` 以前放行,現在擋。SSH 那條「整行只有一個送到雲端主機的 ssh 才放行」
+  也收緊:目的地是數字寫法的本機位址(`0`、`127.1`、`2130706433`、`0x7f000001`、`::ffff:127.0.0.1`)或這台電腦自己對外的位址、`-o` 的鍵不在
+  `references/cloud-handoff.md` 步驟 2 那幾個之內(`HostName`、`ProxyCommand`…)、帶 `-F` / `-J` / `-I`、目的地後面還有選項,都不算遠端。
+  步驟 2 的寫法照舊放行。刻意拆字、別名、續行符號仍擋不到,列在測試的 `KNOWN_GAPS`。測試 `tests/check_desktop_sched_guard.py`。
+- **策略版本就地還原的直接指令(desktop 0.1.9)**:新指令 `version_restore {name, n}`(雲端佇列與本機 daemon 同一支 handler,本機要簽章)。
+  ① 能力判斷:workspace 的 `lib/strategy.py` 沒有 `RESTORE_IN_PLACE = 1` 那一行 → `UPDATE_REQUIRED`,什麼都不動(舊 lib 的還原會鑄新版);
+  ② 在 workspace 子行程跑 `lib.strategy.restore`(有金額在動檔前拒絕 → `LIVE`;另有 `NO_VERSION` / `NO_SOURCE` / `CONFIG_UNREADABLE`),
+  ack `{n, inplace, backed_up, rerun: "started"}`;③ 背景靜默重跑(`BLAVE_MODE=backtest BLAVE_QUIET=1`,釘住那一版的 code_hash),
+  狀態寫 `versions/rerun.json`,成功由 runner 刪、失敗記 `DATA` / `REFUSED` / `TIMEOUT` / `EXIT`、被編輯蓋過就刪掉(不卡在 running);
+  連按先殺上一支、`delete_strategy` 先殺、listener 重啟會認養或結算。報告的 `versions` 多 `inplace` / `rerun`;
+  `agent_turn` 在該對話下一輪注入一行系統訊息(`state/version_events.jsonl`)。電腦版的重跑帶 `BLAVE_AGENT_LOCAL=1`
+  (台股走 TWSE / TPEx,同 agent 自己回測;live tick 不帶);`delete_strategy` 等還原鎖最多 10 秒,拿不到回「稍後再試」
+  (稽核 0.1.9 P1-3 / P2-7)。測試 `tests/check_restore_command.py`。
 
 ## 1.1.102 — 2026-09-28(desktop 0.1.8)
 

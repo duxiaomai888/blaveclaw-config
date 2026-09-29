@@ -204,13 +204,14 @@ async function saveConnection(choice) {
 const clearConnection = () => connStore().clear();
 const loadConnection = () => connStore().load();
 
-// ── 使用追蹤(telemetry.js:八個事件、屬性只有列舉、沒有自由文字的入口;設定裡可關)──
+// ── 使用追蹤(telemetry.js:十八個事件、屬性只有列舉、沒有自由文字的入口;設定裡可關)──
 let _tm = null;
 function tm() {
   if (!_tm) _tm = require("./telemetry").createTelemetry({
     dir: app.getPath("userData"), endpoint: `${API_BASE}/oauth/desktop/telemetry`,
     appVersion: app.getVersion(), osVersion: process.getSystemVersion(), lang: app.getLocale(),   // 契約:系統語系原值;不吃 BLAVE_LANG(任意字串會原樣離開電腦)
     getToken: () => loadToken(),
+    heartbeat: () => ({ live: tradeMaybeLive() ? "on" : "off" }),   // 每日在線心跳;live 同 updater 的 isTrading 判準
     // 開發版(npm start、測試用的 BLAVE_HOME)不送:不然每次開發重啟都在灌正式的漏斗。要實測送出設 BLAVE_TELEMETRY=1
     post: (u, b) => (app.isPackaged || process.env.BLAVE_TELEMETRY === "1" ? postJSON(u, b) : Promise.resolve()),
   });
@@ -259,6 +260,7 @@ function updater() {
     isTrading: () => !!tradeMaybeLive(),   // 保守判定:可能還在下單就不裝
     onState: (st) => { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send("update-state", { ...st, backup: _officialBackup }); },
     log: (m) => console.error("[updater] " + m),
+    onFail: (stage) => tm().track("update_failed", { stage }),
   });
   return _up;
 }
@@ -990,8 +992,34 @@ function stratVersions(dir) {
   let idx = null;
   try { idx = JSON.parse(fs.readFileSync(path.join(vdir, "index.json"), "utf8")); } catch (_) { return null; }
   if (!idx || typeof idx !== "object" || !Array.isArray(idx.items)) return null;
-  return { counter: idx.counter, current: idx.current, items: idx.items.filter((i) => i && typeof i === "object" && !Array.isArray(i)),
+  const out = { counter: idx.counter, current: idx.current, items: idx.items.filter((i) => i && typeof i === "object" && !Array.isArray(i)),
     drift: fs.existsSync(path.join(vdir, "drift.json")) };
+  if (libRestoreInPlace(path.dirname(path.dirname(dir)))) out.inplace = true;
+  const rerun = stratRerun(vdir);
+  if (rerun) out.rerun = rerun;
+  return out;
+}
+/* 就地還原的兩個欄位(canon §9),規則同 runtime strategy_reporter 的 lib_restore_in_place / _read_rerun:
+   inplace = workspace 的 lib/strategy.py 有 `RESTORE_IN_PLACE = 1` 那一行(文字比對、照 mtime 快取);
+   rerun = versions/rerun.json 的 {n, status, at, err?},每個欄位驗型別,壞掉就當沒有 */
+const RERUN_ERRS = ["REFUSED", "DATA", "TIMEOUT", "EXIT"];
+const libRestoreCache = new Map();
+function libRestoreInPlace(ws) {
+  const p = path.join(ws, "lib", "strategy.py");
+  let st = null; try { st = fs.statSync(p); } catch (_) { libRestoreCache.delete(p); return false; }
+  const key = st.mtimeMs + ":" + st.size, hit = libRestoreCache.get(p);
+  if (hit && hit.key === key) return hit.ok;
+  let ok = false; try { ok = /^RESTORE_IN_PLACE\s*=\s*1\b/m.test(fs.readFileSync(p, "utf8")); } catch (_) { ok = false; }
+  libRestoreCache.set(p, { key, ok });
+  return ok;
+}
+function stratRerun(vdir) {
+  let d = null; try { d = JSON.parse(fs.readFileSync(path.join(vdir, "rerun.json"), "utf8")); } catch (_) { return null; }
+  if (!d || typeof d !== "object" || Array.isArray(d)) return null;
+  if (!Number.isInteger(d.n) || d.n <= 0 || (d.status !== "running" && d.status !== "failed") || !Number.isInteger(d.at)) return null;
+  const out = { n: d.n, status: d.status, at: d.at };
+  if (d.status === "failed") out.err = RERUN_ERRS.indexOf(d.err) >= 0 ? d.err : "EXIT";
+  return out;
 }
 // 版號只收正整數(api agent_strategy_versions.MAX_VERSION_N 同一個上限):renderer 給的東西進 path.join 之前先過這關
 const versionN = (n) => (Number.isInteger(n) && n > 0 && n <= 1000000 ? n : null);
@@ -1079,6 +1107,30 @@ function inPortfolio(names) {
   if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return null;
   return ["amounts", "weights", "exchanges"].some((k) => cfg[k] && typeof cfg[k] === "object" && want.some((n) => Object.prototype.hasOwnProperty.call(cfg[k], n)));
 }
+/* 還原的背景重跑(runtime command_listener._start_rerun,versions/rerun.json)還在跑就殺掉——同雲端的 _cmd_delete_strategy。
+   身分要對上才殺:pid 可能已經換人,所以 script 必須是那支策略的兩種路徑之一、而且真的出現在那個 pid 的命令列上
+   (同 runtime 的 _rerun_pid_alive)。它自己一個 session / process group,連子行程一起殺。盡力而為:殺不到也照刪,
+   runner 讀不到策略檔就整輪不寫(lib/runner._superseded)。sys 可替換,給測試用 */
+function stratStopRerun(names, sys) {
+  const X = sys || { exec: require("child_process").execFileSync, kill: process.kill.bind(process), platform: process.platform };
+  const ok = /^[A-Za-z0-9_-]{1,128}$/;
+  for (const n of new Set((names || []).filter((x) => typeof x === "string" && ok.test(x)))) {
+    let d = null; try { d = JSON.parse(fs.readFileSync(path.join(STRAT_DIR(), n, "versions", "rerun.json"), "utf8")); } catch (_) { continue; }
+    if (!d || d.status !== "running" || !Number.isInteger(d.pid) || d.pid <= 1) continue;
+    if (d.script !== "strategies/" + n + "/strategy.py" && d.script !== "strategies/" + n + ".py") continue;
+    let cmd = "";
+    try {
+      cmd = String(X.platform === "win32"
+        ? X.exec("powershell", ["-NoProfile", "-Command", "(Get-CimInstance Win32_Process -Filter 'ProcessId=" + d.pid + "').CommandLine"], { timeout: 5000, windowsHide: true })
+        : X.exec("ps", ["-o", "args=", "-p", String(d.pid)], { timeout: 5000 }));
+    } catch (_) { continue; }
+    if (!cmd.replace(/\\/g, "/").includes(d.script)) continue;
+    try {
+      if (X.platform === "win32") X.exec("taskkill", ["/T", "/F", "/PID", String(d.pid)], { timeout: 10000, windowsHide: true });
+      else { try { X.kill(-d.pid, "SIGKILL"); } catch (_) { X.kill(d.pid, "SIGKILL"); } }
+    } catch (_) { /* 已經結束了 */ }
+  }
+}
 /* 回 true(進垃圾桶了)或 { ok:false, code }:IN_PORTFOLIO(還在組合裡:對帳器照這個名字在下單,刪了訊號就凍住)/
    CONFIG_UNREADABLE(讀不到下單設定,寧可等一下)/ 其餘失敗 false */
 async function deleteStrategy(name) {
@@ -1087,6 +1139,7 @@ async function deleteStrategy(name) {
   const inPf = inPortfolio([name, sn]);
   if (inPf === true) return { ok: false, code: "IN_PORTFOLIO" };
   if (inPf === null) return { ok: false, code: "CONFIG_UNREADABLE" };
+  stratStopRerun([name, sn]);   // canon §8:還原的背景重跑還活著就先停掉,不讓它寫回已丟進垃圾桶的資料夾
   try { await shell.trashItem(path.join(STRAT_DIR(), name)); stratCache.delete(name); return true; }
   catch (_) { return false; }
 }
@@ -1457,11 +1510,14 @@ function pdfDirGet() {
     return typeof d === "string" && path.isAbsolute(d) && fs.statSync(d).isDirectory() ? d : null;
   } catch (_) { return null; }   // 沒存過 / 資料夾不在了:回「下載項目」
 }
-function pdfDirSet(dir) {
+function uiPrefsPatch(patch) {
   let o = {}; try { const x = JSON.parse(fs.readFileSync(uiPrefsPath(), "utf8")); if (x && typeof x === "object" && !Array.isArray(x)) o = x; } catch (_) { /* 第一次 */ }
-  o.pdfDir = dir;
-  fs.writeFileSync(uiPrefsPath(), JSON.stringify(o));
+  // 先寫暫存檔再 rename:寫到一半當機會留下半個檔,下次讀不到就整份當空的覆寫(存過的 PDF 資料夾跟著不見)
+  const tmp = uiPrefsPath() + ".blave-tmp";
+  try { fs.writeFileSync(tmp, JSON.stringify({ ...o, ...patch })); fs.renameSync(tmp, uiPrefsPath()); }
+  catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; }
 }
+function pdfDirSet(dir) { uiPrefsPatch({ pdfDir: dir }); }
 // 雲端那一份:閱讀頁剛讀過的就在 rptCloudDocs 裡——同一個 stored_at 的本體不會變,過了 5 分鐘也照用(存檔框要馬上開);不在才重抓
 async function pdfLoadDoc(view, id, ver) {
   if (view === "local") return reportLoad(id);
@@ -1909,6 +1965,24 @@ function tradeHost() {
   }
   return _tradeHost;
 }
+/* 設定 › Agent 規則:這台電腦的常駐規則與回覆語言(agentrules.js)。讀是 runtime 的 python、寫是 daemon 的指令。 */
+let _agentRules = null;
+const RULES_CMDS = new Set(["preferences_set", "reply_lang_set"]);
+function agentRules() {
+  if (!_agentRules) {
+    const AR = require("./agentrules");
+    _agentRules = AR.createAgentRules({
+      readLocal: () => (fs.existsSync(WS)
+        ? AR.readLocal({ python: fs.existsSync(VENV_PY) ? VENV_PY : basePython(), runtimeDir: path.join(REPO, "runtime"), workspace: WS,
+          env: childEnv({ PATH: process.env.PATH || "/usr/bin:/bin", HOME: os.homedir(), LANG: process.env.LANG || "en_US.UTF-8" }) })
+        : Promise.resolve({ rules: null, replyLang: { lang: "", custom: "" }, langReadable: false })),
+      // 只送得出這兩個設定指令:這裡不是會啟動下單的入口(tests/check_shell_minversion.js 釘住)
+      writeLocal: (cmd, args) => (RULES_CMDS.has(cmd) ? tradeHost().send(cmd, args, { trusted: true }) : Promise.resolve({ ok: false, error: "NOT_ALLOWED" })),
+      argsOk: require("./daemon").argsOk,
+    });
+  }
+  return _agentRules;
+}
 function tradeStartIfReady() {
   try { if (fs.existsSync(VENV_PY) && fs.existsSync(WS)) { tradeHost().start(); binanceLink().start(); } } catch (e) { console.error("[trade] start failed", e && e.message); }
 }
@@ -2274,7 +2348,10 @@ app.whenReady().then(() => {
   handle("balance", () => balanceHost().read());
   handle("public-pricing", () => publicPricing());
   // 花錢的動作只收自家畫面發的:renderer 會渲染 LLM 的文字,萬一有別的 frame 被帶進來,它不能替用戶開機
-  ipcMain.handle("plan-start", (e) => (fromOurPage(e) ? planStart() : { error: "SERVER" }));
+  ipcMain.handle("plan-start", (e) => (fromOurPage(e) ? planStart().then((r) => {
+    tm().track("plan_start_res", { result: r.state ? "ok" : r.error === "NO_CARD" ? "no_card" : r.error === "NO_CREDIT" ? "no_credit" : "error" });
+    return r;
+  }) : { error: "SERVER" }));
   /* 本機交易:狀態是唯讀的檔案內容;指令由 daemon.js 簽章後寫進佇列(secret 不出主行程)。
      daemon 在引擎裝好之後才起(它要 workspace 與 venv),而且**不會自己啟動對帳器**——要用戶按「啟動下單」。 */
   handle("trade-status", () => { const st = tradeHost().status(); if (st.report && typeof st.report === "object") st.report.selfOrdering = stratSelfOrderingAny(); return st; });
@@ -2337,7 +2414,7 @@ app.whenReady().then(() => {
   const CLOUD_ONLY = require("./cloudcmd").CLOUD_ONLY_COMMANDS;
   // 沒有 update:用本機 app 不觸發雲端 agent 回合(Wei 09-22),雲端更新改由本機 agent 經 MCP 去做。
   // 沒有 restart_reconciler:主機重開後對帳器停著的情況,機器端的 resume / resume_wait 自己會把它起來(command_listener._start_after_restart_stop)
-  const CLOUD_SHIPPED = ["halt", "close_all", "resume", "resume_wait", "amounts", "delete_strategy", "credentials_remove", "retest_accounts", "book_account_confirm"];
+  const CLOUD_SHIPPED = ["halt", "close_all", "resume", "resume_wait", "amounts", "delete_strategy", "credentials_remove", "retest_accounts", "book_account_confirm", "version_restore"];
   handle("cloud-send", async (_e, cmd, args, requestId) => {
     if (typeof cmd !== "string" || cmd === "credentials" || !(require("./daemon").UI_COMMANDS.has(cmd) || CLOUD_ONLY.indexOf(cmd) >= 0) || CLOUD_SHIPPED.indexOf(cmd) < 0) return cloudDenied;
     const rid = typeof requestId === "string" && require("./cloudcmd").REQUEST_ID_RE.test(requestId) ? requestId : null;
@@ -2409,6 +2486,8 @@ app.whenReady().then(() => {
   ipcMain.handle("telemetry-set", (e, on) => { if (!fromOurPage(e)) return false; tm().setEnabled(on === true); return tm().isEnabled(); });
   // 功能被使用(renderer 的 trackFeature):name 由 telemetry.js 對 feature_used 白名單驗,renderer 給的字不可信、不在表上就整則不送
   ipcMain.on("track-feature", (e, name) => { if (fromOurPage(e)) tm().track("feature_used", { name }); });
+  // 卡在哪一步(renderer 的 trackEvent):事件要在 FROM_RENDERER 上,屬性值再由 telemetry.js 對列舉驗
+  ipcMain.on("track-event", (e, ev, props) => { if (fromOurPage(e) && require("./telemetry").FROM_RENDERER.includes(ev)) tm().track(ev, props); });
   /* 內建瀏覽器(renderer/browser.js):畫面只送分頁 id、中欄的 bounds 與用戶的動作;網址只有用戶自己在網址列打的那一條(照樣過網路層政策)。
      頁面物件、token、網頁內容都不進 renderer(縮圖與快照是圖片與文字)。 */
   handle("browser-expand", (_e, id, b) => browser().expand(id, b), null);
@@ -2445,6 +2524,10 @@ app.whenReady().then(() => {
   handle("datasrc-save", (_e, input) => (fs.existsSync(WS) ? dataSrc.save(input) : { ok: false, error: "NO_WORKSPACE" }), { ok: false, error: "NOT_ALLOWED" });
   handle("datasrc-blockers", (_e, name) => dataSrc.blockers(name), []);
   handle("datasrc-remove", (_e, name) => dataSrc.remove(name), { ok: false, error: "NOT_ALLOWED" });
+  // 設定 › Agent 規則(agentrules.js):畫面只拿內容、送編輯;讀寫這台電腦的兩個檔都在主行程,形狀由 daemon.argsOk 驗
+  handle("rules-state", () => agentRules().read(), null);
+  handle("rules-save", (_e, a) => agentRules().save("preferences_set", { rules: a && Array.isArray(a.rules) ? a.rules : null, base: a && Array.isArray(a.base) ? a.base : null }), { ok: false, error: "NOT_ALLOWED" });
+  handle("reply-lang-save", (_e, a) => agentRules().save("reply_lang_set", { lang: a && typeof a.lang === "string" ? a.lang : null, custom: a && typeof a.custom === "string" ? a.custom : "" }), { ok: false, error: "NOT_ALLOWED" });
   handle("load-model-prefs", () => loadModelPrefs());
   handle("save-model-prefs", (_e, prefs) => saveModelPrefs(prefs));
   handle("start-oauth", (_e, lang) => startOAuth(lang === "en" ? "en" : "zh"));   // 語言段會拼進同意頁的路徑:只認兩個值(稽核 R6)
@@ -2491,6 +2574,7 @@ app.whenReady().then(() => {
   ipcMain.on("trade-labels", (e, labels) => {
     if (!fromOurPage(e) || !labels || typeof labels !== "object") return;
     for (const k of Object.keys(tmLabels)) if (typeof labels[k] === "string" && labels[k] && labels[k].length <= 400) tmLabels[k] = labels[k];
+    trayLabelsIn = true;
     if (labels.lang === "zh" || labels.lang === "en") uiLang = labels.lang;   // 只拿來組官網網址的語言段:白名單兩個值
     startStep("app menu", appMenuSync);
     startStep("tray", traySync);
@@ -2522,7 +2606,7 @@ else app.on("second-instance", () => showMain());   // 視窗可能被紅燈收�
 app.on("window-all-closed", () => app.quit());
 
 /* ── 視窗之外的暫停(設計師提案 §3-6)─────────────────────────────
-   自動下單在跑的時候,用戶不一定在看這個視窗:選單列圖示(只在執行中出現)、Dock 右鍵、結束攔截。
+   自動下單在跑的時候,用戶不一定在看這個視窗:選單列圖示(0.1.9 起常駐;可能在下單時才有暫停)、Dock 右鍵、結束攔截。
    - 「執行中」由主行程自己看狀態檔判定(renderer 在背景會被節流,不能靠它):tradeLive() = renderer trExecState 的 running。
    - 「結束 / 關窗前要不要攔」走保守方向(tradeMaybeLive):狀態檔這輪 build 失敗、睡眠醒來心跳還沒更新時 tradeLive() 是 null,
      但可能還在下單——這時不攔就是沒問一聲就停止下單(稽核 M3)。
@@ -2543,7 +2627,7 @@ let tmLabels = { running: "Auto trading is running", paperVenue: "Paper trading"
   quitTitle: "Auto trading is still running", quitBody: "After you quit Blave, this computer stops placing orders. Positions are not closed.", quitGo: "Quit Blave", quitStay: "Cancel",
   // 畫面還沒交字之前就按結束:回合中那一道也要有字(不然 message 退回下單那句、detail 是空的)
   quitTurnTitle: "The agent is still replying", quitTurnBody: "Quitting Blave now cuts off this turn, including any cloud update in progress. It's safer to wait until it finishes.",
-  hidden: "Blave is still running in the menu bar.",
+  hidden: WIN ? "Blave is still running in the system tray." : "Blave is still running in the menu bar.",
   updateReady: "Restart to finish updating",
   ev_halt: "Trading was paused automatically", ev_halt_n: "No new positions are opened. Open Blave to check.",
   ev_order_error: "Order failed", ev_order_error_n: "The exchange rejected an order. Open Blave to check.",
@@ -2556,6 +2640,7 @@ let tmLabels = { running: "Auto trading is running", paperVenue: "Paper trading"
   // Binance 金鑰重查(tm.key.*):空的 = renderer 還沒交,那一則通知不發(不拿英文退路塞給中文用戶;下一輪 24 小時重查 verdict 還在,畫面上看得到)
   key_ipTitle: "", key_ipBody: "", key_rejTitle: "", key_rejSameIpBody: "", key_rejUnknownBody: "", key_permTitle: "", key_permBody: "",
   stLocal: "", stCloud: "", stOn: "", stPaused: "", stUnknown: "", stMayTrade: "", stNotStarted: "", moneyPaper: "", moneyReal: "",
+  stLocalOnly: "", noAccount: "", runningZ: "",   // 選單列這台電腦那一行沒在下單也講(0.1.9):「這台電腦：還沒連接交易所」、沒設金額的那一態
   br_captchaTitle: "", br_captcha: "",   // 內建瀏覽器:搜尋要用戶過驗證(browserNotify);空的 = 還沒交字 = 不發
   pauseLocal: "", quitCloudNote: "", notifPrefixLocal: "", notifPrefixCloud: "", ...Object.fromEntries(Object.keys(MENU_EN).map((k) => [k, ""])) };
 const TT = require("./traytext");
@@ -2610,20 +2695,21 @@ function appMenuSync() {
 }
 const SITE_URL = { zh: "https://blave.org/zh", en: "https://blave.org/en" };   // 固定常數(結尾不加斜線:/zh/ 是 404);語言段只有這兩個值
 const venueReady = (v) => !!(v && v.credentials && v.pair && v.order && v.account);   // 同 renderer trVenueIds:四個都在才算連上的帳戶
-function tradeLive() {
-  if (!_tradeHost) return null;
-  const st = _tradeHost.status(), r = st.report;
+// st:呼叫端已經讀過一次狀態檔就傳進來(traySync 一輪只讀一次,不同步驟不會看到前後兩份快照);沒傳就自己讀
+function tradeLive(st = _tradeHost ? _tradeHost.status() : null) {
+  if (!st) return null;
+  const r = st.report;
   if (!st.alive || !r || r.error || !r.venues || (r.halt && r.halt.halted) || !(r.reconciler && r.reconciler.alive)) return null;
   // 心跳檔的新鮮期是 300 秒:app 重開後那 5 分鐘,上一次的心跳還「新鮮」但對帳器根本沒起來。監督者說沒在跑就是沒在跑。
   if (r.daemon && r.daemon.reconciler && r.daemon.reconciler.running === false) return null;
   const id = Object.keys(r.venues).filter((k) => venueReady(r.venues[k])).sort()[0];
   return id ? { venue: id } : null;
 }
-function tradeMaybeLive() {
-  const live = tradeLive();
+function tradeMaybeLive(st = _tradeHost ? _tradeHost.status() : null) {
+  const live = tradeLive(st);
   if (live) return live;
-  if (!_tradeHost) return null;
-  const st = _tradeHost.status(), r = st.report;
+  if (!st) return null;
+  const r = st.report;
   if (!st.running || !r || (r.halt && r.halt.halted)) return null;   // 子行程不在 = 沒有東西在下單;已暫停 = 不必攔
   // 對帳器有沒有在跑,問 daemon 的監督者(daemon 區塊在 build 失敗那一輪也照寫、不看心跳新不新):
   // 沒在跑就是沒在下單——這時攔下來說「自動下單還在執行」是假話
@@ -2649,32 +2735,48 @@ async function pauseFromMenu() {
 }
 // 新版已經暫存好、但因為正在下單而沒裝:桌機用戶的 app 常常整天開著,不講的話他們不會知道有新版在等
 const updateWaiting = () => { try { const p = updater().state().phase; return p === "blocked" || p === "ready"; } catch (_) { return false; } };
-// 選單列的狀態行。這台電腦那一行:選單列只在這台電腦「確定在下單」時出現,所以狀態一定是 on。字還沒交 → null,退回舊的那一句
-const trayLocalLine = (live) => TT.statusLine(tmLabels.stLocal, { money: live.venue === "paper" ? "paper" : "real", venue: live.venue, state: "on" }, tmLabels);
-const trayCloudLine = () => TT.statusLine(tmLabels.stCloud, TT.cloudLine(cloudSt()), tmLabels);
-// 選單列只有一行更新的字(app 新版已暫存好:「重新啟動以完成更新」,不可點、沒有點、沒有徽章);雲端的更新不進選單列(v4 §4)
-function trayMenu(live) {
-  const cloud = trayCloudLine();
-  return Menu.buildFromTemplate([
-    { label: trayLocalLine(live) || tmLabels.running, enabled: false },
-    ...(cloud ? [{ label: cloud, enabled: false }] : []),
-    ...(updateWaiting() ? [{ type: "separator" }, { label: tmLabels.updateReady, enabled: false }] : []),
-    { type: "separator" },
-    { label: pauseLabel(), click: pauseFromMenu },   // 暫停只給這台電腦:雲端的暫停要用戶在雲端視角親手做
-    { type: "separator" },
-    { label: tmLabels.open, click: showMain },
-    { label: tmLabels.quit, click: () => app.quit() },
-  ]);
+/* 選單列 / Dock 的狀態行(設計 spec-desktop-tray-resident-0.1.9 §2)。這台電腦那一行永遠講,沒在下單也講(TT.localLine);
+   沒有交易所名可填的那幾態(還沒連接交易所…)換不帶 {money} 的樣板。字還沒交 → null;那時只有確定在下單才退回英文那一句 */
+function trayLocalLine(live, st) {
+  const l = TT.localLine(st, lastVenue);
+  return (l && TT.statusLine(l.money ? tmLabels.stLocal : tmLabels.stLocalOnly, l, tmLabels)) || (live ? tmLabels.running : null);
 }
+const trayCloudLine = () => TT.statusLine(tmLabels.stCloud, TT.cloudLine(cloudSt()), tmLabels);
+// 「…」= 按了會先跳確認框(before-quit 那兩道:可能在下單、回合在跑);不會跳的時候用不帶「…」的那一句(同 app 選單;HIG)
+const trayQuitLabel = (maybe) => (maybe || activeTurn || turnStarting ? tmLabels.quit : tmLabels.menuQuit || MENU_EN.menuQuit);
+// 一組一組排,組跟組之間一條分隔線:缺席的組連它上面那條一起不出(不會兩條疊在一起、不會以分隔線開頭或結尾)
+const trayGroups = (groups) => groups.filter((g) => g.length).flatMap((g, i) => (i ? [{ type: "separator" }, ...g] : g));
+/* m = traySync 算好的那一份:{ local, cloud, update, pause, quit }。
+   狀態行 → 更新行(app 新版已暫存好:「重新啟動以完成更新」,不可點;雲端的更新不進選單列,v4 §4)→ 暫停(可能在下單時才出)→ 打開 / 結束。
+   只放安全方向的動作:不給啟動下單;暫停只給這台電腦,雲端的暫停要用戶在雲端視角親手做 */
+function trayMenu(m) {
+  return Menu.buildFromTemplate(trayGroups([
+    [m.local, m.cloud].filter(Boolean).map((label) => ({ label, enabled: false })),
+    m.update ? [{ label: tmLabels.updateReady, enabled: false }] : [],
+    m.pause ? [{ label: pauseLabel(), click: pauseFromMenu }] : [],
+    [{ label: tmLabels.open, click: showMain }, { label: m.quit, click: () => app.quit() }],
+  ]));
+}
+// Dock 選單 = 同一組狀態行 + 暫停(打開、結束 Dock 本來就有)。選單列圖示可能被系統藏掉(瀏海、macOS 26 的允許清單),Dock 是一定在的那條路(HIG)
+function trayDockMenu(m) {
+  return Menu.buildFromTemplate(trayGroups([[m.local, m.cloud].filter(Boolean).map((label) => ({ label, enabled: false })), m.pause ? [{ label: pauseLabel(), click: pauseFromMenu }] : []]));
+}
+/* 選單列圖示常駐(0.1.9,Wei):app 開著就在,沒有開關。關視窗後留不留在背景照舊由 close 那一道決定,跟圖示無關。
+   等畫面第一次交字才建(trayLabelsIn):中文用戶不會先看到英文退路的選單;可能在下單時不等(暫停的路優先) */
+let trayLabelsIn = false;
 function traySync() {
-  const live = tradeLive();
+  const st = _tradeHost ? _tradeHost.status() : null, live = tradeLive(st);
   if (live) lastVenue = live.venue;
-  const key = live ? [live.venue, trayLocalLine(live) || tmLabels.running, pauseLabel(), updateWaiting() ? tmLabels.updateReady : "", trayCloudLine() || ""].join("|") : "";
+  const maybe = live || tradeMaybeLive(st), show = !!maybe || trayLabelsIn;
+  const m = { local: trayLocalLine(live, st), cloud: trayCloudLine(), update: updateWaiting(), pause: !!maybe, quit: trayQuitLabel(maybe) };
+  // 每一行的字、暫停有沒有出都進 key:少一樣,換語言之後要等別的欄位變了才會重建
+  const key = JSON.stringify([show, m, pauseLabel(), tmLabels.open, m.update ? tmLabels.updateReady : ""]);
   if (key === trayKey) return;   // 每 5 秒叫一次:沒變就不重建選單
-  trayKey = key;
-  if (!live) {
+  // trayKey 等副作用都做完才記:中途拋例外的話下一輪 key 相同也會重做,圖示與暫停項不會卡在舊狀態
+  if (app.dock) app.dock.setMenu(trayDockMenu(m));
+  if (!show) {
     if (tray) { tray.destroy(); tray = null; }
-    if (app.dock) app.dock.setMenu(Menu.buildFromTemplate([]));
+    trayKey = key;
     return;
   }
   if (!tray) {
@@ -2683,10 +2785,11 @@ function traySync() {
       : nativeImage.createFromPath(path.join(__dirname, "assets", "trayTemplate.png"));   // 檔名結尾 Template = macOS 自動依選單列明暗上色
     if (img.isEmpty()) console.error("tray icon missing: shell/assets/" + (WIN ? "tray.ico" : "trayTemplate.png"));   // 空圖 = 看不見的圖示;選單還在,但要留下痕跡(稽核 M4)
     tray = new Tray(img);
+    if (WIN) tray.on("click", showMain);   // Windows 系統匣慣例:左鍵打開、右鍵選單。macOS 設了 context menu 點一下就是開選單,不掛
   }
-  tray.setToolTip(updateWaiting() ? tmLabels.updateReady : tmLabels.running);
-  tray.setContextMenu(trayMenu(live));
-  if (app.dock) app.dock.setMenu(Menu.buildFromTemplate([{ label: pauseLabel(), click: pauseFromMenu }]));
+  tray.setToolTip(m.update ? tmLabels.updateReady : m.local || app.name);
+  tray.setContextMenu(trayMenu(m));
+  trayKey = key;
 }
 /* ── 本機 P1 通知(canon notifications.md 的 P1 清單;電腦版沒有平台那一層,這是唯一會叫人的出口)──────
    來源有兩個(稽核 M1),跟選單列共用 5 秒那個 timer:
@@ -2786,7 +2889,7 @@ function binanceNotify(v) {
   // 這幾種全是 P2(binance_check.VERDICT_LEVEL):只發系統通知,**不亮 Dock 紅點**(紅點留給 P1)
   return true;
 }
-function trayStart() { if (!trayTimer) { trayTimer = setInterval(() => { traySync(); p1Sync(); }, 5000); if (trayTimer.unref) trayTimer.unref(); } }
+function trayStart() { if (!trayTimer) { trayTimer = setInterval(() => { startStep("tray", traySync); startStep("p1", p1Sync); }, 5000); if (trayTimer.unref) trayTimer.unref(); traySync(); } }   // 可能在下單的話一開就出,不等第一個 5 秒(常駐的那顆等畫面交字)
 app.on("browser-window-created", (_e, win) => {
   win.on("close", (e) => {
     // 關視窗不等於結束:自動下單在跑、或本機 agent 回合在跑(可能正在更新雲端)時只把視窗藏起來,回合 / 下單照走

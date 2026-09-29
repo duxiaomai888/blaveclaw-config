@@ -74,12 +74,17 @@ contextBridge.exposeInMainWorld("blave", {
   telemetrySet: (on) => ipcRenderer.invoke("telemetry-set", on),
   telemetryInstallId: () => ipcRenderer.invoke("telemetry-install-id"),
   trackFeature: (name) => ipcRenderer.send("track-feature", name),   // 功能被使用:只有白名單裡的名字會落表(主行程驗)
+  trackEvent: (ev, props) => ipcRenderer.send("track-event", ev, props),   // 卡在哪一步:事件與屬性值都由主行程對白名單驗
   featureFlags: () => ipcRenderer.invoke("feature-flags"),
   // 自帶資料來源:金鑰的值只經過 dataSrcSave 一次;其餘三支只有名稱
   dataSrcList: () => ipcRenderer.invoke("datasrc-list"),
   dataSrcSave: (input) => ipcRenderer.invoke("datasrc-save", input),
   dataSrcBlockers: (name) => ipcRenderer.invoke("datasrc-blockers", name),
   dataSrcRemove: (name) => ipcRenderer.invoke("datasrc-remove", name),
+  // 設定 › Agent 規則:這台電腦的常駐規則與回覆語言。存檔回的是本機 daemon 的結果
+  rulesState: () => ipcRenderer.invoke("rules-state"),
+  rulesSave: (rules, base) => ipcRenderer.invoke("rules-save", { rules, base }),
+  replyLangSave: (lang, custom) => ipcRenderer.invoke("reply-lang-save", { lang, custom }),
   // Binance 真錢連接:金鑰只經過 binanceConnect 一次(主行程查過權限才存);其餘三支不碰金鑰
   binanceIp: () => ipcRenderer.invoke("binance-ip"),
   binanceState: () => ipcRenderer.invoke("binance-state"),

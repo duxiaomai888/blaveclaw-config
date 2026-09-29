@@ -6,6 +6,7 @@
 <title>Blave</title>
 <link rel="stylesheet" href="tokens.css">
 <link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="suggest.css">
 <link rel="stylesheet" href="results.css">
 <link rel="stylesheet" href="report-backtest.css">
 <link rel="stylesheet" href="report-trades.css">
@@ -13,6 +14,7 @@
 <link rel="stylesheet" href="trade.css">
 <link rel="stylesheet" href="capital.css">
 <link rel="stylesheet" href="datasrc.css">
+<link rel="stylesheet" href="rules.css">
 <link rel="stylesheet" href="library.css">
 <link rel="stylesheet" href="report-blocks.css">
 <link rel="stylesheet" href="reports.css">
@@ -165,7 +167,11 @@
         <div class="vbanner" id="ver-banner" hidden>
           <p class="vb-t" id="ver-banner-t"></p>
           <div class="vb-acts"><button class="btn-out" id="ver-back" type="button"><span class="vb-long" data-i18n="ver.back"></span><span class="vb-short" data-i18n="ver.backShort"></span></button><button class="btn-fill" id="ver-restore" type="button" data-i18n="ver.restore"></button></div>
+          <!-- 還原沒成功、畫面回滾時的原因(versions.js verRollback);離開時光機或再按一次還原就收掉 -->
+          <p class="vb-err" id="ver-banner-err" hidden></p>
         </div>
+        <!-- 還原後的背景重跑(versions.js verPaintRerun):跟時光機橫幅同一槽、同一個 recipe,兩者互斥 -->
+        <div class="vbanner vrerun" id="ver-rerun" role="status" hidden></div>
         <div class="rp-tabs" role="tablist" id="rp-tabs">
           <button class="rp-tab" type="button" role="tab" data-tab="bt" data-i18n="rp.tab.backtest"></button>
           <button class="rp-tab" type="button" role="tab" data-tab="tr" data-i18n="rp.tab.trades"></button>
@@ -292,6 +298,14 @@
         <!-- 輸入框:上 textarea、下工具列(左=model/effort 觸發鈕,右=送出)。
              選 model 放這裡而不是左下角:引擎是設一次的事(誰付錢、要不要重新授權),
              model / effort 是每個任務都可能換的,兩件事不擠同一個入口。 -->
+        <!-- 建議下一步(照雲端 #chat_sug_wrap;renderer/suggest.js):輸入框上緣全寬列表行、最多 3 行、整行可點 = 送出那句。
+             .is-closed 與 inert 同進退,預設收合;小標與 group 的 aria-label 同字,小標 aria-hidden,讀屏只念一份 -->
+        <div class="sug-wrap is-closed" id="sug-wrap" inert>
+          <div class="sug" role="group" data-i18n-aria="ws.sugGroup">
+            <div class="sug-cap" aria-hidden="true" data-i18n="ws.sugGroup"></div>
+            <div class="sug-rows" id="sug-rows"></div>
+          </div>
+        </div>
         <!-- 回合進行中、草稿非空時按 Enter:不送,這一行講為什麼(e2e 0.1.8 #71);字由 taWaitShow 寫,回合結束即收 -->
         <p class="ta-wait" id="ta-wait" role="status"></p>
         <div class="chat-input">
@@ -343,6 +357,8 @@
       <nav class="set-cats" id="set-cats" data-i18n-aria="set.cats">
         <button type="button" class="set-cat" data-set-cat="display" aria-current="true" data-i18n="set.cat.display"></button>
         <button type="button" class="set-cat" data-set-cat="model" data-i18n="set.cat.model"></button>
+        <!-- Agent 規則:常駐規則 + 回覆語言(排在「模型接入」後面)。內容由 rules.js 畫;只管這台電腦那一份 -->
+        <button type="button" class="set-cat" data-set-cat="rules" data-i18n="set.cat.rules"></button>
         <!-- 資料來源:自帶資料商的金鑰(排在「AI 接入」後面)。內容由 datasrc.js 的 srcPaint 畫 -->
         <button type="button" class="set-cat" data-set-cat="src" data-i18n="src.title"></button>
         <!-- 帳號與方案(原本「資料與雲端方案」與「帳號」兩類併成一類;id 留 plan,舊的 acct 由 setCat 轉過來)。
@@ -376,6 +392,7 @@
           </div>
         </div>
         <div class="set-pane" data-set-cat="model" id="set-model" hidden></div>
+        <div class="set-pane" data-set-cat="rules" id="set-rules" hidden></div>
         <div class="set-pane" data-set-cat="src" id="set-src" hidden></div>
         <!-- 帳號與方案:整頁由 app.js 的 planPaint 畫——最上面一組帳號列(登入狀態＋登出)、訊息格 #acct-hint、Blave 餘額列,
              細線以下是方案(依 account_status.plan)。上半自己捲,底列(「存在就扣」那句 + 鈕)不捲——那句話永遠貼在鈕的正上方 -->
@@ -596,6 +613,8 @@
 <script src="export.js"></script>
 <script src="library.js"></script>
 <script src="app.js"></script>
+<script src="suggest.js"></script>
+<script src="rules.js"></script>
 <script src="strategy_versions.js"></script>
 <script src="versions.js"></script>
 <script src="browser.js"></script>

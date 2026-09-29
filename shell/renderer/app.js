@@ -53,6 +53,8 @@ async function detect() {
   setHint(null);
   lastDetect = await window.blave.detectAgents();
   paintRows(lastDetect);
+  // 連結畫面上本機兩個都不能用:是狀態不是失敗,但「沒連上任何 AI 的安裝」只有這裡答得出為什麼
+  if (!$("view-connect").hidden && !localReady) trackEvent("connect_failed", { kind: "no_local" });
 }
 function paintRows(d) {
   const rows = $("agent-rows"); rows.innerHTML = "";
@@ -119,6 +121,7 @@ async function localLogin(kind, b) {
   setHint({ text: t("login.opened", { name }) });
   const r = await window.blave.agentLogin(kind);
   loginPending = null;
+  if (!r.ok && !r.cancelled && !r.busy) trackEvent("connect_failed", { kind: kind === "codex" ? "codex_login" : "claude_login" });
   await detect();
   if (!r.ok && !r.cancelled) setHint({ text: t("login.failed", { name }), cmd: kind });
   // detect() 把整列重畫了,焦點會掉回 body:放回這一列的鈕(成功=「連結」,失敗=「登入」)
@@ -131,7 +134,10 @@ let cur = null;
 
 async function connect(kind, info) {
   // 主行程用它當下偵測到的路徑存;偵測不到了(CLI 剛被移掉)回 false:留在連結頁重新偵測,不進一個送不出訊息的工作頁
-  if ((await window.blave.saveConnection({ kind, path: info.path, email: info.email || null })) === false) { detect(); return; }
+  if ((await window.blave.saveConnection({ kind, path: info.path, email: info.email || null })) === false) {
+    trackEvent("connect_failed", { kind: kind === "codex" ? "codex_gone" : "claude_gone" });
+    detect(); return;
+  }
   cur = kind;
   enterWorkspace(kind, info);
 }
@@ -288,6 +294,8 @@ async function acctSignOut() {
   $("view-ws").hidden = true; $("view-connect").hidden = false;
   paintBlaveBtn(); await detect(); warn();
 }
+// 取消、逾時、在同意頁按拒絕:人沒走完,不是 OAuth 壞掉(connect_failed 分 blave_cancel / blave_oauth)
+const oauthGaveUp = (code) => code === "OAUTH_CANCELLED" || code === "OAUTH_TIMEOUT" || code === "OAUTH_DENIED";
 // 等待期間這顆鈕變成「取消」而不是變灰:用戶把瀏覽器分頁關掉之後不會有人按
 // 「允許」,沒有取消的話這裡就卡到五分鐘逾時為止。
 let oauthPending = false;
@@ -316,6 +324,7 @@ async function blaveGo(b) {
     // IPC 會把訊息包成「Error invoking remote method …: Error: X」,所以比對記號
     // 而不是整串相等;主行程丟的是穩定代號,在這裡才變成當下語系的句子。
     const code = (m.match(/\b[A-Z][A-Z_]{3,}\b/) || [])[0];
+    trackEvent("connect_failed", { kind: oauthGaveUp(code) ? "blave_cancel" : "blave_oauth" });
     setHint({ text: code && t(code) !== code ? t(code) : (m || t("oauth.failed")) });
   } finally {
     oauthPending = false;
@@ -364,6 +373,7 @@ function setCat(cat) {
   // 開到這一類就拿最新的狀態;沒登入的人要的是公開數字
   if (cat === "model") mdlPaint();
   if (cat === "src") { srcLoad(); trackFeature("settings_datasrc"); } else srcClear();   // 資料來源(renderer/datasrc.js);離開那一類就把沒存的金鑰從輸入框清掉
+  if (cat === "rules") rulesOpen(); else rulesClear();   // Agent 規則(renderer/rules.js):離開這一類就丟掉沒存的編輯
   if (cat === "priv") privLoad();
   if (cat === "shares") shlOpen();   // 公開連結(renderer/report-sharelist.js):每次切到這一類重抓
   if (cat === "plan") { planPaint(); trackFeature("settings_plan"); if (hasToken) { acctCheck(); balLoad(); } else pubLoad().then(() => { if (!$("set-plan").hidden) planPaint(); }); }
@@ -386,6 +396,7 @@ function setClose() {
   if (sc.hidden) return;
   if (oauthPending || planLoginBusy) window.blave.cancelOAuth();   // 關掉 modal 就沒有地方按取消了
   srcClear();   // 資料來源的表單:貼了沒存的金鑰不留在關掉的框裡
+  rulesClear();   // Agent 規則:沒存的編輯 / 確認 / 「其他」的草稿不留
   sc.classList.remove("open");
   sc.hidden = true;
   if (typeof libRefresh === "function") libRefresh();   // 在設定裡綁了卡 / 儲了值 / 登入了:策略庫的閘門要跟上
@@ -449,10 +460,12 @@ var UP = null;   // var:applyStatic 可能在這一行之前就被叫到(let 的
    app 裡不做首次告知(Wei);關掉之後清單留著——看得到自己關掉的是什麼。全段不寫「匿名」:登入後安裝編號會跟帳號對上。
    開關的真值在主行程(telemetry.js 的狀態檔);這裡每次打開這一類就重讀,切換後以主行程回的為準。 */
 let PRIV = null;   // null = 還沒讀到(開關先鎖著,免得先畫成開、再跳成關)
-const PRIV_COLLECT = ["priv.collect.1", "priv.collect.5", "priv.collect.2", "priv.collect.3", "priv.collect.4"];
+const PRIV_COLLECT = ["priv.collect.1", "priv.collect.5", "priv.collect.6", "priv.collect.2", "priv.collect.3", "priv.collect.4"];
 /* 功能被使用(canon .claude/docs/product-telemetry.md):只交一個白名單裡的名字給主行程,不帶內容、不計次(api 每安裝每 name 每日一列)。
    送出點放在「功能被使用」那一層(分頁切換、主要動作的 handler),不放 render;名字的字面在 tests/check_shell_telemetry.js 對兩端白名單掃 */
 function trackFeature(name) { try { window.blave.trackFeature(name); } catch (_) { } }   // 追蹤永遠不擋功能
+// 卡在哪一步(同一份登記表,0.1.9):事件名 + 一格列舉值,主行程對 FROM_RENDERER 與列舉再驗;不帶內容
+function trackEvent(ev, props) { try { window.blave.trackEvent(ev, props); } catch (_) { } }
 const PRIV_NEVER = ["priv.never.1", "priv.never.2", "priv.never.3", "priv.never.4", "priv.never.5", "priv.never.6"];
 let PRIV_ID = null;   // 安裝識別碼:只收 UUID 的形狀(它會被畫出來、放進剪貼簿)
 async function privLoad() {
@@ -922,7 +935,7 @@ document.addEventListener("mousedown", (e) => { if (!$("mp").contains(e.target))
    掛在各框 scrim 上的 keydown 收不到(Wei 09-23 實機)。一次只關一層;由上往下照 DOM 疊的順序 */
 function escTop() {
   return !$("del-scrim").hidden ? () => delClose(false) : !$("rpn-scrim").hidden ? rptNewClose : !$("ns-scrim").hidden ? nsClose : !$("cx-scrim").hidden ? () => cxModalClose(false) : !$("shr-scrim").hidden ? shrClose
-    : !$("lb-scrim").hidden ? lbClose : !$("set-scrim").hidden ? setClose : !$("mp-panel").hidden ? () => mpClose(true)
+    : !$("lb-scrim").hidden ? lbClose : !$("set-scrim").hidden ? (rulesEscFn() || setClose) : !$("mp-panel").hidden ? () => mpClose(true)
     : !$("cs-list").hidden ? () => { csShowList(false); $("cs-toggle").focus(); } : null;
 }
 document.addEventListener("keydown", (e) => {
@@ -1053,7 +1066,7 @@ async function stratSelect(name, force) {
   if (!RP.data) { stratSelect(null); return; }
   envShowMain();
   // 在看雲端時本機這邊被 agent 動了(每輪結束的 stratRefresh):只記下,切回來 rpRepaint 再畫——那時 #rp 開著的是雲端那支,不可以拿本機的頁首去蓋它
-  if (rpBag() === RP && !$("rp").hidden) { rpPaintHead(RP); rpShowTab(RP.data.stats ? RP.tab : "code"); }
+  if (rpBag() === RP && !$("rp").hidden) { rpPaintHead(RP); rpShowTab(rpTab(RP)); }
 }
 // 選中那支換了資料、人還在原地(stratRefresh 回合結束):同 stratSelect 的後半,但不離開別的視圖、不換分頁
 async function stratReload(name) {
@@ -1061,7 +1074,7 @@ async function stratReload(name) {
   if (RP.name !== name) return;
   if (!d) { stratSelect(null); return; }
   RP.data = d; RP.drawn = {};
-  if (rpBag() === RP && !$("rp").hidden) { rpPaintHead(RP); rpShowTab(RP.data.stats ? RP.tab : "code"); }
+  if (rpBag() === RP && !$("rp").hidden) { rpPaintHead(RP); rpShowTab(rpTab(RP)); }
 }
 /* 報告頁首(名字、說明、程式碼分頁)換成這一袋的。「送上雲端」只有這台電腦的策略才畫(雲端那份本來就在雲端);「拉回」在側欄列尾,不在這裡 */
 function rpPaintHead(B) {
@@ -1090,7 +1103,7 @@ let rpWaitShownAt = 0;
 function rpWaitHold(shownAt, now) { return shownAt ? Math.max(0, RP_WAIT_MIN_MS - (now - shownAt)) : 0; }
 function rpBodyPaint(B) {
   const w = $("rp-wait"), pend = B.data && B.data.pending;
-  if (!pend) { rpShowTab(B.data.stats ? B.tab : "code"); return; }
+  if (!pend) { rpShowTab(rpTab(B)); return; }
   $("rp-tabs").hidden = true; $("rp-nobt").hidden = true;
   for (const k of ["bt", "tr", "rob", "code"]) $("rp-" + k).hidden = true;
   w.hidden = false; w.textContent = "";
@@ -1159,6 +1172,9 @@ function rpCloudPrune(list) {
   if (RPC.name && !list.some((x) => x.name === RPC.name)) rpCloudSelect(null);
 }
 
+/* 重新畫報告時停在哪個分頁:沒有回測 → 程式碼。還原後重跑中 / 沒完成(stats.json 已移開)不算沒有回測:
+   回測分頁由 versions.js 畫那一版存的結果,人不該被每次輪詢拉到程式碼(spec-strategy-versions-restore-in-place §13) */
+function rpTab(B) { return B.data && (B.data.stats || (typeof verHolds === "function" && verHolds(B))) ? B.tab : "code"; }
 /* 分頁第一次被看到才畫(進出場那張 K 線圖不便宜);同一支策略切回來不重畫。畫的是現在這一邊那一袋(RP / RPC)。 */
 function rpShowTab(tab) {
   if (typeof verShowTab === "function" && verShowTab(tab)) return;   // 正在看舊版:四個分頁由 versions.js 畫
@@ -1230,6 +1246,7 @@ function csLock(on) {
 }
 function csClearChat() {
   if (typeof brReset === "function") brReset();   // 內建瀏覽器的區塊與展開層(renderer/browser.js)
+  if (typeof sugCollapse === "function") sugCollapse();   // 建議列屬於眼前這條對話,換對話即作廢(同 web csSwitch)
   $("chat-scroll").innerHTML = "";
   liveBubble = null; busy = null; swLine = null; swHeld = null;
   acctCard = null; creditCards.length = 0; dataCard = null;   // 卡片跟著聊天欄一起清掉
@@ -1519,15 +1536,21 @@ $("chat-eg").addEventListener("click", () => {
       網頁是 marked 產 HTML 再過 DOMPurify;這裡不解讀 HTML:只產結構,DOM 由 mdPaint 一個節點一個節點組,
       字串一律走 textContent。agent 寫的 `<img onerror=…>`、`<b>` 原樣當文字顯示。 */
 const CARD_TAG = /<blave-card:([a-z-]+)\/>/g;
+/* 建議下一步的 <suggest> 區塊:runtime 在 finalize 剝掉、另送 suggestions chunk(renderer/suggest.js 畫)。
+   runtime 沒走到 finalize 的回合(出錯、被殺)草稿會原樣升格——這裡再剝一次,同 runtime _SUGGEST_BLOCK_RE / _SUGGEST_OPEN_TAIL_RE */
+const SUG_BLOCK = /[ \t]*<suggest>[\s\S]*?<\/suggest>[ \t]*/g;
+const SUG_OPEN_TAIL = /[ \t]*<suggest>(?:(?!<\/suggest>)[\s\S])*$/;
 /* 純函式(tests/check_shell_paint.js 直接測它):原文 → { cards, blocks }。``` 圍欄裡的東西一個字都不動——
    `f(**a, **b)`、`2**3` 被當成粗體吃掉星號的話,用戶照畫面抄策略碼會抄錯。`live` = 還在串流:尾端半截的標記
    先藏起來;回合結束後用 live=false 重畫一次,真的以 `<` 結尾的回覆才不會被永久吃掉。 */
 function aiParts(raw, live) {
   const cards = [];
   let text = String(raw).replace(CARD_TAG, (_m, name) => { cards.push(name); return ""; });
+  if (text.indexOf("<suggest>") >= 0) text = text.replace(SUG_BLOCK, "").replace(SUG_OPEN_TAIL, "").replace(/\s+$/, "");
   if (live) {
-    const lt = text.lastIndexOf("<");
-    if (lt >= 0 && text.length - lt <= 40 && "<blave-card:".startsWith(text.slice(lt, lt + 12)) && !text.slice(lt).includes(">")) text = text.slice(0, lt);
+    const lt = text.lastIndexOf("<"), tail = lt >= 0 ? text.slice(lt) : "";
+    // <suggest> 還沒湊齊(`<sug`)也先藏:湊齊後 SUG_OPEN_TAIL 才剝得到,中間那一兩拍會閃出字面
+    if (lt >= 0 && tail.length <= 40 && !tail.includes(">") && ("<blave-card:".startsWith(tail.slice(0, 12)) || "<suggest>".startsWith(tail))) text = text.slice(0, lt);
   }
   if (cards.length) text = text.replace(/\s+$/, "");
   return { cards, blocks: mdBlocks(text, 0) };
@@ -1952,6 +1975,7 @@ async function sendDraft() {
 /* 真的送出一句話。回傳這一輪有沒有跑起來(「再送一次」要知道)。不碰輸入框。 */
 async function submitMessage(msg, opts) {   // opts.handoff:「送上雲端 / 拉回」確認框送的那句才有(handoff.js);重送(lastUserText)不帶
   if (!msg || running) return false;
+  if (typeof sugCollapse === "function") sugCollapse();   // 任何入口送出,上一組建議都作廢(renderer/suggest.js)
   UPD.turnCloud = false; turnSeq++;   // 這一回合碰過雲端沒有,從零開始記(tool chunk 的 where);回合序號 +1(參數掃描的「已送出」只認這一輪)
   running = true; sendBtnSync(); hoBusy(); if (typeof verBusy === "function") verBusy(); upPaint(); rpRobSync(); if (typeof libSync === "function") libSync(); if (typeof rptSync === "function") rptSync(); if (typeof nsSync === "function") nsSync(); if (typeof xpSync === "function") xpSync();   // 回合在跑:更新入口停用(更新會重開 app)
   $("ws-conn").disabled = true;   // 跑到一半不給換 agent
@@ -2217,6 +2241,7 @@ function localLoginFlow(card, kind) {
                on: () => window.blave.cancelAgentLogin() });
     const r = await window.blave.agentLogin(kind);
     loginPending = null;
+    if (!r.ok && !r.cancelled && !r.busy) trackEvent("connect_failed", { kind: kind === "codex" ? "codex_login" : "claude_login" });
     if (r.ok) card.set(resendState(card, t("login.ok", { name })));
     else fault(!r.cancelled && !r.busy);      // 取消不是錯誤,回到原本那句
   }
@@ -2242,6 +2267,7 @@ function blaveLoginFlow(card) {
       oauthPending = false; waitChanged();
       const m = (e && e.message) || "";
       const code = (m.match(/\b[A-Z][A-Z_]{3,}\b/) || [])[0];
+      trackEvent("connect_failed", { kind: oauthGaveUp(code) ? "blave_cancel" : "blave_oauth" });
       fault(code === "OAUTH_CANCELLED" ? null : (code && t(code) !== code ? t(code) : (m || t("oauth.failed"))));
     }
   }
@@ -2298,23 +2324,42 @@ function dataReadyText(s) {
    (web 的路由是 /disclaimer/<lang>/…)。外開走既有的 openExternal(主行程的 externalUrl 已經認得 blave.org) */
 const legalUrl = (page) => "https://blave.org/disclaimer/" + LANG + "/" + page;
 function acctSub(s) { return s && s.trial_eligible ? t("acct.sub", acctVars(s)) : null; }
-// 不能跑時的鈕與句子(預檢卡與 402 卡共用的那半)
-function acctAction(s) {
+// 不能跑時的鈕與句子(預檢卡與 402 卡共用的那半);where = "pre"(預檢卡)| "turn"(402 卡),埋點分卡用
+function acctAction(s, where) {
   // 查不到(s 為 null)不猜:沿用「儲值」
   const noCard = !!s && s.reason === "NO_CARD";
-  return { label: t(noCard ? "acct.addCard" : "fault.noCreditBtn"), on: () => window.blave.openExternal(acctUrl()) };
+  return { label: t(noCard ? "acct.addCard" : "fault.noCreditBtn"), on: () => { acctClicked(where, s); window.blave.openExternal(acctUrl()); } };
 }
+/* 綁卡漏斗(acct_card_shown → acct_card_click → acct_card_back;canon product-telemetry 登記表)。
+   卡的種類跟著句子走(同 acctPaint):預檢卡 NO_CREDIT 講儲值、其餘講綁卡;402 卡 NO_CARD 講綁卡、其餘講儲值。
+   back:按過鈕、視窗回前景之後那次重查的結果;還會再重查(藍新回呼延遲)就先不下結論。記過「還不能跑」之後欠一則 ready:
+   之後任何一次查到能跑(回合結束、方案頁、重查鈕)就補,不等視窗再回前景。三支是純函式,tests/check_shell_telemetry.js 切出來跑 */
+function acctCardKind(where, s) { return where === "pre" ? (s && s.reason === "NO_CREDIT" ? "pre_credit" : "pre_card") : (s && s.reason === "NO_CARD" ? "turn_card" : "turn_credit"); }
+function acctBackState(s, again) { return !s ? null : s.can_run ? "ready" : again ? null : s.reason === "NO_CREDIT" ? "no_credit" : "no_card"; }
+function acctBackNote(gone, s, again) { return !gone ? null : gone.back ? acctBackState(s, again) : gone.owe && s && s.can_run ? "ready" : null; }
+let acctGone = null;   // 按了卡上的鈕去瀏覽器:{ back } = 回前景了沒;owe = 記過「還不能跑」,能跑時要補 ready
+function acctBackTrack(again) {
+  const back = acctBackNote(acctGone, acct, again);
+  if (!back) return;
+  trackEvent("acct_card_back", { state: back });
+  acctGone = back === "ready" ? null : { back: false, owe: true };
+}
+function acctShown(card, where, s) { if (card._shown) return; card._shown = true; trackEvent("acct_card_shown", { card: acctCardKind(where, s) }); }
+function acctClicked(where, s) { acctGone = { back: false }; trackEvent("acct_card_click", { card: acctCardKind(where, s) }); }
 function acctPaint() {
   const s = acct;
   if (!s) return;                           // 這次查不到:畫面維持上一次的狀態,不亂翻
+  // 欠的那則 ready 在這裡補:dataTurnEnd 直接換 acct 再畫,不經 acctCheck。回前景那次的判斷要等 acctCheck 算出 again
+  if (acctGone && !acctGone.back) acctBackTrack(false);
   if (acctCard) {
     if (s.can_run) acctCard.set({ calm: true, text: t("acct.ready") });
-    else acctCard.set({ calm: true, text: t(s.reason === "NO_CREDIT" ? "acct.noCredit" : "acct.noCard"), sub: acctSub(s), ...acctAction(s) });
+    else acctCard.set({ calm: true, text: t(s.reason === "NO_CREDIT" ? "acct.noCredit" : "acct.noCard"), sub: acctSub(s), ...acctAction(s, "pre") });
   }
   creditCards.forEach((card) => {
     if (s.can_run) card.set(resendState(card, t("acct.creditIn")));
-    else if (s.reason === "NO_CARD") card.set({ text: t("fault.needCard"), sub: acctSub(s), ...acctAction(s), second: resendSecond() });
-    else card.set({ text: t("fault.noCredit"), ...acctAction(s), second: resendSecond() });
+    else if (s.reason === "NO_CARD") card.set({ text: t("fault.needCard"), sub: acctSub(s), ...acctAction(s, "turn"), second: resendSecond() });
+    else card.set({ text: t("fault.noCredit"), ...acctAction(s, "turn"), second: resendSecond() });
+    if (!s.can_run) acctShown(card, "turn", s);
   });
   dataCardSync(s);
   if (typeof mpBillPaint === "function" && $("mp-bill")) mpBillPaint();
@@ -2335,12 +2380,14 @@ async function acctCheck() {
   acctPaint();
   if (!acct) planWatchIdle();               // 查不到、手上也沒有:方案頁這時才換成「查不到」那一格
   // 問不到、手上也沒有狀態:中性句不能一直掛著,退回「沒額度 → 儲值」那組(不猜沒卡)
-  if (!acct) creditCards.forEach((card) => card.set({ text: t("fault.noCredit"), ...acctAction(null), second: resendSecond() }));
+  if (!acct) creditCards.forEach((card) => { card.set({ text: t("fault.noCredit"), ...acctAction(null, "turn"), second: resendSecond() }); acctShown(card, "turn", null); });
   // 還是不能跑:再等 5 秒查一次,最多 3 次(藍新回呼到我們這邊有幾秒延遲)
   // 只在連的是 Blave AI、而且真的有卡片在等的時候重試:自帶 CLI 的登入者 can_run=false 是常態,
   // 照舊重試會把跟 LLM 共用的每分鐘 30 次的桶打滿
-  if (cur === "blave" && acct && !acct.can_run && (acctCard || creditCards.length) && acctRetry < 3) { acctRetry++; setTimeout(acctCheck, 5000); }
+  const again = !!(cur === "blave" && acct && !acct.can_run && (acctCard || creditCards.length) && acctRetry < 3);
+  if (again) { acctRetry++; setTimeout(acctCheck, 5000); }
   else acctRetry = 0;
+  acctBackTrack(again);
 }
 /* ── 沒有 Blave 資料權限的情境卡(設計師定稿)──────────────────
    agent 因為這台沒有資料權限而拿不到 Blave 資料的那一輪,回覆尾端會帶 `<blave-card:data-access/>`
@@ -2648,6 +2695,7 @@ async function acctPrecheck() {
   if (!acct || acct.can_run) return;
   acctCard = faultCard();
   acctPaint();
+  acctShown(acctCard, "pre", acct);
 }
 function creditFlow(card) {
   creditCards.push(card);
@@ -2659,6 +2707,7 @@ function creditFlow(card) {
   acctCheck();
 }
 window.addEventListener("focus", () => {
+  if (acctGone) acctGone.back = true;   // 按過卡上的鈕、回到 app 了:下一次重查的結果記 acct_card_back
   if (!hasToken || !(acctCard || creditCards.length || dataCard || planState() === "starting" || envOpenVisible())) return;
   if (Date.now() - acctAt < 10000) return;
   acctCheck();
@@ -2693,15 +2742,26 @@ function draftShow() {
   if (!ACT.textStart) ACT.textStart = now;
   ACT.lastDelta = now;
 }
+/* 回合失敗的原因類別(turn_failed,canon 登記表):402 / 403 跟著 classifyFault 的分類;429 它不分類(照舊出通用句),這裡另外認;
+   其他 API Error 開頭的算 other。回 null = 這段不是錯誤(是真回覆)。純函式,tests/check_shell_telemetry.js 切出來跑 */
+function turnFailOf(f, text) {
+  if (f && f.flow === "credit") return "402";
+  if (f && f.flow === "blave") return "403";
+  const m = /^(?:Failed to authenticate\. )?API Error: (\d{3})\b/.exec(text || "");
+  return m ? (m[1] === "429" ? "429" : "other") : null;
+}
+let turnFail = null;   // 這一輪認到的失敗原因(回合結束時送 turn_failed 後清掉)
 function draftPromote() {
   const text = draft; draft = "";
   ACT.textStart = 0;
   if (!text.trim()) return;
   const f = classifyFault(text);
+  const fail = turnFailOf(f, text); if (fail) turnFail = fail;
   if (f) { faultShown = true; turnFaulted = true; turnLimit = !!f.limit; addFault(f); liveBubble = null; return; }
   busyHide();   // 回覆定稿了:指示器收起(同以前「回覆在串流了,字本身就是還在跑」)
   if (!liveBubble) liveBubble = addMsg("ai", "");
   paintAi(liveBubble, (liveBubble._raw || "") + text); turnGotReply = true;
+  if (!fail) trackEvent("first_reply_done", { kind: cur });   // 每安裝只送一次(telemetry.js ONCE);錯誤字串不算回覆
   if (liveBubble._cards.length) turnCards = liveBubble._cards.slice();
   // 這一輪的第一個回覆泡泡 = 回合結束時「思考過程」標記要插在它上面的錨點
   if (busy && !busy.anchor) busy.anchor = liveBubble;
@@ -2735,12 +2795,15 @@ window.blave.onTurnEvent((c) => {
     if (typeof rptTurnTool === "function") rptTurnTool(c);   // 雲端視角這一輪碰了雲端主機:回合結束去等雲端報告清單(reports.js)
   } else if (c.type === "export") {
     if (typeof xpChunk === "function") xpChunk(c);   // 轉出檔:先收著,回合結束掛到回覆下面(renderer/export.js)
+  } else if (c.type === "suggestions") {
+    if (typeof sugChunk === "function") sugChunk(c);   // 建議下一步:先收著,回合結束才長出(renderer/suggest.js)
   } else if (c.type === "tool_prep") {
     actToolPrep(c);
   } else if (c.type === "thinking") {
     busyReason(c.text || "");
   } else if (c.type === "error") {
     turnErrored = true;
+    if (typeof sugCollapse === "function") sugCollapse();
     if (faultShown && c.code === "not_started") { faultShown = false; return; }
     if (turnLimit && limitSwallow(c.code, turnChanged)) return;   // 用量到上限那張卡已經講完了
     const line = t("turn.error", { msg: c.message || "" });
@@ -2785,6 +2848,8 @@ window.blave.onTurnEnd(async (r) => {
   if (typeof xpTurnEnd === "function") xpTurnEnd(liveBubble);   // 定稿之後才掛轉出卡:paintAi 會清空泡泡
   const faulted = !stopped && (r.code !== 0 || turnFaulted || turnErrored || !turnGotReply || loggedOut);   // 同 upTurnEnded 的判準
   busyEnd(faulted);
+  if (!stopped && (faulted || turnFail)) trackEvent("turn_failed", { reason: /AGENT_BIN_MISSING/.test(r.errTail || "") ? "engine_missing" : turnFail || "other" });
+  turnFail = null;
   if (!loggedOut && r.code === 0) dataTurnEnd();
   if (planDonePending) planSayDone();
   if (loggedOut) addFault(localAuthFault(cur));
@@ -2801,6 +2866,7 @@ window.blave.onTurnEnd(async (r) => {
   }
   // 碰過雲端的回合:雲端那支的報告背景重抓(rpCloudSelect force = 先畫手上那份、抓到不同才換)——不然雲端掃完 scan 永遠不會出現在分頁上
   if (cloudTurn && RPC.name) rpCloudSelect(RPC.name, true);
+  if (typeof sugTurnEnd === "function") sugTurnEnd(!stopped && !faulted);   // 建議列停一拍才長出,那時回覆與下面兩行的卡都已掛好(renderer/suggest.js)
   if (rt) resTurnEnd(rt, cloudTurn);   // 最後一步:回覆泡泡已定稿(paintAi 會清空泡泡)、轉出卡已掛,結果卡才決定掛在哪一則
   chatSwitchFlush();   // 回合中切過視角:那一行排在這一輪之後(結果卡的落點已經在上一行定了)
 });
@@ -2976,8 +3042,22 @@ document.addEventListener("keydown", (e) => {
   const f = document.activeElement;
   if (f && (f.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(f.tagName))) return;
   const sel = window.getSelection(), at = sel.anchorNode || f;
-  const region = at && (at.nodeType === 1 ? at : at.parentElement).closest(SELECT_REGIONS);
+  const el = at && (at.nodeType === 1 ? at : at.parentElement);   // 錨在 document 上(nodeType 9)時沒有 parentElement:照系統
+  const region = el && el.closest(SELECT_REGIONS);
   if (!region || !region.getClientRects().length) return;
   e.preventDefault();
   sel.selectAllChildren(region);
+});
+
+/* 泡泡由 CSS 的 :hover / :focus-visible + .tip 帶出來的那幾種(.mp-tip、.tr-tipb、.rules-tipb、瀏覽器的 .ibtn):Esc 要收得掉(canon › Tooltip),
+   但 CSS 狀態收不掉——給觸發點掛 data-tip-off(CSS 帶 :not([data-tip-off])),滑出或失焦再拿掉 */
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  for (const x of [document.activeElement, ...document.querySelectorAll(":hover")]) {
+    const btn = x && x.nextElementSibling && x.nextElementSibling.classList.contains("tip") ? x : null;
+    if (!btn || btn.hasAttribute("data-tip-off")) continue;
+    btn.setAttribute("data-tip-off", "");
+    const on = () => { btn.removeAttribute("data-tip-off"); btn.removeEventListener("blur", on); btn.removeEventListener("mouseleave", on); };
+    btn.addEventListener("blur", on); btn.addEventListener("mouseleave", on);
+  }
 });

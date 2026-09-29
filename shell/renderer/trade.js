@@ -567,7 +567,7 @@ const ENV_API = ["tradeStatus", "listStrategies", "loadStrategy", "tradeEquity",
 /* 雲端送得出去的指令:**只開真的有 UI 在用的**(稽核 S-2)。`amounts` = 雲端填金額(S4);`delete_strategy` = 雲端側欄的刪除;
    `credentials_remove` / `retest_accounts` = 雲端設定分頁(S5)。`credentials` 永遠不在這裡:金鑰只走主行程專用的 cloud-connect。
    沒有 `update` / `restart_reconciler`:用本機 app 不觸發雲端 agent 回合(Wei 09-22)。主行程還會再擋一次(CLOUD_SHIPPED,兩份逐項相等)。 */
-const ENV_CLOUD_CMDS = ["halt", "close_all", "resume", "resume_wait", "amounts", "delete_strategy", "credentials_remove", "retest_accounts", "book_account_confirm"];
+const ENV_CLOUD_CMDS = ["halt", "close_all", "resume", "resume_wait", "amounts", "delete_strategy", "credentials_remove", "retest_accounts", "book_account_confirm", "version_restore"];
 function envApi(env, host) {
   if (env !== "cloud") { const o = { env: "local" }; ENV_API.forEach((k) => { o[k] = (...a) => host[k](...a); });
     /* 事件清單兩個視角同一個形狀 { code, events }。這台電腦永遠是 OK:那是本機檔案,檔不在就是真的沒發生過事
@@ -895,7 +895,7 @@ function trPushLabels() {
   if (typeof window.blave.tradeLabels !== "function") return;
   window.blave.tradeLabels({ running: t("tr.autoOn"), paperVenue: t("cx.paperShort"), pause: t("tm.pause"), open: t("tm.open"), quit: t("tm.quit"),
     notifTitle: t("tm.notifTitle"), notifBody: t("tm.notifBody"), pauseFail: t("tm.pauseFail"), pauseUnknown: t("tr.cmdUnknown"), quitTitle: t("tm.quitTitle"), quitBody: t("tm.quitBody"),
-    quitGo: t("tm.quitGo"), quitStay: t("tm.quitStay"), hidden: t("tm.hidden"), updateReady: t("tm.updateReady"),
+    quitGo: t("tm.quitGo"), quitStay: t("tm.quitStay"), hidden: t(window.blave.platform === "win32" ? "tm.hiddenWin" : "tm.hidden"), updateReady: t("tm.updateReady"),
     quitTurnTitle: t("tm.quitTurnTitle"), quitTurnBody: t("tm.quitTurnBody"),   // 結束攔截:本機 agent 回合還在跑
     // 本機 P1 通知的字:跟總覽時間軸同一組(trEventText),只有拒單的註解是通知專用
     ev_halt: t("tr.ov.evHaltAuto"), ev_halt_n: t("tr.ov.evHaltNote"), ev_order_error: t("tr.ov.evErr"), ev_order_error_n: t("tm.evOrderErrNote"),
@@ -904,7 +904,7 @@ function trPushLabels() {
     ev_execution_stuck: t("tr.ov.evExecStuck"), ev_execution_stuck_n: t("tr.ov.evExecStuckNote"),
     ev_machine_restart_stopped: t("tr.ov.evRestartStopped"), ev_machine_restart_stopped_n: t("tm.evRestartStoppedNote"),
     // 選單列兩行狀態、app 選單「顯示」兩項與官網、結束攔截多的那一句、通知標題的前綴(主行程:traytext.js / main.js)
-    lang: LANG, stLocal: t("tm.stLocal"), stCloud: t("tm.stCloud"), stOn: t("tm.stOn"), stPaused: t("tm.stPaused"), stUnknown: t("tm.stUnknown"), stMayTrade: t("tm.stMayTrade"), stNotStarted: t("tr.notStarted"),
+    lang: LANG, stLocal: t("tm.stLocal"), stLocalOnly: t("tm.stLocalOnly"), noAccount: t("tr.noAccount"), runningZ: t("tr.runningZ"), stCloud: t("tm.stCloud"), stOn: t("tm.stOn"), stPaused: t("tm.stPaused"), stUnknown: t("tm.stUnknown"), stMayTrade: t("tm.stMayTrade"), stNotStarted: t("tr.notStarted"),
     moneyPaper: t("tr.mode.paper"), moneyReal: t("tr.mode.real"), pauseLocal: t("tm.pauseLocal"), quitCloudNote: t("tm.quitCloudNote"),
     // Binance 金鑰重查的通知(主行程 binanceNotify):這些事件只會來自這台電腦,{where} 在這裡就填好;{ip} 留給主行程填
     key_ipTitle: t("tm.key.ipTitle", { where: t("env.local") }), key_ipBody: t("tm.key.ipBody", { ip: "{ip}" }), key_rejTitle: t("tm.key.rejTitle", { where: t("env.local") }),
@@ -2316,7 +2316,6 @@ function trUnbind(opener) {
    tradePerformance:雲端 = 組合績效六格 + 平台算好的累積損益曲線(cloudPerformance → /cloud/performance,同網頁 GET /openclaw/agent/performance);
    這台電腦沒有這一份(null,不畫那一條)。累積損益優先用平台那條(異動點的跳變已剔除),沒有才用本機推算(最後一段減首點)。 */
 const TR_RANGES = [["1D", 1], ["1W", 7], ["1M", 30], [null, 90]];
-const TR_GAP_S = 7200;            // 每個整點一筆:相鄰點超過 2 小時 = Blave 沒開著。線照連,只用來決定要不要出圖下那句 tr.ov.gapNote
 async function trLoadCurve() {
   const S = TR, days = S.ov.days;
   // 計價幣釘住帳戶回報的那一個(雲端 api 會折成用戶在網頁選的幣;不釘的話曲線跟上面的總權益單位對不起來)
@@ -2476,7 +2475,6 @@ function trOvCurve() {
   canvas.setAttribute("role", "img");
   canvas.setAttribute("aria-label", t(isPnl ? "tr.ov.curveAriaPnl" : "tr.ov.curveAria", { a: trFmt2(first.v, isPnl) + " " + trUnit(), b: trFmt2(last.v, isPnl) + " " + trUnit(), n: series.length }));
   frame.append(canvas, tip); frag.appendChild(frame);
-  if (series.some((p, i) => i > 0 && p.t - series[i - 1].t > TR_GAP_S)) frag.appendChild(trEl("div", "pf-foot", t("tr.ov.gapNote")));
   // 斷在哪一種:資料自己帶 anomalies 的是平台標的資金異動,否則是這台電腦的口徑換過
   if (cut > 0 && !isPnl) frag.appendChild(trEl("div", "pf-foot", t(Array.isArray(TR.ov.curve.anomalies) ? "tr.ov.flowNote" : "tr.ov.basisNote")));
   if (srv && srv.anom) frag.appendChild(trEl("div", "pf-foot", t("tr.ov.pnlAnom")));   // 平台那條:異動點的跳變已剔除,講一句
@@ -2540,7 +2538,7 @@ function trDrawCurve(canvas, pts, isPnl) {
   ctx.fillText(trStamp(t0), padL, H - 6);
   const endLabel = trStamp(t1); ctx.fillText(endLabel, W - padR - ctx.measureText(endLabel).width, H - 6);
   ctx.lineWidth = 1.5; ctx.lineJoin = "round"; ctx.lineCap = "round";
-  // Blave 沒開著的時段直接連起來(Wei 09-22):不斷線、沒有孤立點。沒有紀錄這件事由圖下那一句講(tr.ov.gapNote)
+  // Blave 沒開著的時段直接連起來(Wei 09-22):不斷線、沒有孤立點;圖下也不另外講(Wei 0.1.8:這不用寫)
   if (!isPnl) {
     // 權益:一條線,主資料序列色(同雲端;賺賠訊號歸 PnL 條的數字)
     ctx.strokeStyle = trToken("--color-data-1");
