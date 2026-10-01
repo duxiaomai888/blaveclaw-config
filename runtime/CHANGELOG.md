@@ -8,10 +8,35 @@ miss it. (Channel rules: `.claude/docs/blave-agent-update-channels.md`.)
 
 ## Unreleased
 
+(none)
+
+## 1.1.106 — 2026-10-01(desktop 0.1.11)
+
+- **部署現況那一行照畫面的字講(desktop 0.1.11 B8)**:agent 會把這行原樣講給用戶聽,內部名稱換成畫面上的「自動下單」——「對帳下單程式沒在跑」→「自動下單沒在跑」、「下單設定裡但金額 0」→「自動下單頁金額 0」、「下單設定裡有金額」→「自動下單頁有金額」、設定檔壞掉那句不再帶 `manager/portfolio_config.json` 路徑;設計稽核 0.1.11 D8 再改「其他排程」→「自己排程的策略」、「單支暫停」→「已自動暫停」、「未部署」→「還沒上線」、「模擬盤帳戶:已綁定／未綁定」→「模擬交易:已連接／未連接」;code 稽核 P1-1:「還沒上線」照畫面的定義(上線中 = 金額 > 0),金額 0 的也列進去並加註「(在自動下單頁、金額 0)」,拿掉另列的「自動下單頁金額 0」,金額 0 的排最前面(超過 15 支截斷時註記不被截掉),金額讀不到時不列;段名改「[上線現況」,規則句改成「有金額的策略不要再建議上線(真倉或模擬交易都算);「還沒上線」裡標了金額 0 的,只建議到自動下單頁設金額」;同段 prompt 的導航句(portfolio.pos=設金額上線、portfolio.venue=連接模擬交易或交易所)與里程碑規則(有回測但還沒上線、就不提上線)跟著換;`tests/check_deploy_prompt_010.py` 列舉每一種狀態鎖住不出現內部名稱。
+- **上線現況的規則句定稿(desktop 0.1.11 code 複驗 R-P2-4 / R-P2-3)**:有金額的策略和「自己排程的策略」都算已上線、不要再建議上線;金額讀不到時後半句換成「不要推斷哪些策略還沒上線,也先不要建議上線;用戶問起,就請他到自動下單頁看」;`tests/check_deploy_prompt_010.py` 兩種情況逐字鎖住。
+- **更新回覆句照畫面講「自動下單」(desktop 0.1.11 D8,不在 runtime/ 但同一批出貨)**:`references/updating.md`、`references/cloud-handoff.md` 裡 agent 一字不改轉述的「下單程式…」/ "The order program…" 改成「自動下單…」/ "Auto-trading…"。動到 `references/`:**發版時要 bump 根 `VERSION`**,否則用戶端看不到(隨 VERSION 2026-10-01 出貨)。
+
+## 1.1.105 — 2026-09-30(desktop 0.1.10)
+
+- **建議列不再跟回覆的結論打架(0.1.10 #7a)**:回覆說「不建議直接拿去用——訊號要先站得住，調參數硬拉沒有意義」，建議列卻是「幫〈策略〉加一個趨勢濾網」。
+  根因在 `_SUGGEST_RULE` 本身:總結里程碑不看結論一律「必附:上模擬盤或優化方向」,而 MCPT p > 0.05 那條開的藥方就是「加濾網或換訊號」。
+  改成建議跟正文結論同方向(可以用 → 上模擬盤;還在迭代 → 優化方向;不建議用 → 不提部署,訊號站不住只提換訊號、不在同一個訊號上加濾網／調參數／vol targeting),
+  加一條「正文勸退的事不准出現在 <suggest>」,逐輪錨同步。
+- **電腦版的部署步驟照電腦版的畫面(0.1.10 #7b)**:導航類回合注入 `references/portfolio-steps.md` 時,依表面(`LocalSink`,或 `BLAVE_AGENT_LOCAL=1`——電腦版起的排程報告回合也算)只帶那一套
+  (`### Web workspace` / `### Desktop app` 子段;舊檔沒有子段就整段照舊),並講明是 app 左側的自動下單頁、不是網頁工作頁。
+  電腦版外殼不處理 `ui_nav`:電腦版的網頁系回合改用 `LOCAL_FORMATTING_RULE`(只把 `_NAV_RULE` 換成不要標記、不承諾自動開頁的一段,建議規則仍在最尾端),導航句的 <nav> 逐輪錨電腦版不掛;網頁不變。
+- **暫停下單時不再說策略「正在跑」(0.1.10 #8)**:`_deploy_state_line` 原本把 `state/deployments.json`(名冊:金額 0、暫停都還在)寫成「已部署運行中」。
+  改成兩件事分開講:下單設定裡的策略(有金額／金額 0／其他排程——只算 `strategies/` 下真有的或 `type: cron`,常駐程式不算;
+  `portfolio_config.json` 壞掉講「讀不到」)與下單狀態(重開停止 → 已停止;`state/HALT` → 已暫停——兩者都不對平倉、停損或「任何單都不送」做保證;
+  對帳器心跳 5 分鐘內 → 執行中;否則對帳下單程式沒在跑;只有 Type B 排程時講它照自己的排程跑)+ 單支暫停(`downtime_pause.json`;
+  `HALT_<name>` 只列沒金額的,對帳器不讀它)。電腦版雲端視角不注入這一行(它讀的是這台電腦)。測試 `tests/check_deploy_prompt_010.py`(三件一起)。
+
+## 1.1.104 — 2026-09-29
+
 - **排程報告回合加 Bash 守門(稽核 09-29 P-1)**:`--scheduled` 回合不分 sink 掛 PreToolUse:Bash hook,讀 `.env`、印整個環境、
   叫會下單／平倉／換 key 的模組(`lib/order_*`、execute、venue_wiring、venue、portfolio、群益憑證、command_listener 等,清單由
   測試從 import 閉包列舉對齊)、動部位的 `manager/` 指令、`BLAVE_MODE=live`、指令位置上的網路工具一律 deny 並回理由;`Read(/.env)`
-  加進排程回合的 disallowed 規則;刪掉 CLI 從不參考的 `Write(path)` 規則(Edit 規則本來就涵蓋 Write)。取代 09-26「Bash 只做軟約束」。機隊的 hook 通道未實測,SDK 沒有 hooks 時不掛(fail-open)。
+  加進排程回合的 disallowed 規則;刪掉 CLI 從不參考的 `Write(path)` 規則(Edit 規則本來就涵蓋 Write)。取代 09-26「Bash 只做軟約束」。29026 實測:hook 會觸發、正常晨報 0 誤擋;SDK 沒有 hooks 時不掛(fail-open)。
   測試 `tests/check_sched_bash_guard.py`。
 
 ## 1.1.103 — 2026-09-29(desktop 0.1.9)

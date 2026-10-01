@@ -331,7 +331,7 @@ const constSrc = (src, name) => { const m = new RegExp("const " + name + " = [\\
         ok("重跑狀態列:圓環 + 一句(v2 包粗體 mono),沒有鈕、不給百分比", bar(r).kids.length === 1 && bar(r).kids[0].kids[0].className === "spin16" && bar(r).kids[0].kids[0].attrs["aria-hidden"] === "true"
           && bar(r).textContent === "已回到 v2，先顯示它當初存的結果；正在用最新資料重跑回測，跑完會更新。" && bar(r).kids[0].kids[1].kids.some((k) => k.tagName === "b" && k.className === "mono" && k.textContent === "v2"));
         ok("重跑中:說明句收起、送上雲端 / 拉回收起、轉出不算時光機、回測數字交給 versions.js 畫 blob", r.E["rp-desc"].hidden === true && r.E["rp-act"].hidden === true && r.F.verHidesAct() === true
-          && r.F.verHolds(r.B) === true && r.F.verShowTab("bt") === true && r.E["rp-nobt"].textContent === "回測重跑完才有進出場紀錄；參數掃描要對這一版重新跑。");
+          && r.F.verHolds(r.B) === true && r.F.verShowTab("bt") === true && r.E["rp-nobt"].textContent === "回測重跑完就有進出場紀錄；參數掃描與樣本外驗證要再跑一次。");
         ok("重跑中:比較框預設 A = 版號最大、不是目前的那一版(v3),B = 目前(v2)", (r.F.vcOpen(), r.E["vc-a"].value === "3" && r.E["vc-b"].value === "2"));
         ok("重跑中:選單裡 windowNote 不出、「目前」徽章掛在 v2", (r.B.data.stats = { end: "2099-01-01" }, r.F.verMenuOpen(false), r.E["ver-menu"].all((k) => k.className === "vmi-win").length === 0)
           && r.E["ver-menu"].all((k) => /vtag cur/.test(k.className)).length === 1 && menuItems(r.E["ver-menu"])[1].all((k) => /vtag cur/.test(k.className)).length === 1);
@@ -368,7 +368,7 @@ const constSrc = (src, name) => { const m = new RegExp("const " + name + " = [\\
         ok("沒完成:fault 記號 + 失敗句({why}=沒取到資料)+「再跑一次」描邊鈕;說明句照出、送上雲端不收、不輪詢",
           bar(r).kids[0].kids[0].className === "fault-mark" && bar(r).kids[0].textContent === "v2 的回測沒有重跑完（沒取到資料），頁面顯示的是它當初存的結果。"
           && bar(r).kids[1].className === "btn-out" && bar(r).kids[1].textContent === "再跑一次" && r.E["rp-desc"].hidden === false && r.F.verHidesAct() === false && r.F.VP.local === null);
-        ok("沒完成:凍結分頁的原因換成 frozenRerunFailed", r.F.verShowTab("tr") === true && r.E["rp-nobt"].textContent === "回測沒有重跑完，進出場紀錄與參數掃描都沒有資料。");
+        ok("沒完成:凍結分頁的原因換成 frozenRerunFailed", r.F.verShowTab("tr") === true && r.E["rp-nobt"].textContent === "灰掉的分頁沒有資料，回測重跑完才有。");
         bar(r).kids[1].click();
         ok("再跑一次:同一條指令 {name, n},當下切回重跑中(報告還是 failed 也一樣);焦點交給版本觸發器", JSON.stringify(r.sent) === '[["version_restore",{"name":"momo","n":2}]]'
           && bar(r).kids.length === 1 && bar(r).kids[0].kids[0].className === "spin16" && doc.activeElement === r.E["ver-trig"]);
@@ -383,7 +383,7 @@ const constSrc = (src, name) => { const m = new RegExp("const " + name + " = [\\
           ok("沒完成 " + err + " → {why}「" + why + "」、有鈕", bar(q).textContent.includes("（" + why + "）") && bar(q).kids[1].textContent === "再跑一次");
         }
         const q = rig("en", "momo", it3({ current: 2, rerun: { n: 2, status: "failed", at: 1, err: "REFUSED" } }));
-        ok("沒完成 REFUSED:不給鈕,句尾接 refusedTail(en)", bar(q).kids.length === 1 && !bar(q).all((k) => k.tagName === "button").length && bar(q).textContent === "The backtest for v2 didn’t finish re-running (a backtest check stopped it). The page shows the results v2 saved. Running it again gives the same result — ask the agent in chat to take a look.");
+        ok("沒完成 REFUSED:不給鈕,句尾接 refusedTail(en)", bar(q).kids.length === 1 && !bar(q).all((k) => k.tagName === "button").length && bar(q).textContent === "The backtest for v2 didn’t finish rerunning (a backtest check stopped it). The page shows the results v2 saved. Running it again gives the same result — ask the agent in chat to take a look.");
         r.env.running = true;
       }
       // 回滾
@@ -453,10 +453,52 @@ const constSrc = (src, name) => { const m = new RegExp("const " + name + " = [\\
         r.F.verPaint(r.B);
         ok("S2:快轉 20 分鐘、報告仍是同一筆 failed → 疊層拿掉、回到沒完成(fault 記號 + 再跑一次),不再轉圈",
           !r.F.VO.has("local|momo") && bar(r).kids[0].kids[0].className === "fault-mark" && bar(r).kids[1].textContent === "再跑一次");
+        ok("S2:退回沒完成時,狀態列下方同樣補「沒有開始」那一句(稽核 L1)", bar(r).all((k) => k.id === "ver-rerun-err").map((k) => k.textContent).join() === "「再跑一次」沒有開始。稍後再試，或請 agent 看看。");
         const q = rig("zh", "momo", it3({ current: 2, rerun: failed }));
         bar(q).kids[1].click(); q.acks[0]({ ok: false, error: "UNKNOWN_RESULT" }); await flush();
         q.B.data.versions = it3({ current: 2, rerun: { n: 2, status: "running", at: 70 } }); q.F.verPaint(q.B);
         ok("S2 對照:報告換成新的一筆 → 照常收疊層(不誤判成卡住)", !q.F.VO.has("local|momo") && bar(q).kids[0].kids[0].className === "spin16");
+      }
+      // 稽核 L1(0.1.10 #9-3):「再跑一次」ack 被拒 → 退回沒完成,狀態列句子下方補一句原因;再按一次或狀態一變就收掉
+      {
+        const failed = { n: 2, status: "failed", at: 50, err: "DATA" };
+        const why = (r) => bar(r).all((k) => k.id === "ver-rerun-err")[0];
+        const r = rig("zh", "momo", it3({ current: 2, rerun: failed }));
+        bar(r).kids[1].click(); r.acks[0]({ ok: false, error: "ValueError: CONFIG_UNREADABLE: x" }); await flush();
+        const w = why(r);
+        ok("L1:再跑一次被拒 → 回到沒完成(fault 記號 + 再跑一次),句子下方一行原因:fault 記號 + 逐字(不帶版號,上一行已交代;精簡稽核 A9);不進時光機",
+          bar(r).kids[0].kids[0].className === "fault-mark" && bar(r).kids[1].textContent === "再跑一次" && !!w && w.hidden !== true && w.className === "vb-err"
+          && w.textContent === "「再跑一次」沒有開始。稍後再試，或請 agent 看看。" && w.kids[0].className === "fault-mark" && w.kids[0].attrs["aria-hidden"] === "true"
+          && w.kids.length === 2 && w.kids[1].tagName === "span" && w.kids[1].kids.every((k) => typeof k === "string") && !/\{v\}/.test(w.textContent) && r.S.open === null && r.E["ver-banner"].hidden === true);
+        r.F.verPaint(r.B);
+        ok("L1:同一個狀態重畫頁首,原因行留著", !!why(r));
+        bar(r).kids[1].click();
+        ok("L1:再按一次 → 原因行收掉、照送指令", r.sent.length === 2 && !why(r));
+        r.acks[1]({ ok: false, error: "ValueError: NO_SOURCE: x" }); await flush();
+        r.B.data.versions = it3({ current: 2, rerun: { n: 2, status: "failed", at: 99, err: "TIMEOUT" } }); r.F.verPaint(r.B);
+        ok("L1:報告換成新的一筆 failed(狀態變了)→ 原因行收掉", !why(r) && bar(r).textContent.includes("跑太久"));
+        const e = rig("en", "momo", it3({ current: 2, rerun: failed }));
+        bar(e).kids[1].click(); e.acks[0]({ ok: false, error: "ValueError: CONFIG_UNREADABLE: x" }); await flush();
+        ok("L1:en 逐字;原因句裡的「Run Again」就是鈕上的字(按鈕 Title Case)", !!why(e) && why(e).textContent === "Run Again didn’t start. Try later, or ask the agent." && bar(e).kids[1].textContent === "Run Again");
+        const ok1 = rig("zh", "momo", it3({ current: 2, rerun: failed }));
+        bar(ok1).kids[1].click(); ok1.acks[0]({ ok: true, result: { n: 2, inplace: true } }); await flush();
+        ok("L1:ack 成功不出原因行", !why(ok1));
+      }
+      // 0.1.10 #9-2:雲端視角的「再跑一次」也看 inplace(同「還原成這一版」):主機 lib 太舊 → 更新框、不送指令
+      {
+        const failed = { n: 2, status: "failed", at: 50, err: "DATA" };
+        const c = rig("zh", "momo", it3({ current: 2, inplace: undefined, rerun: failed }), null, { cloud: true });
+        const btn = bar(c).kids[1]; doc.activeElement = btn; btn.click();
+        ok("雲端 lib 太舊按「再跑一次」→ 更新框(同還原那一個:標題、內文、主鈕、雲端 register),不送指令、仍是沒完成",
+          c.sent.length === 0 && c.boxes.length === 1 && c.boxes[0].title === "還原成 v2" && c.boxes[0].lines.join() === "雲端主機還是舊版，要先更新才能還原。更新一次就好，完成後再按一次「還原成這一版」。"
+          && c.boxes[0].ok === zh["minv.btn"] && c.boxes[0].env === "cloud" && bar(c).kids[0].kids[0].className === "fault-mark" && !c.F.VO.has("cloud|momo"));
+        ok("…框關掉把焦點還給「再跑一次」;按下當下焦點不被搶到版本觸發器", !!c.boxes[0] && c.boxes[0].opener === c.$("ver-retry") && doc.activeElement !== c.E["ver-trig"]);
+        const n = rig("zh", "momo", it3({ current: 2, rerun: failed }), null, { cloud: true });
+        bar(n).kids[1].click();
+        ok("雲端 inplace:true 按「再跑一次」→ 照送指令、不開框", n.sent.length === 1 && n.boxes.length === 0);
+        const l = rig("zh", "momo", it3({ current: 2, inplace: undefined, rerun: failed }));
+        bar(l).kids[1].click();
+        ok("這台電腦不看 inplace(lib 跟 app 同包,同還原那一條)", l.sent.length === 1 && l.boxes.length === 0);
       }
       // 設計稽核 S8:回合中點「再跑一次」/「還原成這一版」→ 原因寫在列裡,回合結束收掉
       {

@@ -21,7 +21,7 @@ const el = () => {
   return n;
 };
 const dom = {}; const $ = (id) => dom[id] || (dom[id] = el());
-const document = { createElement: () => el(), activeElement: null, body: {} };
+const document = { createElement: () => el(), activeElement: null, body: {}, querySelectorAll: (q) => (q === "#chat-scroll .msg.sys" ? $("chat-scroll").children.filter((c) => c && c._cls === "msg sys") : []) };
 var ENV = { cloudDirty: false }; let polls = 0, refreshes = 0;
 // trade.js 的輪詢替身:清掉記號、把「主行程手上那一份」(cloudSt)放進雲端那一袋——app.js 只從這一袋讀,不自己讀交易狀態
 const trPoll = async () => { polls++; ENV.cloudDirty = false; TR_BAGS.cloud.st = cloudSt; };
@@ -44,9 +44,10 @@ const trRestartUnconfirmed = (r) => { const x = r && r.reconciler && r.reconcile
 const submitMessage = async (msg, o) => { sent.push([msg, o]); if (startOk) running = true; return startOk; };   // 真的那支一開跑就把 running 設起來
 const paneSt = { chat: { off: false } }, paneToggle = () => {};
 eval("var UPD = " + src.match(/var UPD = (\{[^\n]*\});/)[1]);
-eval(["UP_SESSION_IDLE_MS", "UP_WU_STATES", "UP_WU_DIR_RE", "UP_SAID_KEY"].map((k) => src.match(new RegExp("^const " + k + " = [^\\n]*;", "m"))[0].replace(/^const /, "var ")).join("\n"));
+eval(["UP_SESSION_IDLE_MS", "UP_RETRY_MS", "UP_WU_STATES", "UP_WU_DIR_RE", "UP_SAID_KEY"].map((k) => src.match(new RegExp("^const " + k + " = [^\\n]*;", "m"))[0].replace(/^const /, "var ")).join("\n"));
 var CS_BOOTED = false, UP_CHECKING = false;
-eval(["upObserve", "upMachineGone", "upWu", "upPlan", "upDoneLine", "upBackupLine", "upRich", "upSayLines", "upSayLine", "upView", "upLocalTurn", "upNow", "upTurnEnded", "upPaint", "acctPaintAcct"].map(fnSrc).join("\n"));
+var UP_LINE_OF = new WeakMap();
+eval(["upObserve", "upMachineGone", "upWu", "upPlan", "upDoneLine", "upBackupLine", "upRich", "upPaintLine", "upSayLines", "upSayLine", "upRelang", "upView", "upLocalTurn", "upNow", "upTurnEnded", "upPaint", "acctPaintAcct"].map(fnSrc).join("\n"));
 eval(["upCheck", "upCloudRecheck", "upInstall"].map((n) => "async " + fnSrc(n)).join("\n"));
 eval(src.match(/^function upRefresh\(\) \{[^\n]*\}$/m)[0]);
 eval([/^\$\("ws-update"\)\.addEventListener\("click", [^\n]*$/m, /^\$\("set-up-btn"\)\.addEventListener\("click", [^\n]*$/m].map((re) => src.match(re)[0]).join("\n"));   // 兩個入口的接線
@@ -75,7 +76,7 @@ ok("③ updater 自己在查(phase checking)也是圓環、狀態字不變", p.s
 p = paint({ ...C, phase: "ready" }, cloud());
 ok("④ app 已下載、沒在下單:狀態字「新版已下載」,連結換成「重新啟動以完成更新」", /up\.row\.ready$/.test(p.line) && p.link === "up.restart" && p.kind === "restart" && !p.dis);
 p = paint({ ...C, phase: "blocked" }, cloud());
-ok("⑤ app 已下載、下單中:「新版已下載 · 結束 Blave 時安裝」,連結是檢查更新(關於列是唯一提到它的地方)", /up\.row\.readyQuit$/.test(p.line) && p.link === "up.check");
+ok("⑤ app 已下載、下單中(0.1.10):狀態字同樣「新版已下載」,連結是「重新啟動以完成更新…」(按了主行程先問)", /up\.row\.ready$/.test(p.line) && p.link === "up.restart…" && p.kind === "restart" && !p.dis);
 const applying = cloud({ report: { workspace_update: { state: "applying", ts: 1 } } });
 p = paint(idle, applying);
 ok("⑥ 雲端換檔中(報告 workspace_update.state = applying):狀態字「更新中…」,檢查更新停用、沒有圓環", /up\.row\.applying$/.test(p.line) && p.link === "up.check" && p.dis && !p.spin);
@@ -86,6 +87,9 @@ ok("⑧ 沒雲端主機:Blave {av} · 已是最新版;沒登入 / 還沒讀到 /
 ok("雲端版號讀不到(舊機器 / api 快取 null):不印「雲端主機 null」", paint(idle, cloud({ cloud: { config_version: null } })).line === 'up.row.app{"av":"0.0.7"} · up.row.latest');
 ok("雲端已知落後而沒在換檔:不寫「已是最新版」(那不是真話),也沒有第四個狀態", paint(idle, cloud({ cloud: { config_version: "2026-09-22-p" } })).line === 'up.row.app{"av":"0.0.7"} · up.row.cloud{"cv":"2026-09-22-p"}'
   && plan(idle, cloud({ cloud: { config_version: "2026-09-22-p" } })).cloudLag === true && plan(idle, cloud({ report: { reconciler: { stopped: { reason: "machine_restart", gated: false } } } })).cloudLag === true);
+ok("雲端主機的 lib 沒有 walk_forward(config_supports_wf false):就算 api 讀不到最新版號(lv null)也算落後——樣本外驗證的〔去更新〕→「檢查更新」才有出口(稽核 P2-5);true / 缺欄位照舊",
+  plan(idle, cloud({ cloud: { latest_config_version: null, config_supports_wf: false } })).cloudLag === true && plan(idle, cloud({ cloud: { latest_config_version: null, config_supports_wf: true } })).cloudLag === false
+  && plan(idle, cloud({ cloud: { latest_config_version: null } })).cloudLag === false && plan(idle, cloud({ cloud: { config_supports_wf: false } }, "stopped")).cloudLag === false);
 ok("安裝失敗:關於列那一句沿用 up.installFailed;查失敗什麼都不說", /up\.installFailed\{"nv":"0\.0\.8"\}$/.test(paint({ ...C, phase: "error", error: "INSTALL_FAILED" }, cloud()).line) && paint({ ...C, phase: "error", error: "CHECK_FAILED" }, cloud()).line === 'up.row.app{"av":"0.0.7"} · up.row.cloud{"cv":"2026-09-24-b"}');
 ok("背景下載 / 暫存中 / 沒有更新來源:關於列不寫狀態字(沒有東西可等)", ["downloading", "staging", "off"].every((ph) => paint({ ...C, phase: ph }, cloud()).line === 'up.row.app{"av":"0.0.7"} · up.row.cloud{"cv":"2026-09-24-b"}'));
 ok("狀態字不換色:upPlan 不回任何 cls,CSS 沒有 .st.up / .st.ok / 兩行版的 id", !("cls" in plan(idle, cloud()).row) && !/\.set-about \.st|set-up-(ver|txt|cver|ctxt|cnote|lbtn|head)|up-dot/.test(css + html + src));
@@ -95,7 +99,19 @@ ok("DOM:關於只有一行 + 一個文字連結;那一行 role=status;#ws-update
 p = paint({ ...C, phase: "ready" }, cloud());
 ok("(b) ready 而且沒在下單:那一格出「重新啟動以完成更新」,可點", p.slot === "up.restart" && p.slotKind === "restart" && !p.slotDis && p.slotAria === "false" && !p.status);
 p = paint({ ...C, phase: "blocked" }, cloud());
-ok("(b) 下單中(blocked):那一格不出(結束 Blave 時自動裝)", p.slot === null && p.slotKind === "");
+ok("(b) 下單中(blocked,0.1.10):那一格照出,字尾接「…」(按了主行程先問、確認後收工再裝),可點", p.slot === "up.restart…" && p.slotKind === "restart" && !p.slotDis);
+{ const pb = plan({ ...C, phase: "blocked" }, cloud()), pr = plan({ ...C, phase: "ready" }, cloud()), pt = plan({ ...C, phase: "blocked" }, cloud(), { localTurn: true }), pe = plan({ ...C, phase: "error", error: "INSTALL_FAILED" }, cloud());
+  ok("upPlan:blocked → slot restart、ask:true;ready → ask:false;回合中 disabled;error → 沒有 slot;blocked 的關於列 link 是 restart、狀態字 up.row.ready",
+    pb.slot.kind === "restart" && pb.slot.ask === true && pr.slot.ask === false && pt.slot.disabled === true && pe.slot === null
+    && pb.link.kind === "restart" && pb.link.ask === true && pb.row.status[0] === "up.row.ready" && !/readyQuit/.test(src)); }
+{ const pr = paint({ ...C, phase: "blocked", restarting: true }, cloud()), plr = plan({ ...C, phase: "ready", restarting: true }, cloud());
+  ok("重新啟動中(主行程 restarting,設計複驗 0.1.10):那一格與關於列的連結都是「重新啟動中…」、停用;不掛 up.busy、沒有「…」以外的字",
+    pr.slot === "up.restarting" && pr.slotKind === "restarting" && pr.slotDis && pr.slotTitle === "" && pr.link === "up.restarting" && pr.kind === "restarting" && pr.dis
+    && plr.slot.kind === "restarting" && plr.link.kind === "restarting" && plan({ ...C, phase: "ready", restarting: true }, applying).slot.kind === "restarting");
+  calls.length = 0; $("ws-update").onclick && $("ws-update").onclick(); $("set-up-btn").onclick && $("set-up-btn").onclick();
+  ok("…按了什麼都不做(不重裝、不查更新)", calls.length === 0);
+  const zhS = fs.readFileSync(path.join(R, "strings.js"), "utf8");
+  ok("…字 up.restarting:zh「重新啟動中…」、en「Restarting…」(U+2026)", /"up\.restarting": "Restarting…"/.test(zhS) && /"up\.restarting": "重新啟動中…"/.test(zhS)); }
 p = paint(idle, applying);
 ok("(c) 雲端換檔中:同一格不可點的「更新中…」(aria-disabled,不是 disabled;is-status;沒有時鐘、沒有百分比)", p.slot === "up.applying" && p.slotKind === "applying" && p.slotAria === "true" && !p.slotDis && p.status && !/\d/.test(p.slot));
 p = paint({ ...C, phase: "ready" }, applying);
@@ -115,6 +131,13 @@ ok("報告的 workspace_update 是不可信輸入:state 不認得 / 不是物件
 (async () => {
   calls.length = 0; paint({ ...C, phase: "ready" }, cloud()); await $("ws-update").onclick(); await new Promise((r) => setImmediate(r));
   ok("(b) 按那一格 = 重開換版(updateInstall),不送任何雲端指令", calls.join() === "install" && sent.length === 0);
+  calls.length = 0; await $("set-up-btn").onclick(); await new Promise((r) => setImmediate(r));
+  ok("關於列的「重新啟動以完成更新」同一條路(updateInstall)", calls.join() === "install");
+  { const realI = window.blave.updateInstall, realS = window.blave.updateState; let reads = 0, threw = false;
+    window.blave.updateInstall = () => Promise.reject(new Error("main threw")); window.blave.updateState = () => { reads++; return Promise.resolve(UP); };
+    try { await upInstall(); } catch (_) { threw = true; }
+    window.blave.updateInstall = realI; window.blave.updateState = realS;
+    ok("主行程那邊拋例外(IPC reject):upInstall 不冒 unhandled rejection、當成沒裝成重讀狀態(稽核 P2-3)", !threw && reads === 1); }
   calls.length = 0; paint(idle, applying); await $("ws-update").onclick();
   ok("(c) 按更新中那一格什麼都不做", calls.length === 0 && sent.length === 0);
   running = true; p = paint({ ...C, phase: "ready" }, cloud()); calls.length = 0; await $("ws-update").onclick(); await $("set-up-btn").onclick();
@@ -154,6 +177,14 @@ ok("報告的 workspace_update 是不可信輸入:state 不認得 / 不是物件
   ok("聊天沒送出去(上一輪還在跑 / 版本被停用):不進更新期間", sent.length === 1 && UPD.session === null && UPD.cloudTurn === false);
   startOk = true; sent.length = 0; running = true; await upCheck(); running = false;
   ok("這台電腦有回合在跑時按檢查更新:重查、刷新,不送(送不出去)", sent.length === 0);
+  { // R4:更新期間裡最後一個回合結束滿 3 分鐘(雲端早該回報了)仍落後 = 上一次沒成功 → 再按檢查更新要重送;還沒滿 3 分鐘照舊不送
+    const lag = cloud({ cloud: { config_version: "2026-09-22-p", latest_config_version: null, config_supports_wf: false } }); cloudSt = lag; TR_BAGS.cloud.st = lag;
+    UPD.session = { startAt: Date.now() - UP_RETRY_MS + 20000, lastTurnAt: Date.now() - UP_RETRY_MS + 20000, fromCv: "2026-09-22-p", nv: null }; UPD.cloudTurn = false; sent.length = 0; await upCheck();
+    const early = sent.length;
+    UPD.session = { startAt: Date.now() - UP_RETRY_MS - 1000, lastTurnAt: Date.now() - UP_RETRY_MS - 1000, fromCv: "2026-09-22-p", nv: null }; UPD.cloudTurn = false; sent.length = 0; await upCheck(); running = false;
+    ok("R4 讀不到最新版號時的更新期間:最後一回合結束未滿 3 分鐘不重送;滿 3 分鐘還落後就重送、開一段新的更新期間(不必等 30 分鐘閒置)",
+      UP_RETRY_MS === 3 * 60000 && early === 0 && sent.length === 1 && sent[0][0] === "up.c.msg" && UPD.session && Date.now() - UPD.session.startAt < 5000);
+    UPD.session = null; UPD.cloudTurn = false; }
   sent.length = 0; cloudSt = cloud({ cloud: { config_version: "2026-09-22-p" }, report: { workspace_update: { state: "applying", ts: 2 } } }); await upCheck();
   ok("主機自己正在換檔(applying)時按檢查更新:不送", sent.length === 0);
   sent.length = 0; cloudSt = cloud({ cloud: { config_version: "2026-09-22-p" } }, "stopped"); await upCheck();
@@ -162,7 +193,7 @@ ok("報告的 workspace_update 是不可信輸入:state 不認得 / 不是物件
     /UPD\.turnCloud = false;[^\n]*\n\s*running = true; sendBtnSync\(\);/.test(fnSrc("submitMessage")) && !/UPD\.done/.test(fnSrc("submitMessage"))
     && /if \(!UPD\.turnCloud && stepWhere\(c\) === "cloud"\) \{ UPD\.turnCloud = true; upPaint\(\); \}\s*busyStep\(c\);/.test(src)
     && /const faulted = !stopped && \(r\.code !== 0 \|\| turnFaulted \|\| turnErrored \|\| !turnGotReply \|\| loggedOut\);/.test(src) && /upTurnEnded\(faulted\);\s*running = false;/.test(src) && !/UPD/.test(fnSrc("busyStep")));
-  ok("接線:關於的連結 = 重新啟動 / 檢查更新;那一格只有 restart 會做事;沒有 upGo / 兩顆鈕 / 每秒重畫 / open-about", /if \(\$\("set-up-btn"\)\.dataset\.kind === "restart"\) upInstall\(\); else upCheck\(\);/.test(src) && /if \(\$\("ws-update"\)\.dataset\.kind === "restart"\) upInstall\(\);/.test(src)
+  ok("接線:關於的連結 = 重新啟動 / 檢查更新;那一格只有 restart 會做事;沒有 upGo / 兩顆鈕 / 每秒重畫 / open-about", /const k = \$\("set-up-btn"\)\.dataset\.kind; if \(k === "restart"\) upInstall\(\); else if \(k === "check"\) upCheck\(\);/.test(src) && /if \(\$\("ws-update"\)\.dataset\.kind === "restart"\) upInstall\(\);/.test(src)
     && !/upGo|upInstallLocal|UP_TICK|upClock|onOpenAbout|doneChatHidden|UP_REPORT_WAIT_MS/.test(src));
   // ── 主機刪掉又重開:落後 / 追上 / 更新期間都是那台的事,清掉 ──
   { const T0 = 1e12, ses = { session: { startAt: T0, lastTurnAt: T0, fromCv: "a", nv: "b" }, cloudTurn: true, lagCv: "a", done: null };
@@ -201,6 +232,12 @@ ok("報告的 workspace_update 是不可信輸入:state 不認得 / 不是物件
     ok("雲端的「查看」:在本機聊天送一句固定的話請這台電腦的 agent 列出那個資料夾(本機回合、帶 viewing env:cloud),不碰雲端 agent", sent.length === 1 && sent[0][0] === 'up.done.viewMsg{"dir":".official-backup/2026-09-22-p-20260924T051200Z/"}' && JSON.stringify(sent[0][1]) === '{"viewing":{"env":"cloud"}}'); }
   LANG = "en"; paint(idle, wu({ ts: 104, replaced_changed: ["a"], backup_dir: ".official-backup/unknown-20260924T051201Z" })); LANG = "zh";
   ok("en 兩句之間補一個空白", last().textContent === 'up.done.cloud{"cv":"2026-09-24-b"} up.done.replaced{"n":"1","dir":".official-backup/unknown-20260924T051201Z"}up.done.view');
+  { // 0.1.11 Windows 真機:切 en 後聊天那則通知還是中文——那一行記著 key 與參數,切語言時照現在的語言重畫(applyStatic → upRelang)
+    const zhLine = msgs()[msgs().length - 2], zhTxt = zhLine.textContent, nMsg = msgs().length; LANG = "en"; upRelang(); const b2 = btnOf(zhLine);
+    ok("切語言:聊天裡已經講過的更新通知照新語言重畫(en 兩句之間的空白出現、「查看」鈕重建且照樣能按);不重複、不多出一則",
+      zhTxt.indexOf(" ") < 0 && zhLine.textContent === zhTxt.replace("}up.done.replaced", "} up.done.replaced") && !!b2 && b2.textContent === "up.done.view" && msgs().length === nMsg);
+    LANG = "zh"; upRelang();
+    ok("切回 zh 也跟著回來;applyStatic 會叫 upRelang", zhLine.textContent === zhTxt && /if \(typeof upRelang === "function"\) upRelang\(\);/.test(fnSrc("applyStatic"))); }
   paint(idle, wu({ ts: 105, replaced_changed: ["a", "b"] }));
   ok("換了檔但沒有備份路徑:不出「查看」那一句(沒有東西可看)", last().textContent === 'up.done.cloud{"cv":"2026-09-24-b"}' && !btnOf(last()));
   const n0 = msgs().length; paint(idle, wu({ ts: 106, outcome: "restart_deferred", reason: "order in flight", replaced_changed: ["a"], backup_dir: ".official-backup/2026-09-22-p-20260924T051202Z" }));
@@ -229,12 +266,20 @@ ok("報告的 workspace_update 是不可信輸入:state 不認得 / 不是物件
   { const S2 = fs.readFileSync(path.join(R, "strings.js"), "utf8"), zhS = S2.slice(S2.indexOf("zh:")), enS = S2.slice(0, S2.indexOf("zh:"));
     const has = (s, k, v) => new RegExp('"' + k.replace(/\./g, "\\.") + '": ' + JSON.stringify(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(s);
     ok("字(§4):關於列七種寫法與連結 zh / en", has(zhS, "up.row.app", "Blave {av}") && has(zhS, "up.row.cloud", "雲端主機 {cv}") && has(zhS, "up.row.cloudOff", "雲端主機（停機）") && has(zhS, "up.row.latest", "已是最新版") && has(zhS, "up.row.ready", "新版已下載")
-      && has(zhS, "up.row.readyQuit", "新版已下載 · 結束 Blave 時安裝") && has(zhS, "up.row.applying", "更新中…") && has(zhS, "up.check", "檢查更新") && has(zhS, "up.restart", "重新啟動以完成更新") && has(zhS, "up.applying", "更新中…") && has(zhS, "tm.updateReady", "重新啟動以完成更新")
-      && has(enS, "up.row.cloud", "Cloud machine {cv}") && has(enS, "up.row.cloudOff", "Cloud machine (stopped)") && has(enS, "up.row.latest", "Up to date") && has(enS, "up.row.readyQuit", "New version downloaded · installs when you quit Blave") && has(enS, "up.restart", "Restart to finish updating") && has(enS, "tm.updateReady", "Restart to finish updating"));
-    ok("字(§3):事後那一行 zh / en", has(zhS, "up.done.cloud", "雲端主機已更新到 {cv}。") && has(zhS, "up.done.cloudRestarted", "雲端主機已更新到 {cv}，下單程式已用新版重新啟動。") && has(zhS, "up.done.replaced", "你改過的 {n} 個官方檔換成了官方版，舊的在 {dir}（{view}）。")
+      && !/"up\.row\.readyQuit"/.test(S2) && has(zhS, "up.row.applying", "更新中…") && has(zhS, "up.check", "檢查更新") && has(zhS, "up.restart", "重新啟動以完成更新") && has(zhS, "up.applying", "更新中…") && has(zhS, "tm.updateReady", "重新啟動以完成更新")
+      && has(enS, "up.row.cloud", "Cloud machine {cv}") && has(enS, "up.row.cloudOff", "Cloud machine (stopped)") && has(enS, "up.row.latest", "Up to date") && has(enS, "up.restart", "Restart to finish updating") && has(enS, "tm.updateReady", "Restart to finish updating"));
+    ok("字(§3):事後那一行 zh / en", has(zhS, "up.done.cloud", "雲端主機已更新到 {cv}。") && has(zhS, "up.done.cloudRestarted", "雲端主機已更新到 {cv}，自動下單已用新版重新啟動。") && has(zhS, "up.done.replaced", "你改過的 {n} 個官方檔換成了官方版，舊的在 {dir}（{view}）。")
       && has(zhS, "up.done.view", "查看") && has(zhS, "up.backup", "Blave 已更新到 {av}。你改過的 {n} 個官方檔換成了官方版，舊的在 {dir}（{view}）。") && has(zhS, "up.backup.open", "開啟資料夾")
-      && has(zhS, "up.done.restartDeferred", "雲端主機的新檔已就位，但下單程式仍在跑舊版；等這筆單完成後再說一次「更新」就會重啟。") && has(enS, "up.done.restartDeferred", "The cloud machine has the new files, but the order program is still on the old code; once this order finishes, say 更新 again and it will restart.") && has(zhS, "up.done.restartFailed", "雲端主機的新檔已就位，但下單程式重新啟動失敗，仍在跑舊版；再說一次「更新」就會再試。") && has(zhS, "up.done.paused", "雲端主機已更新到 {cv}。自動下單仍暫停，按「啟動下單」才會繼續。")
+      && has(zhS, "up.done.restartDeferred", "雲端主機的新檔已就位，但自動下單仍在跑舊版；等這筆單完成後再說一次「更新」就會重啟。") && has(enS, "up.done.restartDeferred", "The cloud machine has the new files, but auto-trading is still on the old code; once this order finishes, say 更新 again and it will restart.") && has(zhS, "up.done.restartFailed", "雲端主機的新檔已就位，但自動下單重新啟動失敗，仍在跑舊版；再說一次「更新」就會再試。") && has(zhS, "up.done.paused", "雲端主機已更新到 {cv}。自動下單仍暫停，按「啟動下單」才會繼續。")
       && has(enS, "up.done.cloud", "Cloud machine updated to {cv}.") && has(enS, "up.done.replaced", "{n} official files you had changed were replaced; the old copies are in {dir} ({view}).") && has(enS, "up.done.view", "view") && has(enS, "up.backup.open", "Open folder"));
+    { // 0.1.11 設計稽核 S1:三句事後那一行講「自動下單」(跟 agent 的回覆句同一組字);restartDeferred 跟兩份 reference 的 restart_deferred 句逐字相同
+      const V = require("vm").runInNewContext(S2.replace(/^const STRINGS/m, "var STRINGS") + "\nSTRINGS"), ref = ["updating.md", "cloud-handoff.md"].map((f) => fs.readFileSync(path.join(R, "..", "..", "references", f), "utf8"));
+      const said = ["up.done.cloudRestarted", "up.done.restartFailed", "up.done.restartDeferred"].flatMap((k) => ["zh", "en"].map((l) => V[l][k]));
+      ok("S1 up.done.cloudRestarted / restartFailed / restartDeferred = 定稿(zh / en),沒有「下單程式」/ order program;restartDeferred 跟 updating.md、cloud-handoff.md 逐字相同",
+        V.en["up.done.cloudRestarted"] === "Cloud machine updated to {cv}; auto-trading restarted on the new version."
+        && V.en["up.done.restartFailed"] === "The cloud machine has the new files, but auto-trading failed to restart and is still on the old code; say 更新 again to retry."
+        && !said.some((x) => /下單程式|order program/.test(x))
+        && ref.every((d) => d.includes("「" + V.zh["up.done.restartDeferred"] + "」 / \"" + V.en["up.done.restartDeferred"] + "\""))); }
     ok("S0–S7 那一套的字全清掉(up.c.* 只剩 up.c.msg;up.chat / up.update / up.latestAt / tm.cloudUpdate* 都不在)", !/"up\.c\.(unreach|stopped|note|noteLong|available|checking|seeChat|needsUpdate|running|runningShort|onCloud|runNote|noReport|done|doneFrom|chatRunning|chatDone)"/.test(S2)
       && !/"up\.(app|latest|latestAt|checking|downloading|downloadingPct|ready|blocked|error|staging|update|updating|chat|installLocal)"|"tm\.cloudUpdate(Stale)?"/.test(S2)); }
 
@@ -363,9 +408,23 @@ ok("分隔線:帳號那一塊、「關於」上面、AI 接入頁列間那三條
 const PO = ["zh", "en"].map((l) => fs.readFileSync(path.join(__dirname, "..", "shell", "i18n", l + ".po"), "utf8"));
 ok("隱私:分類排最後、開關是 role=switch + aria-checked、即時生效(切換後以主行程回的為準)", /data-set-cat="shares"[^>]*><\/button>\s*\n\s*(<!--[\s\S]*?-->\s*\n\s*)?<button[^>]*data-set-cat="priv"[^>]*><\/button>\s*\n\s*<\/nav>/.test(html)
   && /setAttribute\("role", "switch"\)/.test(fnSrc("privPaint")) && /aria-checked/.test(fnSrc("privPaint")) && /PRIV = \(await window\.blave\.telemetrySet\(want\)\) === true/.test(src));
-ok("隱私:會收 6 條(功能那條緊接在里程碑後、0.1.9「卡在哪一步」再接在功能後)、不收 6 條(含「事件紀錄不含 IP 位址」原話);關掉後清單留著、標題與尾句換掉", /PRIV_COLLECT = \["priv\.collect\.1", "priv\.collect\.5", "priv\.collect\.6", "priv\.collect\.2", "priv\.collect\.3", "priv\.collect\.4"\]/.test(src) && /PRIV_NEVER = \[("priv\.never\.[1-6]",? ?){6}\]/.test(src)
+ok("隱私:會收 7 條(功能那條緊接在里程碑後、0.1.9「卡在哪一步」再接在功能後、0.1.10 帳號狀態一併回報的那條排最後)、不收 6 條(含「事件紀錄不含 IP 位址」原話);關掉後清單留著、標題與尾句換掉", /PRIV_COLLECT = \["priv\.collect\.1", "priv\.collect\.5", "priv\.collect\.6", "priv\.collect\.2", "priv\.collect\.3", "priv\.collect\.4", "priv\.collect\.7"\]/.test(src) && /PRIV_NEVER = \[("priv\.never\.[1-6]",? ?){6}\]/.test(src)
   && /msgid "priv\.never\.6"\nmsgstr "事件紀錄不含 IP 位址"/.test(PO[0]) && /msgid "priv\.never\.6"\nmsgstr "Event records contain no IP address"/.test(PO[1])
   && /off \? t\("priv\.collect\.hOff"\) : t\("priv\.collect\.h"\)/.test(src) && /off \? t\("priv\.kept"\) : t\("priv\.fine"\)/.test(src));
+{ // 隱私開關連點(0.1.10 #9-1):上一次還沒回來,後面幾下不送;回來了(成功或丟例外)才解鎖。不用 disabled——焦點會掉到 body
+  const sent = [], answer = [];
+  const env = { PRIV: true, privPaint: () => {}, srSay: () => {}, t: (k) => k, $: () => ({ focus() {} }),
+    window: { blave: { telemetrySet: (v) => { sent.push(v); return new Promise((ok, no) => answer.push({ ok, no })); } } } };
+  const decl = (src.match(/^let PRIV_BUSY = false;$/m) || [""])[0].replace(/^let /, "var ");
+  const toggle = new Function("env", "with (env) { " + decl + "\nasync " + fnSrc("privToggle") + "\nreturn privToggle; }")(env);
+  const p1 = toggle(); toggle(); toggle();
+  ok("隱私開關:連點三下,主行程只收到一次(關)", JSON.stringify(sent) === "[false]");
+  answer[0].ok(false); await p1;
+  const p2 = toggle();
+  ok("隱私開關:回來之後解鎖,下一下照送(開)", env.PRIV === false && JSON.stringify(sent) === "[false,true]");
+  answer[1].no(new Error("ipc")); await p2; toggle();
+  ok("隱私開關:主行程丟例外也解鎖,畫面維持原狀", env.PRIV === false && sent.length === 3);
+  ok("隱私開關:鎖是旗標,不是把開關 disabled(焦點留在開關上)", !/disabled/.test(fnSrc("privToggle"))); }
 { /* 法遵入口(法遵稽核):app 裡本來連一個服務條款 / 隱私權政策的連結都沒有,而隱私權政策 §9.1 還叫人到
      設定 › 隱私 關遙測、拿安裝識別碼。隱私權政策放隱私那一頁、服務條款跟版本資訊放「關於」;兩個都外開瀏覽器、網址帶目前語言。
      **不加同意步驟、不擋畫面**(Wei 還沒決定任何接受流程) */
@@ -409,6 +468,8 @@ ok("隱私:會收那一條寫到 macOS 版本與系統語言;十八個事件逐�
   && /msgid "priv\.collect\.5"\nmsgstr "用了哪些功能：分頁與按鈕的名稱，每天每項記一次，不含裡面的內容"/.test(PO[0]) && /msgid "priv\.collect\.5"\nmsgstr "Which features were used: the names of tabs and buttons, once per day each, never what is inside them"/.test(PO[1])
   && /msgid "priv\.collect\.6"\nmsgstr "卡在哪一步：回合失敗、連不上 AI、策略庫用不了的原因類別，綁卡／儲值提示有沒有出現與按下、回來後能不能用，啟動雲端方案的結果，更新卡在哪一步，第一次收到 AI 回覆；只記類別，不含內容"/.test(PO[0])
   && /msgid "priv\.collect\.6"\nmsgstr "Where things got stuck: the category of a failed turn, a failed AI connection or a blocked library strategy, whether a card or top-up prompt appeared and was clicked and whether your account was ready when you came back, the result of starting a cloud plan, which update step failed, and your first AI reply — categories only, never the content"/.test(PO[1]));
+ok("acct.sub 開通試用那句兼講期限(Wei 核准 0.1.10):zh / en 逐字", /msgid "acct\.sub"\nmsgstr "首次綁卡，\{t\} 天內有 \{q\} TWD 的 AI 額度，電腦版也拿得到 Blave 的資料。"/.test(PO[0])
+  && /msgid "acct\.sub"\nmsgstr "A first-time card gets \{q\} TWD of AI credit and Blave data in the desktop app, both for \{t\} days\."/.test(PO[1]));
 // 例外只有報告分享的掛名二選一(shr.anon):那是公開頁上作者欄真的不出名字,不是在講追蹤資料匿名
 ok("全 app 的字串不出現「匿名 / anonymous」(報告分享的掛名選項 shr.anon 除外);首次告知的 priv.notice* 沒有建", PO.every((x) => !/匿名|anonym/i.test(x.replace(/^#.*$/gm, "").replace(/msgid "shr\.anon"\nmsgstr "[^"]*"/, ""))) && PO.every((x) => !/priv\.notice/.test(x)) && !/telemetryNoticed/.test(src));
 // 設定 › 資料與雲端方案 › 主機運行中那格:主鈕是「切到雲端」(關設定 + 走切換器同一個守門入口),不再外開網頁(Wei:不用前往工作頁了)

@@ -1,7 +1,7 @@
 // shell/updater.js:永遠不自己重啟、下單執行中不安裝、沒有更新來源就整個關掉。
 // 跑法:node tests/check_shell_updater.js
 const fs = require("fs"), path = require("path"), { EventEmitter } = require("events");
-const { createUpdater } = require("../shell/updater.js");
+const { createUpdater, planRestart, shouldAskMove } = require("../shell/updater.js");
 let red = 0; const t = (n, ok) => { console.log((ok ? "PASS  " : "FAIL  ") + n); if (!ok) red++; };
 const tick = () => new Promise((r) => setTimeout(r, 5));
 function fakeAU() { const au = new EventEmitter(); au.calls = []; au.setFeedURL = (o) => au.calls.push(["feed", o]); au.checkForUpdates = () => { au.calls.push(["check"]); return Promise.resolve(); }; au.quitAndInstall = (...a) => au.calls.push(["install", ...a]); return au; }
@@ -54,11 +54,37 @@ function fakeAU() { const au = new EventEmitter(); au.calls = []; au.setFeedURL 
   ({ au, up } = mk({ onState: () => { throw new Error("renderer gone"); } })); up.start();
   t("畫面那邊丟例外不影響更新", (() => { try { au.emit("update-available", { version: "9" }); return up.state().phase === "downloading"; } catch (_) { return false; } })());
 
+  // 0.1.10 §2:ready ↔ blocked 只跟著下單狀態變、沒有事件 → 選單列 5 秒那一輪叫 poll(),phase 跟上次推的不同才推
+  ({ au, up } = mk()); up.start(); trading = true; au.emit("update-downloaded", { version: "0.4.0" }); native.emit("update-downloaded");
+  const n0 = states.length;
+  t("poll:下單中已經推過 blocked,狀態沒變 → 不推", states[n0 - 1].phase === "blocked" && up.poll() === false && states.length === n0);
+  trading = false;
+  t("poll:暫停(trading true → false)→ 剛好推一次,phase ready", up.poll() === true && states.length === n0 + 1 && states[n0].phase === "ready");
+  t("poll:再叫一次 → 不推", up.poll() === false && states.length === n0 + 1);
+  trading = true;
+  t("poll:又開始下單(false → true)→ 推一次,phase blocked", up.poll() === true && states.length === n0 + 2 && states[n0 + 1].phase === "blocked"); trading = false;
+  ({ au, up } = mk()); up.start(); au.emit("update-available", { version: "0.4.0" });
+  const n1 = states.length;
+  t("poll:phase 不是 ready / blocked(下載中、off、idle、error)永遠不推", up.poll() === false && (trading = true, up.poll() === false) && states.length === n1
+    && (() => { const x = mk({ feedUrl: null, autoUpdater: null }); return x.up.poll() === false && states.length === 0; })()); trading = false;
+  // 0.1.10 §0:planRestart 全矩陣(phase × turn × asking × trading)
+  { const phases = ["off", "idle", "checking", "downloading", "staging", "ready", "blocked", "error"], bad = [];
+    for (const phase of phases) for (const turn of [false, true]) for (const asking of [false, true]) for (const trading of [false, true]) {
+      const want = phase !== "ready" && phase !== "blocked" ? "not_ready" : turn ? "busy" : asking ? "asking" : trading ? "confirm" : "install";
+      const got = planRestart({ phase, turn, asking, trading }); if (got !== want) bad.push([phase, turn, asking, trading, got, want].join()); }
+    t("planRestart 全矩陣 8×2×2×2:沒下載好 → not_ready;回合在跑 → busy;已有框 → asking;下單中 → confirm;其餘 → install", bad.length === 0); if (bad.length) console.log(bad.slice(0, 5)); }
+  // 0.1.10 §4:shouldAskMove 全矩陣,六個條件同時成立才問
+  { let hits = 0, bad = 0;
+    for (const platform of ["darwin", "win32"]) for (const packaged of [true, false]) for (const inApps of [true, false]) for (const declined of [true, false]) for (const trading of [true, false]) for (const askedThisRun of [true, false]) {
+      const got = shouldAskMove({ platform, packaged, inApps, declined, trading, askedThisRun }), want = platform === "darwin" && packaged && !inApps && !declined && !trading && !askedThisRun;
+      if (got) hits++; if (got !== want) bad++; }
+    t("shouldAskMove 全矩陣 64 組:只有 darwin、打包版、不在 Applications、沒拒絕過、沒在下單、這次還沒問過,那一組回 true", bad === 0 && hits === 1); }
+
   const src = fs.readFileSync(path.join(__dirname, "..", "shell", "updater.js"), "utf8");
   t("整個檔只有 install() 一處會叫 quitAndInstall(永遠不自己重啟)", (src.match(/quitAndInstall\(/g) || []).length === 1);
   const mainSrc = fs.readFileSync(path.join(__dirname, "..", "shell", "main.js"), "utf8");
   t("main.js:原生 Squirrel 那顆只在 darwin 注入(win32 是 null)", /nativeUpdater: feedUrl && process\.platform === "darwin" \? require\("electron"\)\.autoUpdater : null/.test(fs.readFileSync(path.join(__dirname, "..", "shell", "main.js"), "utf8")));
-  t("main.js:isTrading 走保守判定 tradeMaybeLive;開發版沒有更新來源;安裝 IPC 只收自家頁面", /isTrading: \(\) => !!tradeMaybeLive\(\)/.test(mainSrc) && /const feedUrl = app\.isPackaged \?/.test(mainSrc) && /"update-install", \(e\) => \(!fromOurPage\(e\) \? \{ ok: false, error: "NOT_ALLOWED" \} : activeTurn \|\| turnStarting \? \{ ok: false, error: "TURN_BUSY" \} : updater\(\)\.install\(\)\)/.test(mainSrc));
+  t("main.js:isTrading 走保守判定 tradeMaybeLive;開發版沒有更新來源;安裝 IPC 只收自家頁面", /isTrading: \(\) => !!tradeMaybeLive\(\)/.test(mainSrc) && /const feedUrl = app\.isPackaged \?/.test(mainSrc) && /"update-install", \(e\) => \(!fromOurPage\(e\) \? \{ ok: false, error: "NOT_ALLOWED" \} : restartToUpdate\(\)\)\);/.test(mainSrc));
   t("tmLabels 預設物件就有回合中結束那兩句(畫面還沒交字前按結束也不會是空的)", (() => { const i = mainSrc.indexOf("let tmLabels = {"), j = mainSrc.indexOf("};", i); const d = mainSrc.slice(i, j);
     return /quitTurnTitle: "/.test(d) && /quitTurnBody: "/.test(d); })() && !/tmLabels\.quitTurnTitle \|\|/.test(mainSrc));
   t("關視窗:本機 agent 回合在跑時也只藏起來(同下單中);「背景照常下單」那則只在真的在下單時講",
@@ -80,21 +106,56 @@ function fakeAU() { const au = new EventEmitter(); au.calls = []; au.setFeedURL 
   t("常駐程式的 env 帶 PY_ENV(不把 __pycache__ 寫進 .app)", /BLAVE_AGENT_STATE: path\.join\(BASE, "state"\),\s*\.\.\.PY_ENV/.test(mainSrc));
   t("防回滾:Squirrel 層比版號", /ElectronSquirrelPreventDowngrades: true/.test(cfg));
   t("package.json 版號是嚴格 A.B.C(Squirrel 防降版要求)", /^[0-9]+\.[0-9]+\.[0-9]+$/.test(require("../shell/package.json").version));
-  t("選單列:新版在等的時候選單多一行(圖示旁不加小點),而且會觸發重畫(進 trayKey)", /m\.update \? \[\{ label: tmLabels\.updateReady, enabled: false \}\] : \[\]/.test(mainSrc) && !/\.setTitle\(/.test(mainSrc) && !/cloudUpdateWaiting/.test(mainSrc) && /update: updateWaiting\(\)/.test(mainSrc) && /const key = JSON\.stringify\(\[show, m, [^\n]*m\.update \? tmLabels\.updateReady : ""\]\);/.test(mainSrc));
-  // 覆寫前備份被改過的官方檔:把 main.js 的兩個函式切出來,對臨時目錄真的跑一次
+  t("選單列:新版在等的時候選單多一行(圖示旁不加小點、0.1.10 起可按),而且會觸發重畫(進 trayKey)", /m\.update \? \[\{ label: m\.update\.restarting \? tmLabels\.restarting : tmLabels\.updateReady \+ \(m\.update\.ask && !m\.update\.busy \? "…" : ""\), enabled: !m\.update\.busy, click: /.test(mainSrc) && !/\.setTitle\(/.test(mainSrc) && !/cloudUpdateWaiting/.test(mainSrc) && /update: updateWaiting\(\) \|\| restarting \? \{ ask: !!maybe, busy: !!\(activeTurn \|\| turnStarting \|\| restarting\), restarting: !!restarting \} : null/.test(mainSrc) && /const key = JSON\.stringify\(\[show, m, [^\n]*m\.update \? tmLabels\.updateReady : "", m\.update && m\.update\.restarting \? tmLabels\.restarting : ""\]\);/.test(mainSrc));
+  // 覆寫前備份被改過的官方檔:把 main.js 那一段切出來,對臨時目錄真的跑一次
+  // 0.1.11 Windows 真機:0.1.6 → 0.1.10 說「你改過的 38 個」,其實一個都沒改——比的是新隨包,不是舊官方版
   {
-    const os = require("os"), a0 = mainSrc.indexOf("function listFiles("), b0 = mainSrc.indexOf("const readVersion =");
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "blave-bk-")), REPO = path.join(tmp, "repo"), WS = path.join(tmp, "ws");
+    const os = require("os"), crypto = require("crypto"), a0 = mainSrc.indexOf("function listFiles("), b0 = mainSrc.indexOf("const readVersion =");
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "blave-bk-")), REPO = path.join(tmp, "repo"), WS = path.join(tmp, "ws"), BASE = path.join(tmp, "base"), __dirname = path.join(tmp, "shell");
     const OFFICIAL_DIRS = ["lib"], OFFICIAL_FILES = ["AGENTS.md", "VERSION"];
     const w = (f, c) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, c); };
-    w(path.join(REPO, "lib/data.py"), "new"); w(path.join(REPO, "lib/same.py"), "same"); w(path.join(REPO, "lib/sub/x.py"), "new-x"); w(path.join(REPO, "AGENTS.md"), "rules v2"); w(path.join(REPO, "VERSION"), "2");
-    w(path.join(WS, "lib/data.py"), "agent edited"); w(path.join(WS, "lib/same.py"), "same"); w(path.join(WS, "lib/sub/x.py"), "old-x"); w(path.join(WS, "lib/order_mine.py"), "user's own"); w(path.join(WS, "AGENTS.md"), "rules v1"); w(path.join(WS, "VERSION"), "1");
+    const git = (c) => crypto.createHash("sha1").update("blob " + Buffer.byteLength(c) + "\0").update(c).digest("hex");
     eval(mainSrc.slice(a0, b0).replace(/^const /gm, "var "));
-    const bk = backupChangedOfficial("1-test");
-    const got = bk.saved.slice().sort().join();
-    t("備份:只收內容不同的官方檔(含子目錄),一樣的、用戶自己加的、VERSION 都不收", got === ["AGENTS.md", "lib/data.py", path.join("lib/sub/x.py")].sort().join());
-    t("備份:內容是覆寫前的那一份、放在 workspace/.official-backup/<tag>/", fs.readFileSync(path.join(WS, ".official-backup/1-test/lib/data.py"), "utf8") === "agent edited" && !fs.existsSync(path.join(WS, ".official-backup/1-test/lib/order_mine.py")));
+    t("blobSha = git 的 blob sha(git hash-object 對 \"hello\\n\" 是 ce0136…)", blobSha(Buffer.from("hello\n")) === "ce013625030ba8dba906f756967f9e9ca394464a");
+    const reset = () => { fs.rmSync(tmp, { recursive: true, force: true }); };
+    // ── 舊版(v1)官方檔拷進 workspace,copyOfficial 記下清單;接著出新版(v2)──
+    reset();
+    w(path.join(REPO, "lib/data.py"), "data v1"); w(path.join(REPO, "lib/same.py"), "same"); w(path.join(REPO, "lib/sub/x.py"), "x v1"); w(path.join(REPO, "AGENTS.md"), "rules v1"); w(path.join(REPO, "VERSION"), "1");
+    for (const f of ["lib/data.py", "lib/same.py", "lib/sub/x.py", "AGENTS.md", "VERSION"]) w(path.join(WS, f), fs.readFileSync(path.join(REPO, f)));
+    writeOfficialManifest();
+    let man = {}; try { man = JSON.parse(fs.readFileSync(path.join(BASE, "state/official-manifest.json"), "utf8")).files; } catch (_) { /* 沒寫到那裡:下面那條紅 */ }
+    t("清單:每個官方檔(VERSION 以外)記 git blob sha、路徑一律 /;放在 workspace 外(BASE/state,agent 動不到)", man["lib/sub/x.py"] === git("x v1") && man["AGENTS.md"] === git("rules v1") && !("VERSION" in man) && Object.keys(man).length === 4
+      && !fs.readdirSync(WS).some((f) => /manifest/.test(f)));
+    w(path.join(REPO, "lib/data.py"), "data v2"); w(path.join(REPO, "lib/sub/x.py"), "x v2"); w(path.join(REPO, "AGENTS.md"), "rules v2"); w(path.join(REPO, "VERSION"), "2");
+    w(path.join(WS, "lib/data.py"), "data v1 + agent edit");   // 只有這一支是真的被改過
+    w(path.join(WS, "lib/order_mine.py"), "user's own");
+    let bk = backupChangedOfficial("1-test");
+    t("新版改了、用戶沒動(x.py、AGENTS.md):不算用戶改過、不備份、不報", !bk.saved.includes(path.join("lib", "sub", "x.py")) && !bk.saved.includes("AGENTS.md") && !fs.existsSync(path.join(WS, ".official-backup/1-test/AGENTS.md")));
+    t("用戶真的改過(data.py):備份、要報;內容是覆寫前那一份;用戶自己加的檔、VERSION、跟新版一樣的都不碰",
+      JSON.stringify(bk.saved) === JSON.stringify([path.join("lib", "data.py")]) && fs.readFileSync(path.join(WS, ".official-backup/1-test/lib/data.py"), "utf8") === "data v1 + agent edit" && !fs.existsSync(path.join(WS, ".official-backup/1-test/lib/order_mine.py")));
+    // ── 0.1.10 以前拷的 workspace:沒有清單,認 git 歷史(official-known.json)──
+    reset();
+    w(path.join(REPO, "lib/data.py"), "data v2"); w(path.join(REPO, "AGENTS.md"), "rules v2"); w(path.join(REPO, "VERSION"), "2");
+    w(path.join(WS, "lib/data.py"), "data v1"); w(path.join(WS, "AGENTS.md"), "rules v1 edited by me");
+    w(path.join(__dirname, "official-known.json"), JSON.stringify({ paths: { "lib/data.py": [git("data v0"), git("data v1")], "AGENTS.md": [git("rules v1")] } }));
+    bk = backupChangedOfficial("2-test");
+    t("沒有清單(0.1.10 以前拷的):內容是歷史上某一版官方檔 → 不報;不是任何一版 → 備份、要報", JSON.stringify(bk.saved) === JSON.stringify(["AGENTS.md"]));
+    w(path.join(WS, "lib/data.py"), "data v1\r\n"); w(path.join(__dirname, "official-known.json"), JSON.stringify({ paths: { "lib/data.py": [git("data v1\n")] } })); w(path.join(WS, "AGENTS.md"), "rules v2");
+    bk = backupChangedOfficial("3-test");
+    t("Windows 換成 CRLF 的官方檔:轉回 LF 比對也認得", bk.saved.length === 0);
+    fs.rmSync(path.join(__dirname, "official-known.json")); bk = backupChangedOfficial("4-test");
+    t("清單與歷史表都讀不到:寧可多報(備份),不吞改動", JSON.stringify(bk.saved) === JSON.stringify([path.join("lib", "data.py")]));
+    reset();
     t("備份失敗就不覆寫(try 裡備份在 copyOfficial 之前)", mainSrc.indexOf("backupChangedOfficial(`") < mainSrc.indexOf("copyOfficial();", mainSrc.indexOf("backupChangedOfficial(`")));
+    t("copyOfficial:官方檔拷完、寫 VERSION 之前記下清單(清單記不下來不擋更新)",
+      /for \(const f of OFFICIAL_FILES\) \{ if \(f === "VERSION"\) writeOfficialManifest\(\); fs\.cpSync\(path\.join\(REPO, f\), path\.join\(WS, f\)\); \}/.test(mainSrc)
+      && /catch \(e\) \{ console\.error\("\[update\] official manifest not written: "/.test(mainSrc));
+  }
+  { // 真的歷史表:凍結、打包進 app;兩次真機誤報的檔都認得
+    const K = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "shell", "official-known.json"), "utf8")).paths, has = (p, h) => Array.isArray(K[p]) && K[p].includes(h);
+    t("official-known.json:Windows 0.1.6 → 0.1.10 抽查的三支(0.1.6 原檔)都認得", has("lib/strategy.py", "1fcad5c414f5dccfd187e776e00b749176bda89c") && has("lib/venue.py", "4c7e527cc4ce9e45787d0d8062ca8280b2ff35e3") && has("references/billing.md", "013c22136b48ee80760b8e440f6ab782c1ea4cca"));
+    t("official-known.json:Wei 的 Mac 0.1.9 → 0.1.10 說改過的 2 支(0.1.9 原檔)也認得", has("AGENTS.md", "b5398d1a0238e28890dc1318244e795dd0b19fa2") && has("references/portfolio-steps.md", "218868e24854885d6a50be6805c00396861b7db8"));
+    t("official-known.json 打包進 app(electron-builder files)", /"official-known\.json"/.test(cfg));
   }
   console.log(red ? red + " 紅" : "ALL PASS"); process.exit(red ? 1 : 0);
 })();

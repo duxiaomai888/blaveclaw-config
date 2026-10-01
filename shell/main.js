@@ -199,9 +199,10 @@ async function saveConnection(choice) {
   const saved = connStore().save({ kind, path: agentPath, email: choice && choice.email });
   if (!saved) return false;
   tm().track("connect_done", { kind: saved.kind });
+  accountStatus();   // 換了 AI:現況立刻帶給 api(提醒信 K 型以它為準;沒登入就不打)
   return true;
 }
-const clearConnection = () => connStore().clear();
+const clearConnection = () => { const r = connStore().clear(); accountStatus(); return r; };
 const loadConnection = () => connStore().load();
 
 // ── 使用追蹤(telemetry.js:十八個事件、屬性只有列舉、沒有自由文字的入口;設定裡可關)──
@@ -258,7 +259,11 @@ function updater() {
     nativeUpdater: feedUrl && process.platform === "darwin" ? require("electron").autoUpdater : null,
     feedUrl, currentVersion: app.getVersion(),
     isTrading: () => !!tradeMaybeLive(),   // 保守判定:可能還在下單就不裝
-    onState: (st) => { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send("update-state", { ...st, backup: _officialBackup }); },
+    onState: (st) => {
+      for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send("update-state", { ...st, backup: _officialBackup, restarting: !!restarting });
+      // 已經為了更新收工、交給 quitAndInstall 之後 Squirrel 才失敗(它是 setImmediate 排的,restartToUpdate 早就回了):改走結束 app(稽核 P1-2)
+      if (restarting === "installing" && st.phase === "error") app.quit();
+    },
     log: (m) => console.error("[updater] " + m),
     onFail: (stage) => tm().track("update_failed", { stage }),
   });
@@ -573,6 +578,7 @@ async function startOAuth(lang) {
   lastAcct = null;                    // 可能換了一個帳號:上一個帳號的「含不含資料」不能沿用
   if (_balance) _balance.reset();     // 餘額也是
   libCache = null;                    // 同理:策略庫的 purchased / is_owner 是帳號的
+  accountStatus();                    // 登入完成就把 app 的現況(使用事件開關、連的 AI)帶給 api,不等畫面去問
   // 授權是在瀏覽器完成的,焦點還在那邊 —— 自己回到前景,不要讓用戶去找視窗。
   app.focus({ steal: true });
   return { ok: true };
@@ -653,7 +659,7 @@ function copyOfficial() {
   for (const d of OFFICIAL_DIRS)
     fs.cpSync(path.join(REPO, d), path.join(WS, d), { recursive: true });
   // VERSION 必須最後寫(OFFICIAL_FILES 的最後一項):前面任何一步中途失敗,workspace 的版號還是舊的,下次啟動會整個重來
-  for (const f of OFFICIAL_FILES) fs.cpSync(path.join(REPO, f), path.join(WS, f));
+  for (const f of OFFICIAL_FILES) { if (f === "VERSION") writeOfficialManifest(); fs.cpSync(path.join(REPO, f), path.join(WS, f)); }
 }
 /* 覆寫之前,把「workspace 裡跟隨包不一樣的官方檔」備份起來(Wei 2026-09-21:覆寫,但先備份被改過的檔)。
    電腦版的官方檔跟著 app 走(一包一個版號),所以更新一定覆寫;但 agent 或用戶可能改過 lib/——那份改動不能無聲消失。
@@ -667,14 +673,47 @@ function listFiles(root, rel = "") {
   }
   return out;
 }
-function backupChangedOfficial(tag) {
-  const files = [...OFFICIAL_FILES];
+function officialList() {
+  const files = OFFICIAL_FILES.filter((f) => f !== "VERSION");
   for (const d of OFFICIAL_DIRS) if (fs.existsSync(path.join(REPO, d))) files.push(...listFiles(REPO, d));
-  const dest = path.join(WS, ".official-backup", tag), saved = [];
-  for (const f of files) {
-    if (f === "VERSION") continue;
+  return files;
+}
+/* 「用戶改過」的基準是**舊的官方版**,不是新隨包(0.1.11 Windows 真機:0.1.6 → 0.1.10 把新版改到的 38 個檔全說成「你改過的」)。
+   舊的官方版從兩處認,任一處認得就是原封不動的官方檔:
+   ① state/official-manifest.json:copyOfficial 每次拷完記下的 {路徑: git blob sha}(0.1.11 起)——放在 workspace 外,agent 動不到;
+   ② shell/official-known.json:0.1.10 以前拷進去的沒有 ①,改認這條路徑在 git 歷史裡出現過的每一版(凍結在 0.1.11 之前,
+      跟雲端 manager/update_workspace.py 的 history() 同一個判準)。
+   hash 用 git 的 blob sha;Windows 上被轉成 CRLF 的檔多比一次轉回 LF 的 */
+const OFFICIAL_MANIFEST = path.join(BASE, "state", "official-manifest.json");
+const OFFICIAL_KNOWN = path.join(__dirname, "official-known.json");
+const blobSha = (buf) => crypto.createHash("sha1").update(`blob ${buf.length}\0`).update(buf).digest("hex");
+const relKey = (f) => f.split(path.sep).join("/");
+function readJsonObj(p) { try { const v = JSON.parse(fs.readFileSync(p, "utf8")); return v && typeof v === "object" && !Array.isArray(v) ? v : null; } catch (_) { return null; } }
+function officialKnown() {
+  const m = readJsonObj(OFFICIAL_MANIFEST), k = readJsonObj(OFFICIAL_KNOWN);
+  const had = (m && m.files && typeof m.files === "object") ? m.files : {}, hist = (k && k.paths && typeof k.paths === "object") ? k.paths : {};
+  return (f, buf) => {
+    const key = relKey(f), shas = [blobSha(buf)];
+    if (buf.includes(13)) shas.push(blobSha(Buffer.from(buf.toString("latin1").replace(/\r\n/g, "\n"), "latin1")));
+    return shas.some((h) => had[key] === h || (Array.isArray(hist[key]) && hist[key].includes(h)));
+  };
+}
+// 拷完官方檔、寫 VERSION 之前記下這一版每個檔的 blob sha(下次更新時的「舊官方版」)。記不下來不擋更新:只是退回 ② 的判準
+function writeOfficialManifest() {
+  try {
+    const files = {};
+    for (const f of officialList()) files[relKey(f)] = blobSha(fs.readFileSync(path.join(REPO, f)));
+    fs.mkdirSync(path.dirname(OFFICIAL_MANIFEST), { recursive: true });
+    fs.writeFileSync(OFFICIAL_MANIFEST + ".tmp", JSON.stringify({ files }));
+    fs.renameSync(OFFICIAL_MANIFEST + ".tmp", OFFICIAL_MANIFEST);
+  } catch (e) { console.error("[update] official manifest not written: " + (e && e.message)); }
+}
+function backupChangedOfficial(tag) {
+  const known = officialKnown(), dest = path.join(WS, ".official-backup", tag), saved = [];
+  for (const f of officialList()) {
     let mine; try { mine = fs.readFileSync(path.join(WS, f)); } catch (_) { continue; }   // workspace 沒有這個檔:沒東西可備份
     if (mine.equals(fs.readFileSync(path.join(REPO, f)))) continue;
+    if (known(f, mine)) continue;   // 舊的官方版原封不動:是新版改了它,不是用戶改的——直接覆寫,不備份也不報
     fs.mkdirSync(path.dirname(path.join(dest, f)), { recursive: true });
     fs.writeFileSync(path.join(dest, f), mine); saved.push(f);
   }
@@ -860,7 +899,7 @@ function stratSelfOrderingAny() {
 /* 側欄順序 = 最近被人或 agent 動過的在上面:程式碼、明確回測(stats 的 Generated At,秒)、參數掃描。
    不看 stats.json 的 mtime——上線中的策略每根 K 的 live tick 都重寫它(Generated At 不動),那一支每小時跳回第一,
    重開 app、切語言重畫時順序就跟著變。舊 stats 沒有 Generated At 才退回檔案時間;同時間照資料夾名,順序才固定 */
-const stratTouchedAt = (x) => Math.max(x.codeMtime || 0, x.scanMtime || 0, x.generatedAt ? x.generatedAt * 1000 : x.statsMtime || 0);
+const stratTouchedAt = (x) => Math.max(x.codeMtime || 0, x.scanMtime || 0, x.wfMtime || 0, x.generatedAt ? x.generatedAt * 1000 : x.statsMtime || 0);
 const stratOrder = (a, b) => stratTouchedAt(b) - stratTouchedAt(a) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 function listStrategies() {
   return stratNames().map((name) => {
@@ -873,9 +912,12 @@ function listStrategies() {
     // scan.json 只影響「最近動過」的時間(renderer 靠 mtime 變了才重載):只掃參數、沒重跑回測的那一輪也要算動過
     let scMtime = 0;
     try { scMtime = fs.statSync(path.join(dir, "scan.json")).mtimeMs; } catch (_) {}
-    const touched = Math.max(mtime, sMtime, scMtime);
+    // wf.json(樣本外驗證)同理;它不出結果卡(web 也沒有),只讓開著的那支原地重畫(renderer/app.js stratRefresh)
+    let wfMtime = 0;
+    try { wfMtime = fs.statSync(path.join(dir, "wf.json")).mtimeMs; } catch (_) {}
+    const touched = Math.max(mtime, sMtime, scMtime, wfMtime);
     // 三個 mtime 分開交出去:聊天結果卡要分得出這一輪動的是程式碼、回測還是掃描(renderer/results.js)
-    const parts = { codeMtime: mtime, statsMtime: sMtime, scanMtime: scMtime, version: stratVersionNow(dir) };
+    const parts = { codeMtime: mtime, statsMtime: sMtime, scanMtime: scMtime, wfMtime, version: stratVersionNow(dir) };
     const hit = stratCache.get(name);
     if (hit && hit.mtime === sMtime && hit.cMtime === mtime) return { ...hit.summary, ...parts, mtime: touched };
     let displayName = null;
@@ -907,16 +949,40 @@ function stratVersionNow(dir) {
   return v;
 }
 
+/* agent 寫的結果檔(scan.json / wf.json):只讀一般檔(symlink 不跟)、有大小上限(同 RES_FILE_MAX / RPT_BYTES_MAX 的 2MB)——
+   過大的檔會在主行程同步讀、卡住整個 app。沒有 / 寫到一半 / 過大 / 不是物件 → null,renderer 畫空狀態(稽核 P2-6)。
+   實際大小:scan 40×40 格約 30KB;wf 上限 1000 輪 × 約 225B + 曲線 4000 點,約 350KB */
+const RESULT_JSON_MAX = 2 * 1024 * 1024;
+/* 開檔就不跟 symlink(O_NOFOLLOW)、不在 FIFO 上卡住(O_NONBLOCK),檢查對的是「開到的那一個檔」(fstat fd,不是先 lstat 路徑再另外讀——
+   兩步之間可以被換成 symlink / FIFO / 還在長大的檔,複驗 P2-R5),讀的時候最多讀上限 + 1 byte,讀超過就當沒有。
+   Windows 沒有 O_NOFOLLOW:退回先 lstat 擋 symlink(那一步之後的換檔在 Windows 上擋不到,威脅模型同樣只剩同 user 的程式) */
+function readResultJson(p) {
+  const C = fs.constants;
+  let fd = null;
+  try {
+    if (C.O_NOFOLLOW === undefined && !fs.lstatSync(p).isFile()) return null;
+    fd = fs.openSync(p, C.O_RDONLY | (C.O_NOFOLLOW || 0) | (C.O_NONBLOCK || 0));
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > RESULT_JSON_MAX) return null;
+    const buf = Buffer.alloc(Math.min(st.size, RESULT_JSON_MAX) + 1);
+    let n = 0, r = 0;
+    while (n < buf.length && (r = fs.readSync(fd, buf, n, buf.length - n, null)) > 0) n += r;
+    if (n >= buf.length) return null;   // 比 fstat 說的還長 = 讀的時候還在長大(或被換掉):不收
+    const v = JSON.parse(buf.toString("utf8", 0, n));
+    return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch (_) { return null; }
+  finally { if (fd !== null) try { fs.closeSync(fd); } catch (_) { /* 關不掉也不影響結果 */ } }
+}
 function loadStrategy(name) {
   if (!stratNames().includes(name)) return null;
   const dir = path.join(STRAT_DIR(), name);
-  let stats = null, scan = null, code = "";
+  let stats = null, code = "";
   try { stats = JSON.parse(fs.readFileSync(path.join(dir, "stats.json"), "utf8")); } catch (_) {}
-  // 參數掃描(lib/param_scan.write_scan 的 scan.json):沒掃過 / 寫到一半 / 不是物件 → null,renderer 畫空狀態
-  try { scan = JSON.parse(fs.readFileSync(path.join(dir, "scan.json"), "utf8")); } catch (_) {}
-  if (!scan || typeof scan !== "object" || Array.isArray(scan)) scan = null;
+  // 參數掃描(lib/param_scan.write_scan 的 scan.json)與樣本外驗證(lib/walk_forward.run_walk_forward 的 wf.json):
+  // 逐欄檢查在 renderer/report-robust.js 的 sanitizeScan / report-wf.js 的 sanitizeWf
+  const scan = readResultJson(path.join(dir, "scan.json")), wf = readResultJson(path.join(dir, "wf.json"));
   try { code = fs.readFileSync(path.join(dir, "strategy.py"), "utf8"); } catch (_) {}
-  return { name, stats, scan, code, dataSources: stratDataSources(dir), versions: stratVersions(dir), ...stratMeta(code), exports: stratExports(dir, code), cryptoKline: stratUsesKline(dir) };
+  return { name, stats, scan, wf, code, dataSources: stratDataSources(dir), versions: stratVersions(dir), ...stratMeta(code), exports: stratExports(dir, code), cryptoKline: stratUsesKline(dir) };
 }
 /* 轉出檔(references/{xq-xs,multicharts-powerlanguage,tradingview-pine}.md 存的三個固定檔名)。
    讀檔規則同 runtime `_read_export`:regular file、≤256KB;讀不到那一份就當沒有(不猜、不報錯)。
@@ -1167,7 +1233,8 @@ function listSessions() {
       FROM (SELECT session_id, MAX(created_at) AS last FROM turns
             WHERE session_id LIKE 'desktop-%' GROUP BY session_id) s
       ORDER BY s.last DESC LIMIT 200`).all()
-      .map((r) => ({ id: r.id, last: r.last, title: String(r.title || "").slice(0, 120) }));
+      // 不截 120:固定觸發句(樣本外驗證 en 約 490 字)要整句才比對得到摘要,截斷改到 renderer 摘要之後(csRow);仍留上限
+      .map((r) => ({ id: r.id, last: r.last, title: String(r.title || "").slice(0, 4000) }));
   } catch (_) { return []; } finally { db.close(); }
 }
 function loadSession(id) {
@@ -1658,11 +1725,16 @@ const BLAVE_NAMES = {
 const BLAVE_STRENGTH = [/fable/, /opus/, /sonnet/, /haiku/, /deepseek.*pro/, /deepseek.*flash/];
 /* 帳號能不能用 Blave AI(綁卡流程用)。回 api 的 account_status 原樣,或 null(沒 token / 打不到 /
    舊 api)。null 時 renderer 不猜——沿用「沒額度 → 儲值」那組舊文案。 */
+let btSeen = false;
 async function accountStatus() {
   const acct = loadToken();
   if (!acct) return null;
   try {
-    const r = await getJSON(`${API_BASE}/openclaw/proxy/v1/account_status`, { "x-api-key": `proxy-${acct}` });
+    // 順帶帶上 app 的現況(使用事件開關、連的是哪個 AI;見 telemetry.js statusHeaders)——提醒信靠它尊重「關掉」
+    const conn = loadConnection(), on = tm().isEnabled(), T = require("./telemetry");
+    if (on && !btSeen) btSeen = T.anyBacktest(STRAT_DIR());   // 回測過就不會變回沒有:找到一次之後不再掃
+    const state = T.statusHeaders(on, conn && conn.kind, btSeen);
+    const r = await getJSON(`${API_BASE}/openclaw/proxy/v1/account_status`, { "x-api-key": `proxy-${acct}`, ...state });
     if (r.status !== 200) return null;
     const b = r.body && (r.body.data || r.body);
     if (!(b && typeof b.can_run === "boolean")) return null;
@@ -1984,7 +2056,30 @@ function agentRules() {
   return _agentRules;
 }
 function tradeStartIfReady() {
-  try { if (fs.existsSync(VENV_PY) && fs.existsSync(WS)) { tradeHost().start(); binanceLink().start(); } } catch (e) { console.error("[trade] start failed", e && e.message); }
+  try {
+    if (fs.existsSync(VENV_PY) && fs.existsSync(WS)) { tradeHost().start(); binanceLink().start(); return; }
+    // .app 換了位置(移到「應用程式」、改名、從 DMG 拖出來)之後 venv 的 python 是斷掉的連結:以前要等用戶送第一句話(ensure-engine)才修,
+    // 這段期間 daemon 不在、交易頁講不出狀態。開機就修一次、修好再起(稽核 0.1.10 P2-4);只試一次,修不好留給送訊息那條路
+    if (!venvRepairTried && fs.existsSync(WS) && venvLinkBroken()) {
+      venvRepairTried = true;
+      ensureEngineShared(null).then(() => { if (fs.existsSync(VENV_PY)) tradeStartIfReady(); }, (e) => console.error("[trade] venv repair failed", e && e.message));
+    }
+  } catch (e) { console.error("[trade] start failed", e && e.message); }
+}
+let venvRepairTried = false;
+function venvLinkBroken() {
+  if (WIN) return false;   // Windows 的 venv 沒有連結(Scripts\python.exe 是 launcher)
+  try { return fs.lstatSync(VENV_PY).isSymbolicLink() && !fs.existsSync(VENV_PY); } catch (_) { return false; }
+}
+/* 同一時間只跑一份 ensureEngine:開機修 venv 跟送第一句話的 ensure-engine 可能撞在一起(兩支 `-m venv` / pip 搶同一個資料夾)。
+   後到的共用先到的那一份;進度字轉給所有在等的畫面 */
+let _engineRun = null;
+const _engineReports = new Set();
+function ensureEngineShared(report) {
+  if (report) _engineReports.add(report);
+  if (!_engineRun) _engineRun = ensureEngine((k) => { for (const f of _engineReports) { try { f(k); } catch (_) { /* 視窗關了 */ } } })
+    .finally(() => { _engineRun = null; _engineReports.clear(); });
+  return _engineRun;
 }
 /* Binance 真錢連接(binance_link.js)。金鑰只從 renderer 的表單經過這裡一次:查過權限 → 用 trusted 的路交給 daemon 寫進 workspace 的 .env。
    這裡不 log 金鑰、不另存;落地的 state 檔只有檢查結果與當時的對外 IP。my_ip 要帳號 token(沒登入 Blave 的人查不到 IP,表單照樣能用)。 */
@@ -2324,7 +2419,7 @@ app.whenReady().then(() => {
   handle("ensure-engine", (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     // 引擎裝好(或本來就在)之後才起本機常駐程式
-    return ensureEngine((t) => win.webContents.send("engine-progress", t)).then((r) => { tradeStartIfReady(); return r; });
+    return ensureEngineShared((t) => { if (!win.isDestroyed()) win.webContents.send("engine-progress", t); }).then((r) => { tradeStartIfReady(); return r; });
   });
   // app.getLocale() 是**系統**語系(macOS 偏好設定),不吃 LANG 環境變數。
   // BLAVE_LANG 是覆蓋用的:開發要看英文版、或用戶的系統是中文但想用英文介面。
@@ -2474,16 +2569,17 @@ app.whenReady().then(() => {
     return binanceLink().connect(a.apiKey, a.secret);
   });
   handle("min-version-state", () => minGate().state());
-  handle("update-state", () => ({ ...updater().state(), backup: _officialBackup }));
+  handle("update-state", () => ({ ...updater().state(), backup: _officialBackup, restarting: !!restarting }));
   ipcMain.handle("update-check", (e) => (fromOurPage(e) ? updater().check() : false));
-  // 本機有 agent 回合在跑(可能正在更新雲端):不重開,重開會把它斷掉(畫面那一道之外再擋一次)
-  ipcMain.handle("update-install", (e) => (!fromOurPage(e) ? { ok: false, error: "NOT_ALLOWED" } : activeTurn || turnStarting ? { ok: false, error: "TURN_BUSY" } : updater().install()));
+  // 聊天那一格 / 關於列按的:走 restartToUpdate(回合在跑不重開、下單中先問再收工)
+  ipcMain.handle("update-install", (e) => (!fromOurPage(e) ? { ok: false, error: "NOT_ALLOWED" } : restartToUpdate()));
   // 換版時備份的資料夾:在 Finder 裡選起來。路徑由主行程自己算(畫面不交路徑),沒有備份就什麼都不做
   handle("update-show-backup", () => { if (!_officialBackup) return false; shell.showItemInFolder(path.join(WS, _officialBackup.dir)); return true; }, false);
   ipcMain.handle("telemetry-get", (e) => (fromOurPage(e) ? tm().isEnabled() : null));
   // 安裝識別碼:用戶來信要求刪除使用資料時要附的那一組(隱私權政策)。追蹤關掉也照給——關掉之前送出的紀錄還在
   handle("telemetry-install-id", () => tm().installId());
-  ipcMain.handle("telemetry-set", (e, on) => { if (!fromOurPage(e)) return false; tm().setEnabled(on === true); return tm().isEnabled(); });
+  // 切換的當下打一次 account_status:它帶著開關狀態,api 的提醒信立刻知道(沒登入就不打)
+  ipcMain.handle("telemetry-set", (e, on) => { if (!fromOurPage(e)) return false; tm().setEnabled(on === true); accountStatus(); return tm().isEnabled(); });
   // 功能被使用(renderer 的 trackFeature):name 由 telemetry.js 對 feature_used 白名單驗,renderer 給的字不可信、不在表上就整則不送
   ipcMain.on("track-feature", (e, name) => { if (fromOurPage(e)) tm().track("feature_used", { name }); });
   // 卡在哪一步(renderer 的 trackEvent):事件要在 FROM_RENDERER 上,屬性值再由 telemetry.js 對列舉驗
@@ -2548,7 +2644,7 @@ app.whenReady().then(() => {
   handle("stop-turn", () => stopTurn(), false);
   ipcMain.handle("send-message", async (e, payload) => {
     if (!fromOurPage(e)) return { busy: true };   // 會 spawn agent、花 AI 額度:只收自家頁面
-    if (activeTurn || turnStarting) return { busy: true };
+    if (activeTurn || turnStarting || restarting) return { busy: true };   // 更新重開收工中:開了也會被砍掉
     const win = BrowserWindow.fromWebContents(e.sender);
     // 使用追蹤「上雲端運行」:只認「送上雲端」確認框送的那句(payload.handoff === "up";拉回不算),而且旗標要開——關著時畫面到不了那條路,標記也不認
     const cloudUp = cloudHandoffOn() && payload && payload.handoff === "up";
@@ -2578,6 +2674,8 @@ app.whenReady().then(() => {
     if (labels.lang === "zh" || labels.lang === "en") uiLang = labels.lang;   // 只拿來組官網網址的語言段:白名單兩個值
     startStep("app menu", appMenuSync);
     startStep("tray", traySync);
+    // 搬到「應用程式」那一問:第一次拿到畫面的字才問(中文用戶不先看到英文),一次啟動只在這一刻判一次
+    if (!moveChecked) { moveChecked = true; startStep("move to apps", () => { askMoveToApps().catch((err) => console.error("[move] " + ((err && err.message) || err))); }); }
   });
   createWindow();
   startStep("app menu", appMenuSync);
@@ -2594,6 +2692,7 @@ app.whenReady().then(() => {
   app.on("activate", () => showMain());   // 點 Dock:視窗被紅燈收起來的話把它叫回來
   startStep("tray", trayStart);
   startStep("telemetry", () => tm().start());
+  startStep("app state", () => { accountStatus(); });   // 已登入就補報一次現況:關掉開關之後沒再用的人,下次開 app 就送到(沒登入不打)
   startStep("updater", () => updater().start());
   startStep("min version gate", () => minGate().start());
 });
@@ -2621,6 +2720,15 @@ const MENU_EN = { menuAbout: "About Blave", menuServices: "Services", menuHide: 
   menuFullEnter: "Enter Full Screen", menuFullExit: "Exit Full Screen", menuWindow: "Window", menuMinimize: "Minimize", menuZoom: "Zoom",
   menuFront: "Bring All to Front", menuHelp: "Help", menuSite: "Blave Website" };
 let tray = null, trayTimer = null, quitConfirmed = false, quitAsking = false, hiddenSaid = false, lastVenue = null, trayKey = "";
+/* 為了更新而重開(restartToUpdate)確認之後的那一段:null | "stopping"(收工中,最多 11 秒)| "installing"(已交給 quitAndInstall)。
+   stopping 期間:入口再按不跳第二個框、選單列那一行停用、不開新回合、紅燈只收視窗、Cmd+Q 等它自己結束(稽核 0.1.10 P1-1 / P2-8) */
+let restarting = null;
+/* 設 restarting 一律走這支:狀態一變就推給畫面(聊天那一格、關於列換「重新啟動中…」)並重建選單列,不等 5 秒那一輪 */
+function setRestarting(v) {
+  restarting = v;
+  try { const st = { ...updater().state(), backup: _officialBackup, restarting: !!v }; for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send("update-state", st); } catch (_) { /* 畫面壞掉不擋重開 */ }
+  startStep("tray", traySync);
+}
 let tmLabels = { running: "Auto trading is running", paperVenue: "Paper trading", pause: "Pause trading (keep positions)", open: "Open Blave", quit: "Quit Blave…",
   notifTitle: "Trading paused", notifBody: "Positions were not touched.", pauseFail: "The pause command didn’t go through. Trading may still be running.",
   pauseUnknown: "The pause command was sent, but this computer hasn’t reported the result yet. Check the status on this page.",
@@ -2628,7 +2736,8 @@ let tmLabels = { running: "Auto trading is running", paperVenue: "Paper trading"
   // 畫面還沒交字之前就按結束:回合中那一道也要有字(不然 message 退回下單那句、detail 是空的)
   quitTurnTitle: "The agent is still replying", quitTurnBody: "Quitting Blave now cuts off this turn, including any cloud update in progress. It's safer to wait until it finishes.",
   hidden: WIN ? "Blave is still running in the system tray." : "Blave is still running in the menu bar.",
-  updateReady: "Restart to finish updating",
+  updateReady: "Restart to finish updating", restarting: "Restarting…",
+  updateBody: "After the restart, this computer places no more orders and closes nothing; positions stay at {venue}. Press Start trading to resume.",
   ev_halt: "Trading was paused automatically", ev_halt_n: "No new positions are opened. Open Blave to check.",
   ev_order_error: "Order failed", ev_order_error_n: "The exchange rejected an order. Open Blave to check.",
   ev_execution_interrupted: "Last execution was interrupted", ev_execution_interrupted_n: "A fill may be missing from the ledger. Check positions before restarting.",
@@ -2642,8 +2751,10 @@ let tmLabels = { running: "Auto trading is running", paperVenue: "Paper trading"
   stLocal: "", stCloud: "", stOn: "", stPaused: "", stUnknown: "", stMayTrade: "", stNotStarted: "", moneyPaper: "", moneyReal: "",
   stLocalOnly: "", noAccount: "", runningZ: "",   // 選單列這台電腦那一行沒在下單也講(0.1.9):「這台電腦：還沒連接交易所」、沒設金額的那一態
   br_captchaTitle: "", br_captcha: "",   // 內建瀏覽器:搜尋要用戶過驗證(browserNotify);空的 = 還沒交字 = 不發
+  moveTitle: "", moveBody: "", moveGo: "", moveNo: "",   // 搬到「應用程式」那一問(askMoveToApps):空的 = 還沒交字 = 不問
   pauseLocal: "", quitCloudNote: "", notifPrefixLocal: "", notifPrefixCloud: "", ...Object.fromEntries(Object.keys(MENU_EN).map((k) => [k, ""])) };
 const TT = require("./traytext");
+const { planRestart, shouldAskMove } = require("./updater");
 let uiLang = null, appMenuKey = "";   // renderer 交過來之前用系統語系猜(app.getLocale() 要等 ready 之後才有值,所以用的時候才算)
 const siteLang = () => uiLang || (/^zh/i.test(app.getLocale() || "") ? "zh" : "en");
 const pauseLabel = () => tmLabels.pauseLocal || tmLabels.pause;   // 有雲端之後「暫停下單」不夠明確:講清楚是這台電腦
@@ -2735,6 +2846,75 @@ async function pauseFromMenu() {
 }
 // 新版已經暫存好、但因為正在下單而沒裝:桌機用戶的 app 常常整天開著,不講的話他們不會知道有新版在等
 const updateWaiting = () => { try { const p = updater().state().phase; return p === "blocked" || p === "ready"; } catch (_) { return false; } };
+/* 「重新啟動以完成更新」的唯一一條路(聊天那一格、關於列、選單列都叫這支;spec-desktop-update-prompt-0.1.10 §0)。
+   下單中:先問(同結束攔截的框,共用 quitAsking);確認後走結束 app 同一條收工(noteQuit → stop:對帳器先撤自己掛的限價單),
+   收完才 install。先設 quitConfirmed:quitAndInstall 關視窗、before-quit 兩道攔截都直接放行,不會再問一次。
+   重開之後**不自動接回下單**(Wei 拍板):對帳器照規矩停著,等用戶自己按啟動。
+   stop 放棄等待、狀態還說在下單 → install 回 TRADING:改走 app.quit(),autoInstallOnAppQuit 照樣裝,只是不自己重開 */
+// 埋點:feature_used 的 update_restart(隱私頁「分頁與按鈕的名稱」那一類),只在真的走下去時送——直接裝、或下單中按了確認
+async function restartToUpdate() {
+  const used = () => { try { tm().track("feature_used", { name: "update_restart" }); } catch (_) { /* 追蹤不擋更新 */ } };
+  const phase = () => updater().state().phase, turnBusy = () => !!(activeTurn || turnStarting);
+  const live = tradeMaybeLive();
+  // 已經在收工 / 結束(restarting、quitConfirmed、quitting)跟「框開著」同一種:不再問、不再收一次工
+  const step = planRestart({ phase: phase(), turn: turnBusy(), asking: quitAsking || !!restarting || quitConfirmed || quitting, trading: !!live });
+  if (step === "not_ready") return { ok: false, error: "NOT_READY" };
+  if (step === "busy") return { ok: false, error: "TURN_BUSY" };
+  if (step === "asking") return { ok: false, error: "ASKING" };
+  if (step === "install") { const res = updater().install(); if (res.ok) used(); return res; }
+  let r = null;
+  try { showMain(); } catch (_) { /* 叫不出視窗也照問;先叫再立旗標,拋例外不會把 quitAsking 卡在 true(稽核 P2-1) */ }
+  quitAsking = true;
+  try {
+    r = await dialog.showMessageBox(BrowserWindow.getAllWindows()[0] || undefined, { type: "warning", message: tmLabels.quitTitle,
+      detail: TT.quitDetail(tmLabels.updateBody.replace("{venue}", () => venueName(live.venue)), TT.cloudTrading(cloudSt()) ? tmLabels.quitCloudNote : ""),
+      buttons: [tmLabels.quitStay, tmLabels.updateReady], defaultId: 0, cancelId: 0 });
+  } catch (_) { r = null; } finally { quitAsking = false; }
+  if (!r || r.response !== 1) return { ok: false, error: "CANCELED" };
+  // 框開著的時候可能變了:回合開始了(程式觸發的)、updater 自己出錯了 → 不收工,什麼都沒動
+  if (turnBusy()) return { ok: false, error: "TURN_BUSY" };
+  const ph = phase();
+  if (ph !== "ready" && ph !== "blocked") return { ok: false, error: "NOT_READY" };
+  used();
+  setRestarting("stopping"); quitConfirmed = true;
+  try {
+    if (_tradeHost) { _tradeHost.noteQuit(); await _tradeHost.stop(); }
+    setRestarting("installing");
+    const res = updater().install();
+    if (res.ok) return res;
+    console.error("[updater] install after stop: " + res.error);
+  } catch (e) { console.error("[updater] restart failed: " + ((e && e.message) || e)); }
+  // 已經收工(用戶同意停單)卻沒裝成:改走結束 app,不留「停了一半、app 沒重開」。Squirrel 暫存好的話結束時照樣裝上(autoInstallOnAppQuit)
+  setRestarting("installing");
+  app.quit();
+  return { ok: true, quit: true };
+}
+/* 啟動時不在「應用程式」資料夾就問一次(§4)。「不要移」寫一個記號、之後永遠不問;授權框取消(false)或搬移出錯不記,下次啟動再問。
+   搬移成功 app 會自己結束再重開。app.isInApplicationsFolder / moveToApplicationsFolder 只有 macOS 有,shouldAskMove 先擋平台 */
+const moveDeclinedPath = () => path.join(app.getPath("userData"), "move-declined.json");
+let moveChecked = false, moveAsked = false;
+async function askMoveToApps() {
+  const L = tmLabels;
+  if (!(L.moveTitle && L.moveBody && L.moveGo && L.moveNo)) return false;
+  const mac = process.platform === "darwin" && app.isPackaged;
+  if (!shouldAskMove({ platform: process.platform, packaged: app.isPackaged, inApps: !mac || app.isInApplicationsFolder(), declined: fs.existsSync(moveDeclinedPath()),
+    trading: !!tradeMaybeLive(), askedThisRun: moveAsked })) return false;
+  moveAsked = true;
+  const parent = BrowserWindow.getAllWindows()[0] || undefined;
+  const r = await dialog.showMessageBox(parent, { type: "question", message: L.moveTitle, detail: L.moveBody,
+    buttons: [L.moveNo, L.moveGo], defaultId: 1, cancelId: 0 });
+  if (r.response !== 1) {
+    // 框是因為 app 在結束、視窗被關掉才回來的:用戶沒選,不記成「不要」(稽核 P2-5)
+    if (quitting || quitConfirmed || (parent && parent.isDestroyed())) return false;
+    try { fs.writeFileSync(moveDeclinedPath(), JSON.stringify({ declined: true }), { mode: 0o600 }); } catch (_) { /* 寫不進去:下次啟動再問一次 */ }
+    return false;
+  }
+  // 框開著的時候開始下單 / 開始回合:搬移成功會走 before-quit,被結束攔截擋下的話 app 會從垃圾桶裡的 bundle 繼續跑。這次不搬,也不記(稽核 P2-2)
+  if (tradeMaybeLive() || activeTurn || turnStarting) return false;
+  // 埋點 feature_used 的 app_move = 按了「移」(不是搬成功:成功 app 會立刻結束重開,事後送不出去;授權框取消也算按過)
+  try { tm().track("feature_used", { name: "app_move" }); } catch (_) { /* 追蹤不擋 */ }
+  try { return app.moveToApplicationsFolder(); } catch (e) { console.error("[move] " + ((e && e.message) || e)); return false; }
+}
 /* 選單列 / Dock 的狀態行(設計 spec-desktop-tray-resident-0.1.9 §2)。這台電腦那一行永遠講,沒在下單也講(TT.localLine);
    沒有交易所名可填的那幾態(還沒連接交易所…)換不帶 {money} 的樣板。字還沒交 → null;那時只有確定在下單才退回英文那一句 */
 function trayLocalLine(live, st) {
@@ -2752,7 +2932,9 @@ const trayGroups = (groups) => groups.filter((g) => g.length).flatMap((g, i) => 
 function trayMenu(m) {
   return Menu.buildFromTemplate(trayGroups([
     [m.local, m.cloud].filter(Boolean).map((label) => ({ label, enabled: false })),
-    m.update ? [{ label: tmLabels.updateReady, enabled: false }] : [],
+    // 可以按(0.1.10):下單中會先問,字尾「…」;回合在跑停用、不帶「…」(選單列沒有 tooltip 講原因,同聊天那一格只停用)
+    // 為了更新正在重開(收工中 / 安裝中):字換「重新啟動中…」、停用
+    m.update ? [{ label: m.update.restarting ? tmLabels.restarting : tmLabels.updateReady + (m.update.ask && !m.update.busy ? "…" : ""), enabled: !m.update.busy, click: () => { restartToUpdate().catch((e) => console.error("[updater] restart: " + ((e && e.message) || e))); } }] : [],
     m.pause ? [{ label: pauseLabel(), click: pauseFromMenu }] : [],
     [{ label: tmLabels.open, click: showMain }, { label: m.quit, click: () => app.quit() }],
   ]));
@@ -2768,9 +2950,9 @@ function traySync() {
   const st = _tradeHost ? _tradeHost.status() : null, live = tradeLive(st);
   if (live) lastVenue = live.venue;
   const maybe = live || tradeMaybeLive(st), show = !!maybe || trayLabelsIn;
-  const m = { local: trayLocalLine(live, st), cloud: trayCloudLine(), update: updateWaiting(), pause: !!maybe, quit: trayQuitLabel(maybe) };
+  const m = { local: trayLocalLine(live, st), cloud: trayCloudLine(), update: updateWaiting() || restarting ? { ask: !!maybe, busy: !!(activeTurn || turnStarting || restarting), restarting: !!restarting } : null, pause: !!maybe, quit: trayQuitLabel(maybe) };
   // 每一行的字、暫停有沒有出都進 key:少一樣,換語言之後要等別的欄位變了才會重建
-  const key = JSON.stringify([show, m, pauseLabel(), tmLabels.open, m.update ? tmLabels.updateReady : ""]);
+  const key = JSON.stringify([show, m, pauseLabel(), tmLabels.open, m.update ? tmLabels.updateReady : "", m.update && m.update.restarting ? tmLabels.restarting : ""]);
   if (key === trayKey) return;   // 每 5 秒叫一次:沒變就不重建選單
   // trayKey 等副作用都做完才記:中途拋例外的話下一輪 key 相同也會重做,圖示與暫停項不會卡在舊狀態
   if (app.dock) app.dock.setMenu(trayDockMenu(m));
@@ -2787,7 +2969,7 @@ function traySync() {
     tray = new Tray(img);
     if (WIN) tray.on("click", showMain);   // Windows 系統匣慣例:左鍵打開、右鍵選單。macOS 設了 context menu 點一下就是開選單,不掛
   }
-  tray.setToolTip(m.update ? tmLabels.updateReady : m.local || app.name);
+  tray.setToolTip(m.update ? (m.update.restarting ? tmLabels.restarting : tmLabels.updateReady) : m.local || app.name);
   tray.setContextMenu(trayMenu(m));
   trayKey = key;
 }
@@ -2889,10 +3071,13 @@ function binanceNotify(v) {
   // 這幾種全是 P2(binance_check.VERDICT_LEVEL):只發系統通知,**不亮 Dock 紅點**(紅點留給 P1)
   return true;
 }
-function trayStart() { if (!trayTimer) { trayTimer = setInterval(() => { startStep("tray", traySync); startStep("p1", p1Sync); }, 5000); if (trayTimer.unref) trayTimer.unref(); traySync(); } }   // 可能在下單的話一開就出,不等第一個 5 秒(常駐的那顆等畫面交字)
+// updater().poll():ready ↔ blocked 只跟著下單狀態變、沒有事件,靠這 5 秒那一輪補推(聊天那一格的「…」跟著暫停 / 開始下單換)
+function trayStart() { if (!trayTimer) { trayTimer = setInterval(() => { startStep("tray", traySync); startStep("p1", p1Sync); startStep("update poll", () => updater().poll()); }, 5000); if (trayTimer.unref) trayTimer.unref(); traySync(); } }   // 可能在下單的話一開就出,不等第一個 5 秒(常駐的那顆等畫面交字)
 app.on("browser-window-created", (_e, win) => {
   win.on("close", (e) => {
     // 關視窗不等於結束:自動下單在跑、或本機 agent 回合在跑(可能正在更新雲端)時只把視窗藏起來,回合 / 下單照走
+    // 更新重開收工中:紅燈只收視窗(放行會變成走結束 app → 裝了但不重開);交給 quitAndInstall 之後就放行,它要關視窗才能重開
+    if (restarting === "stopping") { e.preventDefault(); win.hide(); return; }
     const trading = tradeMaybeLive(), turn = !!(activeTurn || turnStarting);
     if (quitting || quitConfirmed || (!trading && !turn)) return;
     e.preventDefault(); win.hide();
@@ -2914,13 +3099,15 @@ function quitOnSignals(proc, quit) {
 // 就算這段沒跑到(當機、被強殺),daemon 讀到 stdin EOF 也會自己收。
 let quitting = false;
 app.on("before-quit", (e) => {
+  // 更新重開正在收工:它收完會自己裝 / 結束;這時再跑一次下面的 stop 只會多送一次 SIGTERM、跟 quitAndInstall 搶(稽核 P2-8)
+  if (restarting === "stopping") { e.preventDefault(); return; }
   // 自動下單還在跑:結束 = 停止下單、部位留著不平——先問一次(從選單列「結束 Blave…」、Cmd+Q、Dock 結束都走這裡)
   const live = !quitting && !quitConfirmed && tradeMaybeLive();
   if (live) {
     e.preventDefault();
     if (quitAsking) return;   // 框還開著又按一次 Cmd+Q:不疊第二個(稽核 M2)
+    try { showMain(); } catch (_) { /* 叫不出視窗也照問;先叫再立旗標,拋例外不會把 quitAsking 卡在 true(稽核 P2-1) */ }
     quitAsking = true;
-    showMain();
     dialog.showMessageBox(BrowserWindow.getAllWindows()[0] || undefined, { type: "warning", message: tmLabels.quitTitle,
       // 雲端也「確定在下單」時多一句:結束這個 app 不影響雲端。不確定就不說(那一句是在替雲端做保證)
       detail: TT.quitDetail(tmLabels.quitBody.replace("{venue}", () => venueName(live.venue)), TT.cloudTrading(cloudSt()) ? tmLabels.quitCloudNote : ""), buttons: [tmLabels.quitStay, tmLabels.quitGo], defaultId: 0, cancelId: 0 })
@@ -2931,8 +3118,8 @@ app.on("before-quit", (e) => {
   if (!quitting && !quitConfirmed && (activeTurn || turnStarting)) {
     e.preventDefault();
     if (quitAsking) return;
+    try { showMain(); } catch (_) { /* 同上 */ }
     quitAsking = true;
-    showMain();
     dialog.showMessageBox(BrowserWindow.getAllWindows()[0] || undefined, { type: "warning", message: tmLabels.quitTurnTitle,
       detail: tmLabels.quitTurnBody, buttons: [tmLabels.quitStay, tmLabels.quitGo], defaultId: 0, cancelId: 0 })
       .then((r) => { quitAsking = false; if (r.response === 1) { quitConfirmed = true; app.quit(); } }, () => { quitAsking = false; });

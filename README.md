@@ -6,13 +6,13 @@
 
 Free and open source. Connect your Claude Code or Codex. You describe the idea; it writes the strategy, runs the backtest, and trades it live.
 
-**English** | [繁體中文](README.zh-TW.md)
+**English** | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Español](README.es.md) | [Português](README.pt.md) | [Tiếng Việt](README.vi.md)
 
-![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey) ![Platform: macOS | Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
 https://github.com/user-attachments/assets/7b33edb7-9c65-4e19-854a-40295c6e8b74
 
-[Download the macOS app](https://github.com/Blave-TW/blave-agent/releases/latest) · [Quick start (from source)](#quick-start) · [Run it with your computer off](https://blave.org/agent/en)
+[Download for macOS](https://github.com/Blave-TW/blave-agent/releases/latest) · [Download for Windows](https://download.blave.org/desktop/win/Blave-Setup.exe) · [Quick start (from source)](#quick-start) · [Run it with your computer off](https://blave.org/agent/en)
 
 Star the repo if this is useful — and Watch › Releases to get notified of new versions.
 
@@ -49,6 +49,7 @@ When the agent reads the web, it uses the app's built-in browser: the page it is
 You need:
 
 - macOS 13 or later. The packaged app is a universal build: Apple Silicon and Intel, one download.
+- Or Windows 10 or 11, x64 (the versions Electron 44 supports; ARM not tested). The Windows installer is not code-signed yet, so SmartScreen warns on first install: choose More info › Run anyway.
 - Node.js 22.12 or later, with npm (`shell/package.json` › `engines`)
 - `python3` on your `PATH`. The packaged app bundles its own Python 3.12; running from source uses your system `python3` to create the venv.
 - Claude Code or Codex installed and signed in, or a Blave account
@@ -83,7 +84,11 @@ The interface follows the system language (English or Traditional Chinese). To o
 
 ## News
 
-- **TBD** — Desktop 0.1.7: the agent reads the news before writing a report (morning, close, single-symbol, research); a built-in browser you can watch, with exchange account pages and private addresses blocked; the liquidation map shows actual liquidations and the model estimate as two labelled layers; scheduled cloud reports are written by the agent at run time.
+- **2026-10-01** — Desktop 0.1.11: out-of-sample results read on one line (efficiency and verdict); a validation run in the cloud is fetched when you switch back to the tab; a strategy with its amount set to 0 counts as not live yet, and the agent points you to set an amount.
+- **2026-09-30** — Desktop 0.1.10: an Out-of-Sample tab shows whether picking parameters from past data holds up on data it has never seen; "Restart to finish updating" now shows while auto-trading runs, and says first that the restart closes nothing and places no orders until you press Start trading.
+- **2026-09-29** — Desktop 0.1.9: restoring a version goes straight back to it and reruns the backtest on the latest data; Settings › Agent rules, where you see, add and delete the rules the agent keeps to; a menu bar icon with "Pause trading (keep positions)"; up to three suggested next steps after each reply.
+- **2026-09-28** — Desktop 0.1.8: every backtest is saved as a version you can compare and restore; export a single-symbol strategy to TradingView Pine, XQ or MultiCharts, and send the Pine script into TradingView, where it stops at "Add to chart" for you to press; save any report as PDF, and publish market and performance reports as a public link.
+- **2026-09-27** — Desktop 0.1.7: the agent reads the news before writing a report (morning, close, single-symbol, research); a built-in browser you can watch, with exchange account pages and private addresses blocked; a redesigned morning brief — crypto adds quotes, derivatives, liquidations, movers and news, Taiwan adds material announcements and ex-dividend dates, and the Taiwan brief is built from TWSE and TAIFEX public data when you have no Blave data access.
 - **2026-09-26** — Desktop 0.1.6: a Reports view in the app; an exchange key with withdrawal permission is refused when you connect it.
 - **2026-09-24** — Desktop 0.1.1: first public release, universal build (Apple Silicon and Intel), on GitHub Releases. Taiwan stock daily bars and the Crypto Fear & Greed index now come from free public sources on the desktop.
 - **2026-09-23** — Desktop 0.0.4, signed and notarized, on the test track.
@@ -113,7 +118,7 @@ For any other exchange or broker with an API, the agent can write a helper from 
 
 ## Safety and Limits
 
-- **Where exchange keys live depends on the surface.** Desktop app: in the workspace `.env` on your Mac (`~/Blave/workspace/.env`). Cloud machine: in the workspace `.env` on your own dedicated machine. A venue bound on the web page: stored encrypted by Blave. The agent can read the workspace `.env`; its rules forbid printing key values (`references/exchange-connect.md`). Give a key read and trade permission only, never withdrawal. A key with withdrawal permission is refused when you connect it (Binance, OKX, BingX, Bybit — desktop app, cloud machine and web page alike). Gate.io does not report the flag at all, so check that one yourself.
+- **Where exchange keys live depends on the surface.** Desktop app: in the workspace `.env` on your computer (`~/Blave/workspace/.env` on macOS, `%USERPROFILE%\Blave\workspace\.env` on Windows). Cloud machine: in the workspace `.env` on your own dedicated machine. A venue bound on the web page: stored encrypted by Blave. The agent can read the workspace `.env`; its rules forbid printing key values (`references/exchange-connect.md`). Give a key read and trade permission only, never withdrawal. A key with withdrawal permission is refused when you connect it (Binance, OKX, BingX, Bybit — desktop app, cloud machine and web page alike). Gate.io does not report the flag at all, so check that one yourself.
 - Funding amounts and resuming trading are done by you — in the desktop app's Auto trading page, or on the web workspace for a cloud machine. The agent refuses to do them for you, even when asked. The one thing it may always do by itself is trip the kill switch.
 - On the desktop app, orders only go out while Blave is running; after you quit and reopen it, trading stays paused until you press Start trading.
 - The agent verifies before it reports: it re-reads a file after editing it, and queries an order back from the exchange before saying it was placed. Every order attempt is logged to `state/audit.jsonl`.
@@ -172,7 +177,7 @@ Issues and pull requests are welcome. Before a PR:
 
 ## Code Signing Policy
 
-Free code signing on Windows provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org). Releases are built by the public GitHub Actions workflow in this repository from a tagged commit; each signing request is approved by the repository owner. Roles: Authors and Reviewers — the maintainers with write access; Approver — the repository owner. This program will not transfer any information to third parties except as described in the [privacy policy](https://blave.org/disclaimer/en/privacy_policy). The macOS build is signed and notarized with Blave's own Apple identity.
+The Windows build is not code-signed yet: we have applied to the [SignPath Foundation](https://signpath.org) open-source program, and until it is approved the Windows installer is unsigned. Once approved: free code signing on Windows provided by [SignPath.io](https://signpath.io), certificate by SignPath Foundation. Releases are built by the public GitHub Actions workflow in this repository from a tagged commit; each signing request is approved by the repository owner. Roles: Authors and Reviewers — the maintainers with write access; Approver — the repository owner. This program will not transfer any information to third parties except as described in the [privacy policy](https://blave.org/disclaimer/en/privacy_policy). The macOS build is signed and notarized with Blave's own Apple identity.
 
 ## License
 

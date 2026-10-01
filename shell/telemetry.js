@@ -64,7 +64,11 @@ const EVENTS = {
     // 建議下一步(0.1.9;renderer/suggest.js):建議列長出來、點一行且回合跑起來。不送句子本身
     "suggest_shown", "suggest_clicked",
     // 設定 › Agent 規則(renderer/rules.js;0.1.9):切到那個分類、新增或編輯存成功、刪除成功、回覆語言改成功。背景同步不埋
-    "settings_rules", "rules_save", "rules_delete", "reply_lang_set"] },
+    "settings_rules", "rules_save", "rules_delete", "reply_lang_set",
+    // 樣本外驗證(0.1.10;renderer/app.js):點分頁(同 report_scan)、確認框送出且回合跑起來(同 scan_requested)
+    "report_wf", "wf_requested",
+    // 更新提示(0.1.10;main.js):「重新啟動以完成更新」真的走下去(直接裝、或下單中確認後)、搬到「應用程式」那一問按了「移」。主行程送
+    "update_restart", "app_move"] },
 };
 const ONCE = ["app_first_open", "first_backtest_done", "first_reply_done"];   // 每個安裝只送一次:自己記,不靠 api 去重
 // 每安裝每屬性值每 UTC 日只送一次(契約 §「外殼端同日同 name 也不重送」):送過的記在狀態檔、換日整組清掉。
@@ -178,4 +182,24 @@ function createTelemetry(opts) {
   };
 }
 
-module.exports = { createTelemetry, EVENTS, FROM_RENDERER };
+/* app 的現況,隨每一次 account_status 帶給 api(0.1.10 起;api 端 openclaw/desktop_telemetry.state_from_headers)。
+   是設定值,不是使用事件:「使用事件」開關、現在連的是哪個 AI、本機有沒有跑過回測(只有 bt / none)。api 的提醒信
+   看到 off 就不寄(隱私權政策 §9.1),連的 AI 與回測過沒有也以這份為準。關掉時只送 off,其他都不送;
+   沒登入時 account_status 本來就不打。 */
+const ENGINES = ["blave", "claude", "codex"];
+function statusHeaders(enabled, kind, backtested) {
+  if (enabled !== true) return { "X-Blave-Telemetry": "off" };
+  return { "X-Blave-Telemetry": "on", "X-Blave-Engine": ENGINES.indexOf(kind) >= 0 ? kind : "none",
+    "X-Blave-Progress": backtested === true ? "bt" : "none" };
+}
+// 本機有沒有任何一支策略跑過回測:strategies/<name>/stats.json 存在就算,找到一支就停。讀不到目錄 = 沒有
+function anyBacktest(stratDir) {
+  try {
+    for (const d of fs.readdirSync(stratDir, { withFileTypes: true })) {
+      if (d.isDirectory() && fs.existsSync(path.join(stratDir, d.name, "stats.json"))) return true;
+    }
+  } catch (_) { /* 還沒有 workspace */ }
+  return false;
+}
+
+module.exports = { createTelemetry, EVENTS, FROM_RENDERER, statusHeaders, anyBacktest };
