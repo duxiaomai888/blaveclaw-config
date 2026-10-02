@@ -6,13 +6,14 @@ TAIFEX 月結算商品的單一真理源（Type A/C 策略的 compute_signals �
 import io
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 
-from .http import BASE, _CACHE_DIR, _retry_get, _session
-from ._shared import _sanity_check_ohlc
+import lib.data as _pkg
+from .http import BASE, _get
+_retry_get = lambda *a, **k: _call_through('_retry_get', *a, **k)
+from ._shared import _sanity_check_ohlc, _check_data_access, _call_through
 from .cache import _extend_cache_monthly
 
 __all__ = [
@@ -33,6 +34,7 @@ _TW_FUTURES_CHUNK_DAYS = {'1d': 3650, '1m': 28, '5m': 28, '15m': 28, '30m': 28, 
 
 
 def _fetch_twfutures_raw(symbol, schema, start, end, headers=None):
+    _check_data_access(headers or {})
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
     chunk_days = _TW_FUTURES_CHUNK_DAYS.get(schema, 28)
@@ -44,7 +46,7 @@ def _fetch_twfutures_raw(symbol, schema, start, end, headers=None):
         cursor = chunk_end
 
     def _fetch_one(cs, ce):
-        r = _session().get(
+        r = _get(
             f'{BASE}/studio/market/twfutures/ohlcv/{symbol}/{schema}',
             headers=headers,
             params={'start': cs, 'end': ce},
@@ -222,6 +224,7 @@ def fetch_twfutures_ohlcv_batch(symbols, schema, start, end, headers=None, max_w
 
 def _fetch_twfutures_bid_ask_vol_raw(start, end, headers=None):
     """Fetch raw bid/ask vol for a date range (≤31 days per chunk)."""
+    _check_data_access(headers or {})
     s = datetime.strptime(start, '%Y-%m-%d')
     e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d') + timedelta(days=1)
     chunk_days = 28
@@ -233,7 +236,7 @@ def _fetch_twfutures_bid_ask_vol_raw(start, end, headers=None):
         cursor = chunk_end
 
     def _fetch_one(cs, ce):
-        r = _session().get(
+        r = _get(
             f'{BASE}/studio/market/twfutures/bid_ask_vol/TXF',
             headers=headers,
             params={'start': cs, 'end': ce},
@@ -375,7 +378,14 @@ def fetch_stock_futures_batch_daily(futures_ids, start, end, headers=None):
     ids (股票期貨, e.g. 'CDF') — arbitrary ids are rejected (400).
     """
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
-    cache_dir = _CACHE_DIR / 'twfutures_stockfut'
+
+# lib.data._CACHE_DIR is the patch surface a check redirects; this module's own import would not
+# see it (a scratch dir for the run), so read it per call.
+def _cache_dir():
+    return getattr(_pkg, '_CACHE_DIR')
+
+
+    cache_dir = _cache_dir() / 'twfutures_stockfut'
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     results, to_fetch = {}, []
@@ -445,6 +455,8 @@ def txf_settlement_mask(index):
         signal[settle] = 0.0        # Type A;  Type C: weights.loc[settle] = 0.0
         return signal, settle       # settle doubles as exec_at_close
     """
+    import datetime
+    from zoneinfo import ZoneInfo   # stdlib — no pytz dependency (pandas 3.x stopped pulling it in;
                                     # a fresh Windows box had no pytz and every 台指期 backtest died here)
 
     twn = ZoneInfo('Asia/Taipei')   # ZoneInfo handles offsets/DST natively — no pytz localize() needed
@@ -461,6 +473,13 @@ def txf_settlement_mask(index):
     mask  = pd.Series(False, index=index)
     start = index.min()
     end   = index.max()
+    # Reach one bar past the last label: on a live tick the pre-settlement bar IS the last
+    # bar, and bounding the loop at index.max() never considered the settlement it precedes,
+    # so live held through settlement while the backtest (which sees the next bar) was flat.
+    # One bar, not one day — a day would mark the 12:00 tick and flatten hours early.
+    bar = index.to_series().diff().median() if len(index) > 1 else pd.NaT
+    if pd.notna(bar):
+        end = end + bar
 
     year, month = start.year, start.month
     while True:

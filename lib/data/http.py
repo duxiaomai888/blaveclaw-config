@@ -10,14 +10,14 @@ from pathlib import Path
 
 import requests
 
+from ._shared import DataAccessError, _NO_ACCESS_MSG, _check_data_access, _daemon_on_desktop
+
 __all__ = [
     'BASE', '_CACHE_DIR',
-    '_thread_local', '_session', '_RateLimiter',
+    '_thread_local', '_session', '_RateLimiter', '_get',
     '_HEADERS_LOCK', '_KEY_PAIRS', '_KEY_INDEX', '_load_key_pairs',
-    '_GLOBAL_LIMITER', 'set_global_limiter', 'get_global_limiter',
-    '_default_headers', 'get_headers', 'get_all_headers',
-    '_KeyAwareRateLimiter', '_current_headers', '_rotate_headers',
-    '_drop_bad_key', '_retry_get',
+    '_default_headers', '_current_headers', '_rotate_headers',
+    '_drop_bad_key', '_retry_get', '_desktop_denied',
 ]
 
 
@@ -71,6 +71,20 @@ class _RateLimiter:
                     self._calls = [t for t in self._calls if now - t < self._period]
             self._calls.append(time.time())
 
+# The transport contract the checks patch is lib.data.requests.get (a check that fakes the
+# wire sets it). A pristine attr means no patch, so the pooled session is used; a patched one
+# wins, so every fetcher — not just the ones calling requests.get bare — sees the fake.
+# Captured at import: requests.get itself is the same module attr a patch rebinds.
+_PURE_GET = requests.get
+
+
+def _get(url, **kwargs):
+    fn = requests.get
+    if fn is not _PURE_GET:
+        return fn(url, **kwargs)
+    return _session().get(url, **kwargs)
+
+
 BASE      = 'https://api.blave.org'
 # lib/data/http.py → 上三层才是 workspace 根(原 lib/data.py 只需上两层)。
 _CACHE_DIR = Path(__file__).parent.parent.parent / 'cache'
@@ -109,94 +123,13 @@ def _load_key_pairs():
     return pairs
 
 
-_GLOBAL_LIMITER = None   # opt-in total-rate throttle for batch fetchers (set_global_limiter)
-
-
-def set_global_limiter(limiter):
-    """Install a process-wide request-rate throttle consulted by _retry_get.
-
-    A batch fetcher (core/run_batch.py) that fans out across symbols without a
-    per-call acquire hook (run_single_symbol fetches internally) sets one of
-    these so every Blave request — including the inner per-month chunk workers
-    spawned by _fetch_kline_raw / _fetch_alpha_raw, which run on their own
-    threads and so can't see a thread-local — is gated by the same budget.
-    Uses a single _KeyAwareRateLimiter bucket (key 0) so the sleep happens
-    OUTSIDE the lock (unlike _RateLimiter, which sleeps under it and would
-    serialize every chunk worker). coin_screener does NOT set this: it throttles
-    explicitly per top-level fetch with its own per-key limiter, and would be
-    double-throttled if _retry_get also gated it. Pass None to disable."""
-    global _GLOBAL_LIMITER
-    _GLOBAL_LIMITER = limiter
-
-
-def get_global_limiter():
-    """The process-wide rate limiter installed by set_global_limiter, or None."""
-    return _GLOBAL_LIMITER
-
-
 def _default_headers():
-    """First key pair as a headers dict — for the legacy callers
-    (single_symbol_backtest / coin_screener) that fetch without headers."""
+    """First key pair as a headers dict — for legacy callers that fetch without headers."""
     if _KEY_PAIRS is None:
         return None
     if not _KEY_PAIRS:
         return None
     return {'api-key': _KEY_PAIRS[0][0], 'secret-key': _KEY_PAIRS[0][1]}
-
-
-def get_headers():
-    """Get rotating API headers for Blave API (legacy single-shot callers)."""
-    global _KEY_PAIRS, _KEY_INDEX
-    with _HEADERS_LOCK:
-        if _KEY_PAIRS is None:
-            _KEY_PAIRS = _load_key_pairs()
-        if not _KEY_PAIRS:
-            return {'api-key': '', 'secret-key': ''}
-        h = {'api-key': _KEY_PAIRS[_KEY_INDEX][0], 'secret-key': _KEY_PAIRS[_KEY_INDEX][1]}
-        _KEY_INDEX = (_KEY_INDEX + 1) % len(_KEY_PAIRS)
-        return h
-
-
-def get_all_headers():
-    """Get all available header sets (for parallel requests) — used by
-    core/coin_screener.py to give each worker its own key."""
-    global _KEY_PAIRS
-    with _HEADERS_LOCK:
-        if _KEY_PAIRS is None:
-            _KEY_PAIRS = _load_key_pairs()
-        return [{'api-key': a, 'secret-key': s} for a, s in _KEY_PAIRS]
-
-
-class _KeyAwareRateLimiter:
-    """Per-key sliding-window rate limiter. Each API key gets its own counter.
-
-    Used by coin_screener to fan out across multiple keys without 429s.
-    """
-
-    def __init__(self, rps_per_key=2.0):
-        self._rps     = rps_per_key
-        self._period  = 1.0 / rps_per_key
-        self._next_ok = {}     # key_idx -> next allowed epoch time
-        self._lock    = threading.Lock()
-
-    def acquire(self, key_idx):
-        # 等待时间在锁内算、睡眠在锁外:旧实现在锁内 time.sleep(wait),
-        # 8 个 worker 被全局锁完全串行化 —— 程序实际限速 = rps_per_key,
-        # 8 把 key 形同虚设(实测 1.2 req/s 全局)。锁外睡:每 key 独立
-        # 计时,不同 key 的 worker 真正并行,总吞吐 ≈ rps_per_key × n_keys,
-        # 同时单 key 仍被限在 rps_per_key 内,不超服务器 500/5min 预算。
-        # 每 key 记「下次允许时间」而非滑动窗口:多个线程同时等同一 key 时,
-        # 各自醒来看到的 next_ok 已被推后,自动排队,不会唤醒后齐射(burst)。
-        while True:
-            with self._lock:
-                now = time.time()
-                next_ok = self._next_ok.get(key_idx, 0.0)
-                if now >= next_ok:
-                    self._next_ok[key_idx] = now + self._period
-                    return
-                wait = next_ok - now
-            # 锁外睡;醒来重读 next_ok,同 key 的其他线程可能已把它推后
-            time.sleep(wait)
 
 
 def _current_headers(headers=None):
@@ -260,6 +193,16 @@ def _drop_bad_key(headers=None):
         _KEY_INDEX = min(_KEY_INDEX, len(_KEY_PAIRS) - 1)
 
 
+def _desktop_denied(r):
+    """Scheduled run on the desktop: the key in `.env` stopped working since the shell last
+    synced it (hour fee not chargeable ERR007, key revoked ERR005, 401). Same meaning as an
+    empty key. A chat turn keeps the raw 403 — its body carries what the user must be told."""
+    if not _daemon_on_desktop():
+        return
+    if r.status_code == 401 or (r.status_code == 403 and any(c in r.text for c in ('ERR007', 'ERR005'))):
+        raise DataAccessError(_NO_ACCESS_MSG)
+
+
 def _retry_get(url, max_retries=6, **kwargs):
     """GET with exponential backoff on transient failures (2, 4, 8, 16, 32, 64 s).
 
@@ -275,20 +218,19 @@ def _retry_get(url, max_retries=6, **kwargs):
     error that backing off would just delay surfacing. A 403 causes the active
     key to be dropped from the rotation pool so later requests move on to a valid
     one immediately.
+
+    A non-retried 4xx raises requests.HTTPError with the response body appended
+    (truncated to 200 chars) — the 4xx bodies carry the only explanation there is.
     """
+    blave = url.startswith(BASE)   # BingX klines share this helper and stay public
+    if blave:
+        _check_data_access(kwargs.get('headers') or {})
     hdrs = kwargs.get('headers')
     if hdrs is not None:
         kwargs['headers'] = _rotate_headers(hdrs)
-    # Batch fetchers install a process-wide throttle here so the request rate
-    # — including inner per-month chunk workers, which run on their own threads
-    # and so bypass any thread-local hook — stays within the server's per-IP
-    # budget. Single-shot callers leave _GLOBAL_LIMITER None and are unaffected.
-    limiter = _GLOBAL_LIMITER
     for attempt in range(max_retries):
-        if limiter is not None:
-            limiter.acquire(0)
         try:
-            r = _session().get(url, **kwargs)
+            r = _get(url, **kwargs)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             if attempt == max_retries - 1:
                 raise
@@ -296,11 +238,20 @@ def _retry_get(url, max_retries=6, **kwargs):
             print(f"  {type(e).__name__} transient — retrying in {wait}s ({url.split('/')[-2]}/{url.split('/')[-1]})")
             time.sleep(wait)
             continue
-        if r.status_code == 403:
-            _drop_bad_key(kwargs.get('headers') or {})
-            r.raise_for_status()
         if r.status_code != 429 and r.status_code < 500:
-            r.raise_for_status()
+            if blave:
+                _desktop_denied(r)
+            if r.status_code == 403:
+                _drop_bad_key(kwargs.get('headers') or {})
+            try:
+                r.raise_for_status()
+            except requests.HTTPError as exc:
+                # raise_for_status()'s message is status + URL only. The API puts the
+                # reason in the body ("start must not be after end", "Invalid start
+                # date, expected YYYY-MM-DD"), and a strategy author who never sees it
+                # cannot tell a bad argument from a broken endpoint. Same type and
+                # .response as before so the callers switching on status still work.
+                raise requests.HTTPError(f'{exc} — {r.text[:200]}', response=r) from exc
             return r
         wait = 2 ** (attempt + 1)
         print(f"  {r.status_code} transient — retrying in {wait}s ({url.split('/')[-2]}/{url.split('/')[-1]})")

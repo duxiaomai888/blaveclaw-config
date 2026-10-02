@@ -10,7 +10,9 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from .http import BASE, _retry_get
+from .http import BASE
+from ._shared import _call_through
+_retry_get = lambda *a, **k: _call_through('_retry_get', *a, **k)
 from .cache import (
     _SINGLE_FILE_PREFIXES,
     _extend_cache_monthly,

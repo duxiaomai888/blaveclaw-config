@@ -11,7 +11,7 @@
 
 | 模块 | 状态 | 备注 |
 |---|---|---|
-| 规则文档 v4.0 | ✅ | 59 条(A-J 原始 50 + K-M 新增 9),见 `文档模板.md`(v4.4:口径明文,版本号统一) |
+| 规则文档 v4.5 | ✅ | 59 条(A-J 原始 50 + K-M 新增 9;54 active + 5 skip),见 `文档模板.md`(v4.5:K/L/M 定义补全,标题/统计修正) |
 | 规则结构化 catalog | ✅ | 59 条(54 active,5 skip),见 `rules_catalog/catalog.py` |
 | 单币种回测框架 | ✅ | catalog-driven + 双方向 + 死币跳过 |
 | 批量回测框架(统一入口) | ✅ | `core/run_batch.py`,增量/多周期 |
@@ -21,27 +21,26 @@
 | 跨周期稳健规则 | ✅ | **13 条 Stab=100%**(2026-09-12 重建) |
 | ★★★ 强推 | ✅ | **2 条**(报告按当前数据动态生成) |
 | **币对筛选器 coin_screener** | ✅ | `core/coin_screener.py`,9 keys 轮询 + 分 key 限流(安全 1.67 req/s/key) |
-| **用户策略** | ✅ | `strategies/`:4 个已落盘 + `apps/vote_dashboard/`(桌面投票仪表盘) |
+| **用户策略** | ❌ 已清空 | 既有策略已全部删除(2026-10-01);`strategies/` 现仅剩 `TEMPLATE_A/C.py`,新策略从模板新建 |
 | 三层验证 | ✅ | IS/OOS/MCPT,`core/validate_strategy.py` |
-| 实盘部署 | ⏸️ 测试阶段 | 组合配置在 `manager/portfolio_config.json` |
+| 实盘部署 | ⛔ 无在跑策略 | `manager/portfolio_config.json` 权重已清空 |
 | 止损/止盈 | ⏸️ 暂不用 | 用户决定 |
 
 ### 策略现状
 
-| 策略 | 符号 | IS Sharpe | OOS Sharpe | MCPT p | 结论 |
-|---|---|---|---|---|---|
-| `btc_a05_short` | BTCUSDT 1h | 2.76 | 4.07 | 0.026 | ✅ **三层全通过**,在组合内(57.9%) |
-| `eth_a08_short` | ETHUSDT 1h | 2.04 | 2.03 | 0.019 | ✅ **三层全通过**,在组合内(42.1%) |
-| `btc_ti_hc_wh_1h_long` | BTCUSDT 1h | 1.37 | 1.88 | 0.002 | ❌ **IS FAIL**(Sharpe<2.0);OOS+MCPT 通过 |
-| `btc_hc_2side_1h` | BTCUSDT 1h | **1.02** | **0.63** | 0.003 | ❌ **IS+OOS FAIL,不可部署** |
+既有用户策略已全部删除(2026-10-01),`strategies/` 下无任何策略。历史回测结果保留在 `archive/backups/strategies_backup_2026-09-03/`。
 
 ## 📁 项目结构
 
+```
 ```
 BBAC-D/
 ├── 文档模板.md                  59 条规则 v4.0 + v4.4 实测校准附录(自动生成)
 ├── VERSION                      当前版本标记(版本号单一来源)
 ├── AGENTS.md                    给 AI agent 的项目操作说明
+├── ARCHITECTURE.md              ★ 项目架构总览(分层图/数据流/模块清单/关键契约)
+├── CHANGELOG.md                 版本变更历史(Keep a Changelog 格式)
+├── LICENSE                      MIT 许可证
 ├── auth_service.py              独立鉴权微服务(token/session);仅旧 openclaw 运行时启动,
 │                                Blave Agent 运行时不运行它,不属于主系统
 │
@@ -60,8 +59,8 @@ BBAC-D/
 ├── symbols.xlsx                 币池(539 币)
 ├── midcap_symbols.csv           币池(40 币,coin_screener 默认源)
 │
-├── lib/                         共享库:数据/执行/PnL/扫描/验证/通知/报告
-├── manager/                     组合管理 + reconciler
+├── lib/                         共享库:数据/执行/PnL/扫描/验证/通知/报告(详见 ARCHITECTURE.md)
+├── manager/                     组合管理 + reconciler(详见 manager/README.md)
 ├── allocators/                  自定义权重分配器
 │
 ├── examples/                    独立参考策略(btc/台股/台指期,写同类前先读)
@@ -71,6 +70,8 @@ BBAC-D/
 ├── references/                  部署/策略/市场参考文档
 ├── tests/                       check_*.py 自包含校验(CI 全跑,无需网络)
 ├── vendor/chan/                 缠论框架(内嵌,chan_plot 用)
+│
+├── state/                       运行时状态(HALT/heartbeat/audit/deployments.json/notes/)
 │
 ├── cache/
 │   ├── v4.4_calibration.md      ★ 实测校准报告(analyze_results 产物)
@@ -85,6 +86,7 @@ BBAC-D/
 ├── requirements.in              依赖宽松声明(改依赖只动这里)
 ├── requirements.lock            3.12 hash 锁定快照(uv pip compile 生成)
 └── .github/workflows/ci.yml     CI(check_*.py + ruff,lock 按 Python 版本选)
+```
 ```
 
 ## 🚀 快速开始
@@ -164,7 +166,9 @@ python core/validate_strategy.py strategies/<name>
 ## 🛠️ 详细文档
 
 - `AGENTS.md` — Claude Agent 工作指令(系统提示,带 TOC + 🔴 标记)
+- `ARCHITECTURE.md` — ★ 项目架构总览(分层图/数据流/模块清单/关键契约)
 - `文档模板.md` — 59 条规则 + v4.4 实测校准附录
 - `core/README.md` — 核心入口用法与限流参数
+- `manager/README.md` — 组合管理 10 个脚本用法与协作架构
 - `references/` — 部署/策略/TW 股票/**coin_screener** 参考
 - `cache/v4.4_calibration.md` — 最新实测校准报告

@@ -9,21 +9,51 @@ _fundamental_cache_path / _load_fundamental_cache / _save_fundamental_cache
 """
 import os
 import json
+import threading
 import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+
+from .feeds import (
+    _revenue_available, _revenue_available_insurance,
+    _quarterly_report_available, _quarterly_report_available_finance,
+)
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .http import _CACHE_DIR
-from ._shared import _is_sub_5min
+from ._shared import _is_sub_5min, _TPE
+
+# lib.data.<name> is the patch surface the official checks use. _CACHE_DIR is this
+# module's global, so a patch on the package would not reach it; read it per call.
+# Before the first request the package attribute IS this module's value (re-exported by
+# __init__), so nothing changes unless a check redirects it to a scratch dir.
+import sys
+
+
+def _pkg():
+    return sys.modules[__package__]
+
+
+def _cache_dir():
+    # the package re-exports this module's value, so the attribute matches until a check
+    # redirects it; the fallback keeps a direct import of cache._CACHE_DIR usable too
+    return getattr(_pkg(), '_CACHE_DIR', _CACHE_DIR)
+
+
+def _dt():
+    """datetime as resolved per call. The checks pin lib.data.datetime to a frozen instant to
+    exercise the cross-midnight Taipei bound; this module's own import would not see the patch."""
+    return getattr(_pkg(), 'datetime', datetime)
 
 __all__ = [
     '_monthly_cache_dir', '_next_month', '_iter_months', '_contiguous_spans',
     '_normalise_index', '_month_end_utc', '_written_before_month_end',
+    '_tmp_path',
     '_HEAD_VERIFIED_META', '_HEAD_TOLERANCE', '_head_short_unverified',
     '_stale_incomplete_month', '_atomic_to_parquet',
     '_extend_cache_monthly', '_save_monthly',
@@ -40,7 +70,7 @@ __all__ = [
 def _monthly_cache_dir(prefix, params):
     """cache/{prefix}_{param_str}/  — parent dir for monthly parquet files."""
     param_str = '_'.join(str(v) for _, v in sorted(params.items()))
-    return _CACHE_DIR / f'{prefix}_{param_str}'
+    return _cache_dir() / f'{prefix}_{param_str}'
 
 
 def _next_month(ym):
@@ -85,6 +115,13 @@ def _month_end_utc(ym):
     """Naive-UTC datetime of the first instant AFTER month `ym` ('YYYY-MM')."""
     nxt = _next_month(ym)
     return datetime(int(nxt[:4]), int(nxt[5:7]), 1)
+
+
+def _tmp_path(path):
+    """Same-directory tmp name unique per process AND thread: two threads writing the same month
+    (a batch with a repeated symbol, report bricks fetching in parallel) must not share one tmp —
+    the first one's cleanup deleted the second one's file before its os.replace."""
+    return path.with_name(f'{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
 
 
 def _written_before_month_end(path, ym):
@@ -186,7 +223,7 @@ def _atomic_to_parquet(df, path, footer_meta=None):
     half-written parquet: a crash/kill mid-write leaves only a *.tmp file,
     and os.replace on the same filesystem is atomic.
     """
-    tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    tmp = _tmp_path(path)
     try:
         if footer_meta:
             table = pa.Table.from_pandas(df)
@@ -200,7 +237,7 @@ def _atomic_to_parquet(df, path, footer_meta=None):
 
 
 def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
-                          empty_marker_ttl_hours=None):
+                          empty_marker_ttl_hours=None, month_by_month=False):
     """Monthly-partitioned cache.
 
     Past months (before current month) are stored immutably — fetched once, never re-fetched,
@@ -218,6 +255,11 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
     treated as a cache miss and re-fetched, merged with the existing rows. If
     the re-fetch adds nothing the file is rewritten (mtime refreshed), so the
     source is hit at most once per TTL window per incomplete span.
+
+    month_by_month (opt-in): fetch and write one missing past month at a time
+    instead of a whole span per call — for a source that is itself one throttled
+    request per month (TWSE STOCK_DAY: 3 s each, ~7 min for ten years), so a run
+    cut short keeps the months it already has and the next run resumes there.
 
     Directory: cache/{prefix}_{params}/
     Files:     YYYY-MM.parquet  (one per month)
@@ -269,7 +311,7 @@ def _extend_cache_monthly(prefix, params, fetch_raw_fn, start, end,
         return (empty_marker_ttl_hours is not None
                 and _stale_incomplete_month(path, empty_marker_ttl_hours, ym))
     missing = [ym for ym in past_months if _needs_fetch(ym)]
-    for span in _contiguous_spans(missing):
+    for span in ([[ym] for ym in missing] if month_by_month else _contiguous_spans(missing)):
         span_start = f'{span[0]}-01'
         span_end   = f'{_next_month(span[-1])}-01'   # exclusive upper bound
         df = fetch_raw_fn(span_start, span_end)
@@ -430,7 +472,7 @@ def _write_single(prefix, params, df, meta):
     table = pa.Table.from_pandas(df, preserve_index=True)
     table = table.replace_schema_metadata({**(table.schema.metadata or {}),
                                            _META_KEY: json.dumps(meta).encode()})
-    tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    tmp = _tmp_path(path)
     try:
         pq.write_table(table, tmp)
         os.replace(tmp, path)
@@ -603,6 +645,27 @@ def _extend_cache_single(prefix, params, fetch_raw_fn, start, end):
                          the request reaches past a complete `to`
     upper = tomorrow when the request touches the current month, else the first
     day after the requested end month. Returns rows in [start, end]."""
+    datetime = _dt()
+    # When the caller left `end` to us and the requested start is past even tomorrow,
+    # the window simply has not happened yet (a forward settlement date, a scheduled
+    # backfill span) and the honest answer is "no rows yet". The API cannot tell that
+    # from a reversed range — it sees start > end and returns 400 — so decide it here
+    # and skip the pointless call. "Tomorrow" is Taipei's, not the machine's: this is
+    # a Taiwan dataset and the boxes run UTC. UTC being 8 h behind happens to make the
+    # naive compare safe (tomorrow_utc >= Taipei today), but that is an accident of
+    # sign holding up a silently-empty answer, so it is pinned instead. Two cases
+    # deliberately still reach the API: an explicit `end` (a caller who wrote the
+    # order backwards made a typo and should read the message) and a malformed
+    # `start` (nothing to compare; the 400 names the expected format).
+    if end is None:
+        tpe_tomorrow = (datetime.now(_TPE) + timedelta(days=1)).strftime('%Y-%m-%d')
+        if tpe_tomorrow < start:
+            try:
+                datetime.strptime(start, '%Y-%m-%d')
+                return pd.DataFrame()
+            except ValueError:
+                pass
+
     now        = datetime.utcnow()
     end_str    = end or now.strftime('%Y-%m-%d')
     current_ym = now.strftime('%Y-%m')
@@ -696,6 +759,7 @@ def _save_single(prefix, params, df, start, end):
     tail_fetched_at = min(now, end+1d): "freshness = how far the fetch reached",
     so a past mid-month `end` leaves that month marked incomplete and the next
     call completes it instead of freezing a hole."""
+    datetime = _dt()
     now = datetime.utcnow()
     end_str = end or now.strftime('%Y-%m-%d')
     reached = min(now, datetime.strptime(end_str, '%Y-%m-%d') + timedelta(days=1))
@@ -709,13 +773,32 @@ def _save_single(prefix, params, df, start, end):
 # (twstock_fin/bs/rev)、股票清单、市值排名、大盤除息點數共用这三个助手。
 
 def _fundamental_cache_path(prefix, stock_id):
-    return _CACHE_DIR / f'{prefix}_{stock_id}.parquet'
+    return _cache_dir() / f'{prefix}_{stock_id}.parquet'
 
 
-def _load_fundamental_cache(path, max_age_days=30):
+def _filing_due_since(prefix, written_epoch):
+    """Has a filing become servable (FEED_TIMING's time for it) since this cache file was
+    written? Then the 30-day cache would hide it — a live tick would keep trading on the
+    previous quarter / month for weeks."""
+    rules = {'twstock_rev':  ('MS', (_revenue_available, _revenue_available_insurance)),
+             'twstock_fin':  ('QS', (_quarterly_report_available, _quarterly_report_available_finance)),
+             'twstock_bs':   ('QS', (_quarterly_report_available, _quarterly_report_available_finance))}
+    if prefix not in rules:
+        return False
+    freq, fns = rules[prefix]
+    now = pd.Timestamp.now(tz='Asia/Taipei')
+    written = pd.Timestamp(written_epoch, unit='s', tz='UTC').tz_convert('Asia/Taipei')
+    stamps = pd.date_range((written - pd.Timedelta(days=400)).normalize().tz_localize(None),
+                           now.normalize().tz_localize(None), freq=freq).tz_localize('Asia/Taipei')
+    return any(((fn(stamps) > written) & (fn(stamps) <= now)).any() for fn in fns)
+
+
+def _load_fundamental_cache(path, max_age_days=30, prefix=None):
     if not path.exists():
         return None
     if (time.time() - path.stat().st_mtime) / 86400 > max_age_days:
+        return None
+    if prefix and _filing_due_since(prefix, path.stat().st_mtime):
         return None
     return pd.read_parquet(path)
 

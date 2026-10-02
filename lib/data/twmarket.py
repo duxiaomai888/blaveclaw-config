@@ -7,8 +7,10 @@ from datetime import datetime
 
 import pandas as pd
 
-from .http import BASE, _CACHE_DIR, _retry_get
-from ._shared import _sanity_check_ohlc
+import lib.data as _pkg
+from .http import BASE
+_retry_get = lambda *a, **k: _call_through('_retry_get', *a, **k)
+from ._shared import _sanity_check_ohlc, _call_through
 from .cache import _extend_cache_monthly, _load_fundamental_cache, _save_fundamental_cache
 
 __all__ = [
@@ -125,7 +127,14 @@ def fetch_twmarket_dividend_points(start, end, headers=None):
     depends on the estimated leg (e.g. mispricing D(t)) MUST check
     `attrs['meta'].get('degraded')` and refuse to compute on a lower-bound
     estimate; the print below is a courtesy for ad-hoc use, not the guard."""
-    path = _CACHE_DIR / 'twmarket_dividend_points.parquet'
+
+# lib.data._CACHE_DIR is the patch surface a check redirects; this module's own import would not
+# see it (a scratch dir for the run), so read it per call.
+def _cache_dir():
+    return getattr(_pkg, '_CACHE_DIR')
+
+
+    path = _cache_dir() / 'twmarket_dividend_points.parquet'
     df = _load_fundamental_cache(path, max_age_days=1 / 24)
     if df is None:
         r = _retry_get(f'{BASE}/studio/market/twmarket/dividend_points',

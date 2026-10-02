@@ -12,13 +12,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import requests
 
-from .http import BASE, _CACHE_DIR, _retry_get, _session, _RateLimiter
-from ._shared import _sanity_check_ohlc
+import lib.data as _pkg
+from .http import BASE, _get, _RateLimiter
+_retry_get = lambda *a, **k: _call_through('_retry_get', *a, **k)
+from ._shared import _sanity_check_ohlc, _check_data_access, _TPE, _call_through
 from .cache import (
     _extend_cache_monthly,
     _fundamental_cache_path, _load_fundamental_cache, _save_fundamental_cache,
 )
-from .batch import _fetch_twstock_cached_batch
+from .public_sources import _twstock_daily
 
 __all__ = [
     '_fetch_twstock_price_raw', 'fetch_twstock_price_adj',
@@ -36,6 +38,7 @@ __all__ = [
     '_fetch_twstock_fundamental_raw', '_fetch_fundamental',
     'fetch_twstock_financials', 'fetch_twstock_balance_sheet', 'fetch_twstock_monthly_revenue',
     '_twstock_list_cache_path', 'fetch_twstock_list', 'fetch_twstock_info', 'fetch_twstock_market_value_all',
+    'TWSE_INDUSTRY_NAMES', 'twstock_industry_name',
     '_fetch_fundamental_batch',
     'fetch_twstock_financials_batch', 'fetch_twstock_balance_sheet_batch', 'fetch_twstock_monthly_revenue_batch',
     'fetch_twstock_shareholding_batch', 'fetch_twstock_price_adj_batch',
@@ -61,12 +64,20 @@ def _fetch_twstock_price_raw(stock_id, start, end, headers=None):
 
 def fetch_twstock_price_adj(stock_id, start, end, headers=None):
     """台股向後調整日K（除權息還原價）. Returns DataFrame with Open/Close columns.
-    Use for backtesting — prices are dividend-adjusted so returns are comparable across time."""
-    return _extend_cache_monthly(
-        'twstock_price', {'id': stock_id},
-        lambda s, e: _fetch_twstock_price_raw(stock_id, s, e, headers),
-        start, end,
-    )
+    Use for backtesting — prices are dividend-adjusted so returns are comparable across time.
+
+    Served without a key from the stock's own exchange (TWSE / TPEx, forward-adjusted with
+    their 除權息計算結果表), then FinMind's free tier, then the Blave endpoint — see
+    _twstock_daily / _fetch_twstock_daily_free; df.attrs['source'] names the one that
+    answered."""
+    def _blave():
+        return _extend_cache_monthly(
+            'twstock_price', {'id': stock_id},
+            lambda s, e: _fetch_twstock_price_raw(stock_id, s, e, headers),
+            start, end,
+        )
+    df = _twstock_daily(stock_id, start, end, headers, True, _blave)
+    return df[['Open', 'Close']] if {'Open', 'Close'} <= set(df.columns) else df
 
 
 def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers=None):
@@ -87,12 +98,19 @@ def _fetch_twstock_price_nonadj_raw(stock_id, start, end, headers=None):
 def fetch_twstock_price(stock_id, start, end, headers=None):
     """台股原始日K（未除權息）. Returns DataFrame with Open/High/Low/Close/Volume columns.
     Use for visualization/charting — matches prices users see on broker apps.
-    Do NOT use for backtesting (dividends cause artificial price drops that distort signals)."""
-    df = _extend_cache_monthly(
-        'twstock_price_nonadj', {'id': stock_id},
-        lambda s, e: _fetch_twstock_price_nonadj_raw(stock_id, s, e, headers),
-        start, end,
-    )
+    Do NOT use for backtesting (dividends cause artificial price drops that distort signals).
+
+    Served without a key from the stock's own exchange (TWSE STOCK_DAY / TPEx tradingStock;
+    TPEx volume in 仟股, rounded to the thousand), then FinMind's free tier, then the Blave
+    endpoint — see _twstock_daily / _fetch_twstock_daily_free; df.attrs['source'] names the
+    one that answered."""
+    def _blave():
+        return _extend_cache_monthly(
+            'twstock_price_nonadj', {'id': stock_id},
+            lambda s, e: _fetch_twstock_price_nonadj_raw(stock_id, s, e, headers),
+            start, end,
+        )
+    df = _twstock_daily(stock_id, start, end, headers, False, _blave)
     return _sanity_check_ohlc(df, f'{stock_id} twstock price')
 
 
@@ -383,9 +401,21 @@ def fetch_twstock_dividend_batch(stock_ids, start, end, headers=None):
     return results
 
 
+# how many days back from today (Taipei) still counts as "maybe not published yet" — an empty
+# answer inside this window is not cached, so a late publication is picked up on the next call
+_BROKER_RECENT_EMPTY_DAYS = 3
+
+
+
+# lib.data._CACHE_DIR is the patch surface a check redirects; this module's own import would not
+# see it (a scratch dir for the run), so read it per call.
+def _cache_dir():
+    return getattr(_pkg, '_CACHE_DIR')
+
+
 def _broker_day_cache_path(stock_id, date_str):
     """cache/twstock_broker_stock_<stock_id>/<date>.parquet"""
-    d = _CACHE_DIR / f'twstock_broker_stock_{stock_id}'
+    d = _cache_dir() / f'twstock_broker_stock_{stock_id}'
     d.mkdir(parents=True, exist_ok=True)
     return d / f'{date_str}.parquet'
 
@@ -412,6 +442,8 @@ def _populate_broker_day_cache(stock_id, weekdays, headers,
     missing = [d for d in weekdays if not _broker_day_cache_path(stock_id, d.isoformat()).exists()]
     if not missing:
         return
+    # before the loop: its except Exception would swallow the raise
+    _check_data_access(headers or {})
 
     chunks  = _make_date_chunks(missing, chunk_days)
     limiter = _RateLimiter(rate_limit, period)
@@ -422,7 +454,7 @@ def _populate_broker_day_cache(stock_id, weekdays, headers,
         for attempt in range(max_retries):
             try:
                 limiter.acquire()
-                r = _session().get(
+                r = _get(
                     f'{BASE}/studio/market/twstock/broker/stock/{stock_id}',
                     headers=headers,
                     params={'start': cs.isoformat(), 'end': ce.isoformat()},
@@ -441,8 +473,13 @@ def _populate_broker_day_cache(stock_id, weekdays, headers,
                 if not df_all.empty and 'date' in df_all.columns:
                     for date_str, grp in df_all.groupby('date'):
                         by_date[date_str] = grp
+                today = datetime.now(_TPE).date()
                 for d in chunk_missing:
                     date_str = d.isoformat()
+                    # an empty day that is still recent may just not have been published yet;
+                    # writing it would freeze a hole that the next call then trusts
+                    if date_str not in by_date and (today - d).days <= _BROKER_RECENT_EMPTY_DAYS:
+                        continue
                     df_day   = by_date.get(date_str, pd.DataFrame(columns=EMPTY_COLS)).copy()
                     df_day['date'] = date_str
                     df_day.to_parquet(_broker_day_cache_path(stock_id, date_str),
@@ -465,6 +502,8 @@ def _populate_trader_day_cache(trader_id, weekdays, headers,
     missing = [d for d in weekdays if not _trader_day_cache_path(trader_id, d.isoformat()).exists()]
     if not missing:
         return
+    # before the loop: its except Exception would swallow the raise
+    _check_data_access(headers or {})
 
     chunks  = _make_date_chunks(missing, chunk_days)
     limiter = _RateLimiter(rate_limit, period)
@@ -475,7 +514,7 @@ def _populate_trader_day_cache(trader_id, weekdays, headers,
         for attempt in range(max_retries):
             try:
                 limiter.acquire()
-                r = _session().get(
+                r = _get(
                     f'{BASE}/studio/market/twstock/broker/trader/{trader_id}',
                     headers=headers,
                     params={'start': cs.isoformat(), 'end': ce.isoformat()},
@@ -494,8 +533,13 @@ def _populate_trader_day_cache(trader_id, weekdays, headers,
                 if not df_all.empty and 'date' in df_all.columns:
                     for date_str, grp in df_all.groupby('date'):
                         by_date[date_str] = grp
+                today = datetime.now(_TPE).date()
                 for d in chunk_missing:
                     date_str = d.isoformat()
+                    # an empty day that is still recent may just not have been published yet;
+                    # writing it would freeze a hole that the next call then trusts
+                    if date_str not in by_date and (today - d).days <= _BROKER_RECENT_EMPTY_DAYS:
+                        continue
                     df_day   = by_date.get(date_str, pd.DataFrame(columns=EMPTY_COLS)).copy()
                     df_day['date'] = date_str
                     df_day.to_parquet(_trader_day_cache_path(trader_id, date_str),
@@ -642,7 +686,7 @@ def _fetch_twstock_fundamental_raw(endpoint, stock_id, headers=None):
 
 def _fetch_fundamental(prefix, endpoint, stock_id, headers=None):
     path = _fundamental_cache_path(prefix, stock_id)
-    df = _load_fundamental_cache(path)
+    df = _load_fundamental_cache(path, prefix=prefix)
     if df is not None:
         return df
     df = _fetch_twstock_fundamental_raw(endpoint, stock_id, headers)
@@ -671,10 +715,10 @@ def fetch_twstock_monthly_revenue(stock_id, headers=None):
 
 
 def _twstock_list_cache_path():
-    return _CACHE_DIR / 'twstock_list.parquet'
+    return _cache_dir() / 'twstock_list.parquet'
 
 
-def fetch_twstock_list(headers=None):
+def fetch_twstock_list(headers=None, max_retries=6, timeout=60):
     """全市場股票清單（上市+上櫃，含 ETF）。DataFrame indexed by stock_id, columns:
     name, close, industry_code, listing_date (YYYY-MM-DD). Basic company data, not a
     time series — refreshed once a day: single-file cache like fundamentals (see
@@ -706,44 +750,106 @@ def fetch_twstock_info(stock_id, headers=None):
     return {'stock_id': stock_id, **df.loc[stock_id].to_dict()}
 
 
-def fetch_twstock_market_value_all(headers=None, top=None):
+# 上市、上櫃共用同一套代碼、同碼同名(TWSE/TPEx 公司基本資料 × ISIN 公告逐檔 join,零衝突)。
+# 07/13/19/34 目前沒有任何公司;32、33 只有上櫃,01/08/09/11/12/18/91 只有上市。
+TWSE_INDUSTRY_NAMES = {
+    '01': '水泥工業', '02': '食品工業', '03': '塑膠工業', '04': '紡織纖維', '05': '電機機械',
+    '06': '電器電纜', '08': '玻璃陶瓷', '09': '造紙工業', '10': '鋼鐵工業', '11': '橡膠工業',
+    '12': '汽車工業', '14': '建材營造業', '15': '航運業', '16': '觀光餐旅', '17': '金融保險業',
+    '18': '貿易百貨業', '20': '其他業', '21': '化學工業', '22': '生技醫療業', '23': '油電燃氣業',
+    '24': '半導體業', '25': '電腦及週邊設備業', '26': '光電業', '27': '通信網路業',
+    '28': '電子零組件業', '29': '電子通路業', '30': '資訊服務業', '31': '其他電子業',
+    '32': '文化創意業', '33': '農業科技業', '35': '綠能環保', '36': '數位雲端', '37': '運動休閒',
+    '38': '居家生活',
+    # ISIN 公告的產業別欄對 91 是空白;成員全是 -DR,名稱是我們依成員定的,不是官方標籤。
+    '91': '存託憑證',
+}
+
+
+def twstock_industry_name(code):
+    """TWSE/TPEx 產業別代碼 → 名稱 ('24' → '半導體業'). Accepts '24', 24 or '5'; None/NaN
+    (ETFs) → None; a code not in TWSE_INDUSTRY_NAMES comes back unchanged, never guessed."""
+    if code is None or (isinstance(code, float) and code != code):
+        return None
+    s = str(code).strip()
+    if not s:
+        return None
+    key = s.zfill(2) if s.isdigit() else s
+    return TWSE_INDUSTRY_NAMES.get(key, s)
+
+
+def fetch_twstock_market_value_all(headers, top=None):
     """全市場市值排名快照 (whole-market market-cap ranking). 上市 + 上櫃 + ETF
     (興櫃 excluded, ETNs have no data) — about 2,400 rows. DataFrame with columns
     rank (1-based, market_value desc), stock_id, name, market_value (NTD 元,
-    integer); the as-of publication date rides along in `df.attrs['date']`
-    ('YYYY-MM-DD'). Updated once a day after the close; server caches 30 min.
+    integer), market ('TWSE' 上市 / 'TPEx' 上櫃), is_etf (bool); the as-of
+    publication date and the 上市 ex-ETF market-cap total ride along in
+    `df.attrs['date']` ('YYYY-MM-DD') and `df.attrs['twse_ex_etf_market_value']`
+    (NTD 元, int). Updated once a day after the close; server caches 30 min.
 
     `top` (int 1–3000) keeps the first N ranks, None = all. This is the first-layer
     screening filter for anything market-cap based (top-N pool, top-10 權值股) —
-    never rebuild it from per-stock shares × price across the market. ETFs are in
-    the ranking (ETFs such as 0050 rank among the large caps); drop ETFs with
-    `df[~df['stock_id'].str.startswith('00')]`.
+    never rebuild it from per-stock shares × price across the market.
+
+    ETFs are in the ranking (0050 is rank 6) — filter them with the `is_etf`
+    column: `df[~df['is_etf']]`. Never by stock_id prefix ('00' is a market
+    convention rather than a contract, and it misses REITs like '01010T') and never
+    by fetching a classification yourself — is_etf IS that classification (FinMind
+    industry_category), and it is the same criterion the denominator uses, so the
+    two can never disagree. is_etf False means 'not in the ETF set', NOT 'confirmed
+    not an ETF': a security FinMind publishes no category for (REIT '01010T') is
+    False and stays inside the denominator. `market` is a listing-board tag, not an
+    ETF flag.
+
+    `attrs['twse_ex_etf_market_value']` is the index-weight (權值比重) denominator:
+    the sum of the market == 'TWSE' rows that are not ETFs on the same as-of day,
+    whole-market regardless of `top` (REITs and preferred shares are NOT excluded
+    from it). So market_value / twse_ex_etf_market_value is a weight only
+    for a row whose market is 'TWSE' and which is not an ETF — over a TPEx or ETF
+    row it is not a weight. `rank` is on a different universe — still 上市 + 上櫃
+    including ETFs — so never present the ratio and the rank as one ranking.
 
     Single-file cache like fetch_twmarket_dividend_points: the FULL ranking is
     fetched once (one call, ~2.4k rows) and kept 1 hour, `top` is sliced locally,
-    so repeat calls with different `top` are free within the hour. attrs survive
-    the parquet round-trip, so cache hits keep the as-of date."""
+    so repeat calls with different `top` are free within the hour. Whether attrs
+    survive the parquet round-trip is pandas-version dependent, so it is NOT
+    relied on: a cache hit that came back without the new column or without either
+    attr is discarded and refetched. The returned frame therefore always carries
+    both attrs, whatever the machine's pandas version."""
     if top is not None and (not isinstance(top, numbers.Integral)
                             or isinstance(top, bool) or not 1 <= top <= 3000):
         raise ValueError(f'top must be an int in 1–3000 or None, got {top!r}')
-    path = _CACHE_DIR / 'twstock_market_value_all.parquet'
+    path = _cache_dir() / 'twstock_market_value_all.parquet'
     df = _load_fundamental_cache(path, max_age_days=1 / 24)
+    # Old cache file, or a pandas whose parquet writer drops DataFrame.attrs: either way
+    # a field would silently go missing and callers would filter on a column that is not
+    # there. Every field this function promises is checked. `not in` rather than a falsy
+    # test — a genuine null denominator must not refetch on every call.
+    if df is not None and ('market' not in df.columns or 'is_etf' not in df.columns
+                           or 'date' not in df.attrs
+                           or 'twse_ex_etf_market_value' not in df.attrs):
+        df = None
     if df is None:
         r = _retry_get(f'{BASE}/studio/market/twstock/market_value/all',
                        headers=headers, timeout=60)
         payload = r.json()
         data = payload.get('data', [])
         if not data:
-            out = pd.DataFrame(columns=['rank', 'stock_id', 'name', 'market_value'])
+            out = pd.DataFrame(
+                columns=['rank', 'stock_id', 'name', 'market_value', 'market', 'is_etf'])
             out.attrs['date'] = payload.get('date')
+            out.attrs['twse_ex_etf_market_value'] = payload.get('twse_ex_etf_market_value')
             return out
-        df = pd.DataFrame(data)[['rank', 'stock_id', 'name', 'market_value']]
+        df = pd.DataFrame(data)[['rank', 'stock_id', 'name', 'market_value', 'market',
+                                 'is_etf']]
         df = df.sort_values('rank').reset_index(drop=True)
         df.attrs['date'] = payload.get('date')
+        df.attrs['twse_ex_etf_market_value'] = payload.get('twse_ex_etf_market_value')
         _save_fundamental_cache(path, df)
     out = df if top is None else df.head(top).copy()
-    out.attrs = dict(df.attrs)   # slicing must not drop the as-of date
+    out.attrs = dict(df.attrs)   # slicing must not drop the as-of date / denominator
     return out
+
 
 
 def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers=None):
@@ -754,7 +860,7 @@ def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers=None):
 
     for sid in stock_ids:
         path = _fundamental_cache_path(prefix, sid)
-        df = _load_fundamental_cache(path)
+        df = _load_fundamental_cache(path, prefix=prefix)
         if df is not None:
             results[sid] = df
         else:
@@ -807,7 +913,7 @@ def fetch_twstock_shareholding_batch(stock_ids, start, end, headers=None):
         df = df.set_index('date').sort_index()
         total = df[df['level'] == 'total'][['people']].rename(columns={'people': 'shareholders'}).astype(float)
         return total[~total.index.duplicated(keep='last')]
-    return _fetch_twstock_cached_batch(
+    return _resolve('_fetch_twstock_cached_batch')(
         'twstock_shareholding', 'shareholding', _fetch_twstock_shareholding_raw, _parse,
         stock_ids, start, end, headers)
 
@@ -820,7 +926,7 @@ def fetch_twstock_price_adj_batch(stock_ids, start, end, headers=None):
         df = df.set_index('date').sort_index()[['open', 'close']].rename(
             columns={'open': 'Open', 'close': 'Close'}).astype(float)
         return df.replace(0, float('nan')).ffill()
-    return _fetch_twstock_cached_batch(
+    return _resolve('_fetch_twstock_cached_batch')(
         'twstock_price', 'price_adj', _fetch_twstock_price_raw, _parse,
         stock_ids, start, end, headers)
 
@@ -838,7 +944,7 @@ def fetch_twstock_price_batch(stock_ids, start, end, headers=None):
             columns={'open': 'Open', 'high': 'High', 'low': 'Low',
                      'close': 'Close', 'volume': 'Volume'}).astype(float)
         return df.replace(0, float('nan')).ffill()
-    results = _fetch_twstock_cached_batch(
+    results = _resolve('_fetch_twstock_cached_batch')(
         'twstock_price_nonadj', 'price', _fetch_twstock_price_nonadj_raw, _parse,
         stock_ids, start, end, headers)
     return {sid: _sanity_check_ohlc(df, f'{sid} twstock price')
@@ -853,7 +959,7 @@ def fetch_twstock_per_batch(stock_ids, start, end, headers=None):
         df = pd.DataFrame(records)
         df['date'] = pd.to_datetime(df['date'])
         return df.set_index('date').sort_index()
-    return _fetch_twstock_cached_batch(
+    return _resolve('_fetch_twstock_cached_batch')(
         'twstock_per', 'per', _fetch_twstock_per_raw, _parse,
         stock_ids, start, end, headers)
 
@@ -866,7 +972,7 @@ def fetch_twstock_institutional_batch(stock_ids, start, end, headers=None):
         df = df.set_index('date').sort_index()
         df['foreign_net'] = df['foreign_buy'] - df['foreign_sell']
         return df.fillna(0)
-    return _fetch_twstock_cached_batch(
+    return _resolve('_fetch_twstock_cached_batch')(
         'twstock_inst', 'institutional', _fetch_twstock_inst_raw, _parse,
         stock_ids, start, end, headers)
 
@@ -891,12 +997,12 @@ def fetch_twstock_foreign_shareholding_batch(stock_ids, start, end, headers=None
         df = pd.DataFrame(records)
         df['date'] = pd.to_datetime(df['date'])
         return df.set_index('date').sort_index()
-    return _fetch_twstock_cached_batch(
+    return _resolve('_fetch_twstock_cached_batch')(
         'twstock_foreign_sh', 'foreign_shareholding', _fetch_twstock_foreign_shareholding_raw, _parse,
         stock_ids, start, end, headers)
 def _trader_day_cache_path(trader_id, date_str):
     """cache/twstock_broker_trader_<trader_id>/<date>.parquet"""
-    d = _CACHE_DIR / f'twstock_broker_trader_{trader_id}'
+    d = _cache_dir() / f'twstock_broker_trader_{trader_id}'
     d.mkdir(parents=True, exist_ok=True)
     return d / f'{date_str}.parquet'
 

@@ -1,13 +1,14 @@
 # 台股資料 — Taiwan Stock Data
 
-> 台股資料（日K、三大法人、融資融券、股權分級、財報、月營收、分點買賣超）由 [FinMind](https://finmindtrade.com) 提供；
-> 股票清單/基本資料（industry_code、listing_date）例外，來自 TWSE/TPEx 官方公司資料，非 FinMind。
+> 台股資料（三大法人、融資融券、股權分級、財報、月營收、分點買賣超）由 [FinMind](https://finmindtrade.com) 提供；
+> **日K（`fetch_twstock_price` / `fetch_twstock_price_adj`）直接來自臺灣證券交易所、證券櫃檯買賣中心，在本機抓、不經 Blave、不需 Blave key**（見下節，引用時要標示資料來源）；
+> 股票清單/基本資料（industry_code、listing_date）來自 TWSE/TPEx 官方公司資料，非 FinMind。
 
-**⚠️ 一律優先用下面這些 `lib.data` 函式(不只是寫策略時,單純聊天問答也一樣),函式裡沒有的資料才去外面找。** `lib.data` 已經做好新鮮度、fallback、cache,手寫腳本沒有這層保護,拿到舊資料或直接崩潰都有可能。若 `lib.data` 的呼叫本身失敗,回報失敗,不要改用手寫腳本、更不要拿崩潰前的部分輸出當答案。
+**⚠️ 一律優先用下面這些 `lib/data.py` 函式(不只是寫策略時,單純聊天問答也一樣),函式裡沒有的資料才去外面找。** `lib/data.py` 已經做好新鮮度、fallback、cache,手寫腳本沒有這層保護,拿到舊資料或直接崩潰都有可能。若 `lib/data.py` 的呼叫本身失敗,回報失敗,不要改用手寫腳本、更不要拿崩潰前的部分輸出當答案。
 
 ## 股票池（Universe）建立
 
-用 `fetch_twstock_list(headers)`（見 `lib.data`）—— 回傳 DataFrame，index 為 `stock_id`，
+用 `fetch_twstock_list(headers)`（見 `lib/data.py`）—— 回傳 DataFrame，index 為 `stock_id`，
 欄位 `name`、`close`、`industry_code`、`listing_date`（`YYYY-MM-DD`）。涵蓋上市 + 上櫃全市場
 （含 ETF，`industry_code`/`listing_date` 為 `None`）。基本資料一天更新一次，函式內建 1 天快取。
 
@@ -24,7 +25,7 @@ tech = df[df['industry_code'].isin(['24', '25'])].index.tolist()
 `industry_code` 是 TWSE/TPEx 原始數字代碼（passthrough，不是解碼過的名稱）。常用代碼：
 `15` 航運業、`17` 金融保險業、`22` 生技醫療業、`24` 半導體業、`25` 電腦及週邊設備業、
 `26` 光電業、`27` 通信網路業、`28` 電子零組件業、`29` 電子通路業、`30` 資訊服務業、
-`31` 其他電子業（完整清單見 TWSE/TPEx 公司基本資料;上面這份是常見科技/金融產業子集,不是全部)。
+`31` 其他電子業. Full 35-code map (listed and OTC share the codes): `TWSE_INDUSTRY_NAMES` / `twstock_industry_name(code)` in `lib/data.py`.
 
 **⚠️ Universe 抽樣規則 — 必須分散產業**
 
@@ -68,13 +69,15 @@ universe = sample_by_sector(by_sector, total=100)
 
 ## 台股日K — 原始 vs 還原價
 
-| 函式 | endpoint | 何時使用 |
+| 函式 | 來源 | 何時使用 |
 |---|---|---|
-| `fetch_twstock_price(sid, start, end, hdrs)` | `/twstock/price/` | **畫圖、走勢查詢** — 原始市價，符合用戶在 app 看到的價格；欄位 Open/High/Low/Close/Volume |
-| `fetch_twstock_price_adj(sid, start, end, hdrs)` | `/twstock/price_adj/` | **回測** — 向後除權息還原價，歷史報酬可比較；欄位 Open/Close |
+| `fetch_twstock_price(sid, start, end, hdrs)` | TWSE `STOCK_DAY` / TPEx `tradingStock` | **畫圖、走勢查詢** — 原始市價，符合用戶在 app 看到的價格；欄位 Open/High/Low/Close/Volume（股；上櫃為仟股 ×1,000） |
+| `fetch_twstock_price_adj(sid, start, end, hdrs)` | 同上 + TWSE `TWT49U` / TPEx `exDailyQ` 除權息表 | **回測** — 向後除權息還原價（係數 = 除權息前收盤價 ÷ 除權息參考價; for cash and stock dividends the same factor as the Blave adjusted series, but the exchange tables also carry other ex-rights events such as 現金增資 that Blave leaves out, so from such a date the two series differ by that event's factor），歷史報酬可比較；欄位 Open/Close |
 
 > 除權息後原始價格會向下跳空，還原價則平滑消除跳空，適合計算指標與回報。  
 > 用戶問「台積電最近走勢怎樣」→ `fetch_twstock_price`；要跑 SMA 回測 → `fetch_twstock_price_adj`。
+
+**免費、免 key、不經 Blave。** 日K 由本機直接向該股所屬交易所逐月抓（上市/上櫃用當日全市場檔判斷，本機快取一天），過去月份抓一次永久快取、當月每次重抓；證交所 3 秒 1 次、櫃買 1 秒 1 次請求（上市 2010 → 今天一檔約 200 次、約 10 分鐘，之後只重抓當月）。**跑之前先估時間**：沒有快取的上市股每檔每年約 36 秒（12 個月 × 3 秒）、上櫃約 12 秒，檔數 × 年數相乘就是要等的時間——五檔上市股從 2015 年起約 35 分鐘，超過一輪能跑的上限（單一指令 30 分鐘）。超過約 25 分鐘就先跟用戶講要多久，並提議先用較短的期間（例如近 3 年，五檔約 9 分鐘）跑第一版，之後拉長期間時已抓的月份不會重抓。每個月抓到就寫進快取，中途被切斷也留著，重跑從斷掉的那個月接續（`references/deployment.md` › *When the job does not finish in the turn*）。**引用這些數字的報告或回覆一律附「資料來源:臺灣證券交易所、證券櫃檯買賣中心(政府資料開放授權)」**——兩所條款對開放資料的豁免以標示來源為條件。限制:TWSE 端點沒有 2010-01-04 以前的資料（更早的 `start` 自動改走下一個來源）、上櫃成交量四捨五入到仟股、上櫃轉上市的股票只有轉上市後的月份。來源順序:交易所 → FinMind 免費層（raw `TaiwanStockPrice`，無 token 每小時 300 次，1994 起；還原係數仍用兩所除權息表）→ Blave 端點（訂閱戶）。**免費來源只在用戶自己的電腦上抓（電腦版 `BLAVE_AGENT_LOCAL=1`）;雲端主機用 Blave 資料**，與改版前一樣；`BLAVE_TWSTOCK_DAILY_SOURCE=public|blave` 兩個方向都可強制。`df.attrs['source']` 寫著實際供應者（`TWSE` / `TPEx` / `FinMind` / `Blave`），退到下一來源時會印 ⚠️。`*_batch` 版本與 `fetch_twstock_ohlcv(…, '1d')` 不變（Blave）。當日 K 在台北 17:35 起才算可用（`FEED_TIMING['twstock_price']`：TWSE 每日收盤行情 14:00 / 15:30 / 17:30 三版，取第三版 + 5 分）。
 
 ---
 
@@ -116,7 +119,7 @@ quotes = fetch_twstock_quote_batch(['2330', '2317'], headers)
 
 ## Minute-Line OHLCV（現股分線）— preferred
 
-Use `fetch_twstock_ohlcv` / `fetch_twstock_ohlcv_symbols` in `lib.data` — do not
+Use `fetch_twstock_ohlcv` / `fetch_twstock_ohlcv_symbols` in `lib/data.py` — do not
 hand-roll requests (the lib layer adds retry, chunking, monthly parquet cache, and
 OHLC sanity checks).
 
@@ -218,7 +221,7 @@ def fetch_twstock_market_value(stock_id: str, start: str, end: str, headers: dic
 
 ### Whole-market market-cap ranking (全市場市值排名)
 
-`fetch_twstock_market_value_all(headers, top=None)` in `lib.data` returns the latest
+`fetch_twstock_market_value_all(headers, top=None)` in `lib/data.py` returns the latest
 market-cap ranking of the whole market in ONE call — use it whenever a question or a
 screen is about market cap (前十大權值股, top-N pool by market cap). Never rebuild the
 ranking from per-stock shares × price (that is ~2,000 calls and minutes of waiting).
@@ -227,19 +230,41 @@ ranking from per-stock shares × price (that is ~2,000 calls and minutes of wait
 from lib.data import fetch_twstock_market_value_all
 
 top10 = fetch_twstock_market_value_all(hdrs, top=10)
-# columns: rank (1-based, market_value desc), stock_id, name, market_value (NTD 元, int)
+# columns: rank (1-based, market_value desc), stock_id, name, market_value (NTD 元, int),
+#          market ("TWSE" 上市 / "TPEx" 上櫃), is_etf (bool)
 top10.attrs["date"]                     # as-of publication date, 'YYYY-MM-DD'
+top10.attrs["twse_ex_etf_market_value"] # 上市 ex-ETF market-cap total, NTD 元 int
+
+# Index weight of a 上市 non-ETF stock (the denominator is whole-market even with top=10)
+tsmc = top10.iloc[0]                    # 2330 — market "TWSE", not an ETF
+share = tsmc["market_value"] / top10.attrs["twse_ex_etf_market_value"]
 
 mv = fetch_twstock_market_value_all(hdrs)          # all ~2,400 rows
-no_etf = mv[~mv["stock_id"].str.startswith("00")]     # drop ETFs (ETFs such as 0050 rank among the large caps)
-pool = no_etf.head(300)["stock_id"].tolist()          # market-cap top-300 universe
+pool = mv[~mv["is_etf"]].head(300)["stock_id"].tolist()   # ETF-free market-cap top-300 universe
+tpex_only = mv[mv["market"] == "TPEx"]                    # board filter, exact like is_etf
 ```
 
 Notes:
 - Universe = TWSE listed + TPEx OTC + ETFs; 興櫃 (emerging) excluded, ETNs have no data.
+- **`is_etf` is the ETF flag** — filter with `mv[~mv["is_etf"]]`. Never by `stock_id` prefix
+  (`"00"` is a market convention rather than a contract, and it misses REITs like `01010T`) and
+  never by fetching a classification yourself: `is_etf` already IS that classification (FinMind
+  `industry_category`) and is the same criterion the denominator uses, so a filtered pool and
+  the denominator can never disagree. `is_etf` False means "not in the ETF set", **not**
+  "confirmed not an ETF": a security FinMind publishes no category for (REIT `01010T`) is False
+  and stays inside the denominator. `market` is a listing-board tag, not an ETF flag.
+- **`rank` and `attrs["twse_ex_etf_market_value"]` are different universes.** `rank` is
+  whole-market (上市 + 上櫃, ETFs included). The denominator covers 上市 only and excludes ETFs
+  (FinMind `industry_category` in `{ETF, 上櫃ETF, 上櫃指數股票型基金(ETF)}`); REITs and
+  preferred shares (特別股) are not excluded from it. So the ratio is an index weight
+  (權值比重) only for a row whose `market` is `"TWSE"` and which is not an ETF — a TPEx or ETF
+  row over this denominator is not a weight. Never describe a row's `rank` as a rank within
+  that ex-ETF total.
 - Updated once a day after the close (EOD); the server caches the ranking 30 min. Locally the
   FULL ranking is cached 1 hour as a single file and `top` is sliced locally, so repeat calls
-  with different `top` are free within the hour; `attrs["date"]` survives cache hits.
+  with different `top` are free within the hour. A cache hit that comes back without `market`,
+  without `is_etf`, or without either `attrs` entry is discarded and refetched (whether `attrs`
+  survive a parquet round-trip depends on the pandas version), so every field is always there.
 - `top` must be an int in 1–3000 (validated locally, same range as the server); None = all.
 - Errors: 404 = no recent data server-side; 503 = upstream rate limit (`_retry_get` retries
   503 with backoff, so a 503 that surfaces means the retries were exhausted).
@@ -279,7 +304,7 @@ bank_net = (df.groupby("bank_name")["buy"].sum() - df.groupby("bank_name")["sell
 
 ## PE / PB / 殖利率
 
-用 `fetch_twstock_per(stock_id, start, end, headers)`（見 `lib.data`）—— DatetimeIndex
+用 `fetch_twstock_per(stock_id, start, end, headers)`（見 `lib/data.py`）—— DatetimeIndex
 （與價格／法人等 fetcher 對齊，可直接 reindex），欄位 `dividend_yield`、`PER`、`PBR`，
 資料從 2005-10-01 起。
 
@@ -364,6 +389,8 @@ avg_fee = df.groupby("date").apply(lambda x: x["value"].sum() / x["volume"].sum(
 
 ## Market-wide data (大盤)
 
+**In a strategy, attach 三大法人 / 融資融券 / 本益比 / 分點 / PCR with `lib.data.join_tw_flow` (one call, by publication time) — `references/strategy-code.md` › *Taiwan daily flows*; many stocks at once (Type C) → `align_feed` in the same section.**
+
 Whole-market series — no `stock_id` dimension. Use these for index level, market breadth /
 turnover, and market-wide institutional or margin flows; the per-stock `fetch_twstock_*`
 functions above answer a different question and must not be summed as a substitute.
@@ -398,6 +425,17 @@ Notes:
   forward estimates, the correction term for TXF basis math) is documented in
   `references/twfutures.md` › Index Dividend Points, since its main consumer is
   futures fair-basis logic.
+- **Key-free twins, desktop only:** `fetch_twmarket_{index,turnover,institutional,margin}_public(start, end)`
+  and `fetch_twfutures_institutional_public('TX'|'MTX'|'TMF', start, end)` return the same columns
+  and units straight from TWSE (`MI_5MINS_HIST`, `FMTQIK`, `BFI82U`, `MI_MARGN`) and TAIFEX
+  (`futContractsDateDown`), never through a Blave server. They run only on the user's own
+  computer (`BLAVE_AGENT_LOCAL=1`; elsewhere they raise `TwPublicUnavailable`), one request every
+  3 seconds to twse.com.tw (1 s to TAIFEX); 三大法人 and 融資 cost one request per trading day on a
+  cold cache. The TAIEX report
+  templates use them when this turn has no Blave data access; prefer the Blave functions
+  otherwise. Anything citing them carries the attribution line `資料來源:臺灣證券交易所網站`
+  / `資料來源:臺灣期貨交易所(政府資料開放授權)` (`df.attrs['source']` = `TWSE` / `TAIFEX`) —
+  the TWSE line claims no open-data licence because 三大法人 (BFI82U) is not in that set.
 
 ---
 
@@ -444,8 +482,8 @@ Work as a funnel — narrow the pool first, then pull time series (measured on t
 
 1. **Narrow the pool (seconds)**: `fetch_twstock_market_value_all` (whole-market market-cap
    ranking in one call — THE first-layer filter for market-cap conditions: top-N pool, 前十大權值股;
-   drop ETFs with `stock_id.str.startswith("00")`; `fetch_twstock_list` itself has no
-   market-cap column), `fetch_twstock_list` (industry), `fetch_twstock_quote_batch`
+   ETFs are in it, drop them with `~df["is_etf"]` and never by code prefix;
+   `fetch_twstock_list` itself has no market-cap column), `fetch_twstock_list` (industry), `fetch_twstock_quote_batch`
    (whole-market change/volume ratio, ~24s), `fetch_twstock_monthly_revenue_batch` /
    `fetch_twstock_per_batch` (fundamental / value conditions) → down to a few hundred stocks.
    Per-stock `/market_value/{stock_id}` history is for the already-narrowed pool only.
@@ -493,3 +531,5 @@ for sid in universe:
 | Q2（4–6月） | 8/14 | 8/15 起 |
 | Q3（7–9月） | 11/14 | 11/15 起 |
 | Q4（10–12月） | 翌年 3/31 | 翌年 4/1 起 |
+
+金融控股·銀行·證券·期貨·保險 listed issuers file Q2 by **8/31** (usable 9/1; 公開發行公司財務報告及營運情形公告申報特殊適用範圍辦法 §3(3)); 保險業 monthly revenue is due the **15th** from 2026 revenue (§3(5)). Blave serves a filing from 08:00 the usable day. Attach statements / revenue with `lib.data.align_feed` (`'twstock_financials'`, `'twstock_financials_finance'`, `'twstock_monthly_revenue'`, `'twstock_monthly_revenue_insurance'`) instead of shifting dates by hand — `references/strategy-code.md` › *External data*.

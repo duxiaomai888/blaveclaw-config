@@ -2,9 +2,10 @@
 # 不开全量 E/F 风格规则:本项目中文注释 + 警示性长行是刻意的工程纪律,
 # 行长(E501)/空行(E302)这类风格规则会刷出大量与本意无关的改动。
 [tool.ruff]
-# 只扫项目自身代码;vendor/ 是内嵌第三方(缠论框架),archive/ 是历史快照,
-# .venv/ 是虚拟环境 —— 都不该被 lint。
-extend-exclude = ["vendor", "archive", ".venv", "tmp", "cache"]
+# 只扫项目自身代码;.venv/ 虚拟环境、tmp/ 临时、cache/ 缓存 —— 都不该被 lint。
+# vendor/ 缠论框架、archive/ 历史快照 已随 2026-10-01 pivot 删除;
+# 庄家系统 2026-10-02 移至顶层 live_eval/,纳入 lint。
+extend-exclude = [".venv", "tmp", "cache"]
 
 [tool.ruff.lint]
 # F401 = 未使用 import;F811 = 重复定义;E9 = 语法/运行时致命错误(未闭合括号等)。

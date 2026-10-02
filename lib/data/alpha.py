@@ -8,9 +8,11 @@ from datetime import datetime, timedelta
 import pandas as pd
 import requests
 
-from .http import BASE, _default_headers, _retry_get, _session
-from ._shared import _sanity_check_ohlc
+from .http import BASE, _default_headers, _get
+from ._shared import Progress, _sanity_check_ohlc, _check_data_access, _call_through
+_retry_get = lambda *a, **k: _call_through('_retry_get', *a, **k)
 from .cache import _extend_cache_monthly
+from .public_sources import _tw_public_get
 
 __all__ = [
     '_fetch_alpha_raw', '_fetch_alpha',
@@ -20,6 +22,8 @@ __all__ = [
     'fetch_market_sentiment', 'fetch_top_trader_exposure',
     '_DB_CHUNK_DAYS', '_fetch_db_raw', 'settlement_signals_from_db', 'fetch_db_kline',
     'fetch_economic_calendar',
+    '_ALPHA_FETCHERS', 'UnknownFetcher',
+    '_FNG_URL', '_FNG_START', '_FNG_SOURCE', '_fetch_fear_greed_raw', 'fetch_fear_greed',
 ]
 
 
@@ -34,25 +38,22 @@ def _fetch_alpha_raw(endpoint, params, headers, start, end):
         cursor = chunk_end
 
     def _fetch_one(cs, ce):
-        try:
-            r = _retry_get(f'{BASE}/{endpoint}', headers=headers, params={
-                **params, 'start_date': cs, 'end_date': ce,
-            }, timeout=60)
-        except requests.HTTPError as exc:
-            resp = exc.response
-            raise RuntimeError(
-                f'/{endpoint} HTTP {resp.status_code}: {resp.text[:200]}'
-            ) from exc
+        # 3 not the default 6: worst case ~3 min instead of ~8, which would swallow a 1m/5m strategy's cycle
+        r = _retry_get(f'{BASE}/{endpoint}', max_retries=3, headers=headers, params={
+            **params, 'start_date': cs, 'end_date': ce,
+        }, timeout=60)
         data = r.json().get('data', {})
         return data.get('timestamp', []), data.get('alpha', [])
 
     ts_list, alpha_list = [], []
+    progress = Progress(f'fetch {endpoint}', len(chunks), 'chunks')
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_fetch_one, cs, ce): (cs, ce) for cs, ce in chunks}
         for future in as_completed(futures):
             ts, alpha = future.result()
             ts_list.extend(ts)
             alpha_list.extend(alpha)
+            progress.tick()
 
     df = pd.DataFrame({
         'time':  pd.to_datetime(ts_list, unit='s', utc=True),
@@ -74,26 +75,31 @@ def _fetch_alpha(endpoint, params, headers, start, end):
     )
 
 
-def fetch_holder_concentration(symbol, interval, start, end, headers=None):
+def fetch_holder_concentration(symbol, interval, start, end, headers):
     """籌碼集中度 Holder Concentration. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('holder_concentration/get_alpha',
                         {'symbol': symbol, 'period': interval}, headers, start, end)
 
 
-def fetch_funding_rate(symbol, interval, start, end, headers=None):
-    """資金費率 Funding Rate (Binance). Returns DataFrame with 'alpha' column (alpha = funding rate × 100)."""
-    return _fetch_alpha('funding_rate/get_alpha',
-                        {'symbol': symbol, 'period': interval}, headers, start, end)
+def fetch_funding_rate(symbol, interval, start, end, headers, exchange='binance'):
+    """資金費率 Funding Rate. Returns DataFrame with 'alpha' column (alpha = funding rate × 100).
+    exchange: 'binance' (default) / 'okx' / 'bingx' / 'bybit' — the perp whose funding is read;
+    close price is always the Binance perp."""
+    params = {'symbol': symbol, 'period': interval}
+    # default omitted so the cache dir of every existing Binance fetch stays valid
+    if exchange != 'binance':
+        params['exchange'] = exchange
+    return _fetch_alpha('funding_rate/get_alpha', params, headers, start, end)
 
 
-def fetch_taker_intensity(symbol, interval, start, end, headers=None, timeframe='24h'):
+def fetch_taker_intensity(symbol, interval, start, end, headers, timeframe='24h'):
     """多空力道 Taker Intensity. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('taker_intensity/get_alpha',
                         {'symbol': symbol, 'period': interval, 'timeframe': timeframe},
                         headers, start, end)
 
 
-def fetch_whale_hunter(symbol, interval, start, end, headers=None, timeframe='24h', score_type='score_oi'):
+def fetch_whale_hunter(symbol, interval, start, end, headers, timeframe='24h', score_type='score_oi'):
     """巨鯨警報 Whale Hunter. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('whale_hunter/get_alpha',
                         {'symbol': symbol, 'period': interval,
@@ -101,48 +107,160 @@ def fetch_whale_hunter(symbol, interval, start, end, headers=None, timeframe='24
                         headers, start, end)
 
 
-def fetch_unusual_movement(symbol, interval, start, end, headers=None, timeframe='24h'):
+def fetch_unusual_movement(symbol, interval, start, end, headers, timeframe='24h'):
     """異常漲跌 Unusual Movement. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('unusual_movement/get_alpha',
                         {'symbol': symbol, 'period': interval, 'timeframe': timeframe},
                         headers, start, end)
 
 
-def fetch_squeeze_momentum(symbol, start, end, headers=None):
+def fetch_squeeze_momentum(symbol, start, end, headers):
     """擠壓動能 Squeeze Momentum (period fixed to 1d). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('squeeze_momentum/get_alpha',
                         {'symbol': symbol, 'period': '1d'}, headers, start, end)
 
 
-def fetch_liquidation(symbol, interval, start, end, headers=None, timeframe='24h'):
+def fetch_liquidation(symbol, interval, start, end, headers, timeframe='24h'):
     """爆倉指標 Liquidation. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('liquidation/get_alpha',
                         {'symbol': symbol, 'period': interval, 'timeframe': timeframe},
                         headers, start, end)
 
 
-def fetch_market_direction(interval, start, end, headers=None):
-    """市場方向 Market Direction (BTC only, no symbol). Returns DataFrame with 'alpha' column."""
+def fetch_liquidation_coin(symbol, headers):
+    """每幣爆倉 Liquidation by coin — one coin's forced liquidations across the exchange
+    feeds Blave collects (binance / bybit / gate / okx / htx / bitfinex), as USD notional.
+    Returns a dict — NOT a DataFrame, since it is a point-in-time snapshot with no date
+    range to index on:
+      windows{'1'|'4'|'12'|'24'}: rolling window ending at the latest 5-minute bucket —
+        total_liq_usd / long_liq_usd / short_liq_usd, long_pct / short_pct (None when the
+        window is 0), covered_hours, by_exchange{name: {total/long/short_liq_usd}} (an
+        exchange with no event in the window has no key)
+      series: bucket_seconds=3600, points = 24 hourly {ts, long_liq_usd, short_liq_usd},
+        old → new on clock hours, the last one = the current hour so far (zeros, never gaps)
+      exchanges[]: exchange, listed (True / False / None = unknown), last_event_at,
+        price_basis, coverage, time_basis — every feed, including ones with no event
+      rank (1–50 by 24 h total across exchanges, else None), detail_complete (False when
+        the coin may have been cut from a full bucket → windows can under-count),
+        updated_at
+    `windows['24']` is the same rolling frame as the exchange matrix (same number for the
+    same coin); `series` is clock hours, so Σ points ≠ windows['24'] by design — read
+    totals from windows, timing from points.
+    `symbol` accepts BTC / BTCUSDT / btc. Returns None for a symbol no feed lists (the
+    API's 404). A 503 (upstream feed not answering) propagates as requests.HTTPError after
+    _retry_get's backoff. No local cache — the server holds a 5-minute cache; every call
+    means "now"."""
+    try:
+        r = _retry_get(f'{BASE}/liquidation/get_coin', headers=headers,
+                       params={'symbol': symbol}, timeout=30)
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None
+        raise
+    return r.json().get('data', {})
+
+
+def fetch_market_direction(interval, start, end, headers):
+    """市場方向 Market Direction (market-wide, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('market_direction/get_alpha',
                         {'period': interval}, headers, start, end)
 
 
-def fetch_capital_shortage(interval, start, end, headers=None):
+def fetch_capital_shortage(interval, start, end, headers):
     """資金稀缺 Capital Shortage (market-wide, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('capital_shortage/get_alpha',
                         {'period': interval}, headers, start, end)
 
 
-def fetch_market_sentiment(symbol, interval, start, end, headers=None):
+def fetch_market_sentiment(symbol, interval, start, end, headers):
     """市場情緒 Market Sentiment. Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('market_sentiment/get_alpha',
                         {'symbol': symbol, 'period': interval}, headers, start, end)
 
 
-def fetch_top_trader_exposure(interval, start, end, headers=None):
-    """Blave頂尖交易員曝險 Top Trader Exposure (BTC only, no symbol). Returns DataFrame with 'alpha' column."""
+def fetch_top_trader_exposure(interval, start, end, headers):
+    """Blave頂尖交易員曝險 Top Trader Exposure (market-wide, no symbol). Returns DataFrame with 'alpha' column."""
     return _fetch_alpha('blave_top_trader/get_exposure',
                         {'period': interval}, headers, start, end)
+
+
+_ALPHA_FETCHERS = (
+    'fetch_holder_concentration', 'fetch_funding_rate', 'fetch_taker_intensity',
+    'fetch_whale_hunter', 'fetch_unusual_movement', 'fetch_squeeze_momentum',
+    'fetch_liquidation', 'fetch_market_direction', 'fetch_capital_shortage',
+    'fetch_market_sentiment', 'fetch_top_trader_exposure',
+)
+
+
+class UnknownFetcher(ImportError):
+    """A guessed fetcher name (`fetch_alpha`, `get_alpha`, `fetch_indicator`, a misspelt
+    `fetch_<alpha>`): the message lists the real alpha fetchers with their signatures.
+    ImportError on purpose — `from lib.data import fetch_alpha` (the agent's usual first
+    guess) swallows an AttributeError raised by a module __getattr__ and prints only the
+    bare `cannot import name`; an ImportError propagates as is. Cost: hasattr(lib.data,
+    'fetch_<missing>') raises instead of answering False — no caller does that."""
+
+
+def __getattr__(name):
+    if name.startswith('__') or not (name.startswith(('fetch_', 'get_'))
+                                     or 'alpha' in name or 'indicator' in name):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import inspect
+    sigs = '; '.join(f'{n}{inspect.signature(globals()[n])}' for n in _ALPHA_FETCHERS)
+    raise UnknownFetcher(
+        f"lib.data has no {name!r}. There is no generic alpha fetcher — each Blave alpha has "
+        f"its own function (all return a DataFrame with an 'alpha' column; 'headers' is the "
+        f"api-key/secret-key dict, see references/lib.md > 'Alpha fetchers - quick reference'): "
+        f"{sigs}", name=__name__)
+
+
+# ── Crypto Fear & Greed index (alternative.me, free, no key) ──────────────────
+# 資料來源:alternative.me — their API rules (https://alternative.me/crypto/fear-and-greed-index/,
+# read 2026-09-24): "You must properly acknowledge the source of the data and prominently
+# reference it accordingly. Commercial use is allowed as long as the attribution is given
+# right next to the display of the data." A report or reply that shows the number carries
+# the line; the frame carries it in attrs['source'].
+_FNG_URL   = 'https://api.alternative.me/fng/'
+_FNG_START = '2018-02-01'     # first row of the history (timestamp 1517443200)
+_FNG_SOURCE = '資料來源:alternative.me (Crypto Fear & Greed Index)'
+
+
+def _fetch_fear_greed_raw(start, end):
+    """Rows from `start` on, in one request: `limit` = the days from start to today (0 = the
+    whole history, when start is at or before the first row). Same throttle as the other
+    key-free daily sources."""
+    days = (datetime.utcnow().date() - datetime.strptime(start, '%Y-%m-%d').date()).days + 2
+    limit = 0 if start <= _FNG_START else max(days, 1)
+    r = _tw_public_get(_FNG_URL, {'limit': limit, 'format': 'json'})
+    j = r.json()
+    if (j.get('metadata') or {}).get('error'):
+        raise RuntimeError(f"alternative.me fng: {j['metadata']['error']}")
+    rows = j.get('data', [])
+    if not rows:
+        return pd.DataFrame(columns=['value', 'classification'])
+    df = pd.DataFrame({
+        'value': [float(x['value']) for x in rows],
+        'classification': [str(x['value_classification']) for x in rows],
+    }, index=pd.to_datetime([int(x['timestamp']) for x in rows], unit='s'))
+    df.index.name = 'date'
+    return df.sort_index()
+
+
+def fetch_fear_greed(start=None, end=None):
+    """Crypto Fear & Greed index, one row per UTC day (naive UTC midnight index, like
+    fetch_kline '1d'): `value` 0–100 (0 = extreme fear) and `classification` (Extreme
+    Fear / Fear / Neutral / Greed / Extreme Greed). History from 2018-02-01; start defaults
+    to it. No key; monthly cache (past months once, the current month re-fetched).
+
+    The row for day D is the index computed at D 00:00 UTC — the API's own countdown
+    (time_until_update) points at the next 00:00 UTC — so it is a snapshot taken at the
+    day's open, and align_feed / FEED_TIMING['fear_greed'] make it visible from D 01:00.
+    attrs['source'] is the attribution line alternative.me's rules require next to the
+    number; keep it in any report or reply that shows the value."""
+    start = start or _FNG_START
+    df = _extend_cache_monthly('fear_greed', {'src': 'alternative.me'}, _fetch_fear_greed_raw, start, end)
+    df.attrs['source'] = _FNG_SOURCE
+    return df
 
 
 # ── CME / NYMEX / ICE futures (via /studio/market/db) ────────────────────────
@@ -153,6 +271,9 @@ _DB_CHUNK_DAYS = {'ohlcv-1m': 28, 'ohlcv-1h': 365, 'ohlcv-1d': 3650}
 def _fetch_db_raw(dataset, symbol, schema, start, end, headers=None):
     """Fetch OHLCV — chunks fetched concurrently, chunk size by schema."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Hits the db endpoint directly, not via _retry_get, so the gate has to be here too.
+    _check_data_access(headers or {})
 
     s    = datetime.strptime(start, '%Y-%m-%d')
     e    = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
@@ -168,7 +289,7 @@ def _fetch_db_raw(dataset, symbol, schema, start, end, headers=None):
         import time as _time
         for attempt in range(3):
             try:
-                r = _session().get(
+                r = _get(
                     f'{BASE}/studio/market/db/ohlcv/{dataset}/{symbol}/{schema}',
                     headers=headers,
                     params={'start': cs, 'end': ce},
@@ -208,7 +329,6 @@ def settlement_signals_from_db(df, signal):
     settlement bars — those bars execute at this-bar close, not next-bar open.
     If instrument_id column is absent, exec_at_close is all-False.
     """
-    import pandas as pd
     exec_at_close = pd.Series(False, index=df.index)
     if 'instrument_id' not in df.columns:
         return signal, exec_at_close
