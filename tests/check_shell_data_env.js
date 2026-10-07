@@ -8,6 +8,7 @@ if (a < 0 || b < 0) { console.log("FAIL  找不到 syncDataEnv 的原文"); proc
 const WS = fs.mkdtempSync(path.join(os.tmpdir(), "blave-env-"));
 let KEY = { api_key: "a".repeat(64), secret_key: "b".repeat(64) };
 const loadDataKey = () => KEY;
+const wsfile = require("../shell/wsfile");
 // eval 裡的 const 出不了 eval 的作用域,換成 var 才拿得到 ENV_BEGIN / ENV_END / syncDataEnv
 eval(src.slice(a, b).replace(/^const /gm, "var "));
 const f = path.join(WS, ".env");
@@ -44,12 +45,12 @@ fs.writeFileSync(f, "BINANCE_API_KEY=keep\n"); fs.chmodSync(f, 0o000);
 const r = syncDataEnv(true);
 fs.chmodSync(f, 0o600);
 t("讀不到(非 ENOENT)→ 回 none、原檔一個字沒動", r === "none" && rd() === "BINANCE_API_KEY=keep\n");
-t("沒留下暫存檔", !fs.existsSync(f + ".blave-tmp"));
+t("沒留下暫存檔", fs.readdirSync(WS).every((x) => !x.startsWith("..env.")));
 
 // rename 失敗(.env 是個目錄):暫存檔裡是明文 key,要清掉
 fs.rmSync(f); fs.mkdirSync(f);
 syncDataEnv(true);
-t("rename 失敗 → 暫存檔不留", !fs.existsSync(f + ".blave-tmp"));
+t("rename 失敗 → 暫存檔不留", fs.readdirSync(WS).every((x) => !x.startsWith("..env.")));
 
 // 兩把 key 各看各的:帳號 token(能燒 AI 額度)只在連的是 Blave 時才進 agent 的 env;資料 key 看的是
 // 有沒有登入,自帶 CLI 的人也拿得到。兩個條件對調任何一個,這裡就紅。
@@ -65,14 +66,14 @@ t("rename 失敗 → 暫存檔不留", !fs.existsSync(f + ".blave-tmp"));
   t("未登入 → 兩個都不帶(不管連的是誰、不管 included 傳了什麼)", ["blave", "claude", "codex", undefined].every((k) => row(k, false, true) === "--"));
   t("含不含資料查不到(null / undefined / 非布林)→ 當沒有", [null, undefined, 1, "true"].every((v) => row("claude", true, v) === "--"));
   t("signedIn 不是布林 true → 當沒登入", row("blave", "yes", true) === "--"); }
-t("接線:帳號 token 吃 plan.proxyToken、只進 BLAVE_PROXY_TOKEN", /const acct = plan\.proxyToken \? loadToken\(\) : null;/.test(src) && /\.\.\.\(acct \? \{ BLAVE_PROXY_TOKEN: acct \} : \{\}\)/.test(src));
+t("接線:帳號 token 吃 plan.proxyToken、只進 BLAVE_PROXY_TOKEN", /const acct = plan\.proxyToken \? loadToken\(\) : null;/.test(src) && /\.\.\.llmEnv\(acct, relay\),/.test(src) && /return acct \? \{ BLAVE_PROXY_TOKEN: acct \} : \{\};/.test(src));
 t("接線:資料 key 吃 plan.dataKey,而且只經 syncDataEnv 進 workspace .env 的 managed block", /const dataAccess = syncDataEnv\(plan\.dataKey\);/.test(src) && (src.match(/syncDataEnv\(/g) || []).length === 3 && !/syncDataEnv\([^)]*useBlave/.test(src));
 t("接線:含不含資料只在有登入時才去問", /turnCreds\(conn\.kind, signedIn, signedIn && await hasBlaveData\(\), cloudHandoffOn\(\)\)/.test(src));
 { const i = src.indexOf("function turnCreds("); let d = 0, end = -1; for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) { end = k + 1; break; } }
   const tc = eval("(" + src.slice(i, end) + ")");
   t("第三欄 mcp(契約 §2.3):自帶 CLI + 登入 → proxyToken:false、mcp:true;沒登入三個全 false;功能關 → mcp 一律 false", ["claude", "codex"].every((k) => { const r = tc(k, true, false, true); return r.proxyToken === false && r.mcp === true; })
     && ["claude", "codex", "blave"].every((k) => { const r = tc(k, false, false, true); return !r.proxyToken && !r.dataKey && !r.mcp; }) && ["claude", "codex", "blave"].every((k) => tc(k, true, true, false).mcp === false)); }
-t("登出要清:signOutBlave → clearToken → clearDataKey → 刪本機那份 + syncDataEnv(false)", /async function signOutBlave\(\)[\s\S]{0,600}?\n  clearToken\(\);/.test(src) && /function clearToken\(\) \{[\s\S]{0,120}?\n  clearDataKey\(\);/.test(src) && /function clearDataKey\(\) \{\s*\n\s*try \{ fs\.unlinkSync\(dataKeyPath\(\)\); \} catch \(_\) \{\}\s*\n\s*syncDataEnv\(false\);/.test(src));
+t("登出要清:signOutBlave → clearToken → clearDataKey → 刪本機那份 + syncDataEnv(false)", /async function signOutBlave\(\)[\s\S]{0,600}?\n  clearToken\(\);/.test(src) && /function clearToken\(\) \{[\s\S]{0,240}?\n  clearDataKey\(\);/.test(src) && /function clearDataKey\(\) \{\s*\n\s*try \{ fs\.unlinkSync\(dataKeyPath\(\)\); \} catch \(_\) \{\}\s*\n\s*syncDataEnv\(false\);/.test(src));
 // 沒有主機也能買資料(spec data-without-machine-pricing §E):account_status 的 data_access 三態 → 寫不寫資料 key → BLAVE_DATA_ACCESS。
 // included 與 billed 都算有資料;none 沒有;舊 api 沒有 data_access(外殼比 api 先出)→ 退回布林 data_included,跟以前一樣。
 // 真的跑 main.js 的 dataAccessOf + hasBlaveData(account_status 用假的)→ turnCreds → syncDataEnv → spawn 那一行的對應

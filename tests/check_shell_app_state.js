@@ -31,7 +31,7 @@ fs.mkdirSync(path.join(sd, "b")); fs.writeFileSync(path.join(sd, "b", "stats.jso
 t("anyBacktest:沒目錄 false、只有策略碼 false、有一支 stats.json 就 true", noDir === false && onlyCode === false && anyBacktest(sd) === true);
 
 const main = fs.readFileSync(path.join(__dirname, "..", "shell", "main.js"), "utf8");
-const fnStart = main.indexOf("async function accountStatus()");
+const fnStart = main.indexOf("async function accountStatus(");
 const fn = main.slice(fnStart, main.indexOf("\n}\n", fnStart));
 t("accountStatus 帶上 statusHeaders(開關來源是 telemetry 的 isEnabled、engine 來自連結紀錄的 kind、回測看 strategies)",
   /const conn = loadConnection\(\), on = tm\(\)\.isEnabled\(\)/.test(fn) && /T\.statusHeaders\(on, conn && conn\.kind, btSeen\)/.test(fn)
@@ -43,7 +43,7 @@ const setH = main.slice(main.indexOf('ipcMain.handle("telemetry-set"'), main.ind
 t("切換開關的當下打一次 account_status(先改開關、再打)",
   /setEnabled\(on === true\); accountStatus\(\); return tm\(\)\.isEnabled\(\);/.test(setH));
 const login = main.slice(main.indexOf('tm().track("login_done")'), main.indexOf("return { ok: true };", main.indexOf('tm().track("login_done")')));
-t("登入完成時打一次(新 token 存好之後)", /\n\s*accountStatus\(\);/.test(login) && login.indexOf("saveToken") < 0 && main.indexOf("saveToken(r.body.access_token)") < main.indexOf('tm().track("login_done")'));
+t("登入完成時打一次(新 token 存好之後)", /\n\s*const acctNow = accountStatus\(\)\.catch\(\(\) => null\);/.test(login) && login.indexOf("saveToken") < 0 && main.indexOf("saveToken(r.body.access_token)") < main.indexOf('tm().track("login_done")'));
 const cut = (name) => { const i = main.indexOf(name); return main.slice(i, main.indexOf("\n}", i) + 2); };
 t("換 AI 成功後打一次(存成功才打,存失敗的那條 return false 在前面)", /tm\(\)\.track\("connect_done", \{ kind: saved\.kind \}\);\s*\n\s*accountStatus\(\);[^\n]*\n\s*return true;/.test(cut("async function saveConnection")));
 t("清掉 AI 連結後也打一次", /const clearConnection = \(\) => \{ const r = connStore\(\)\.clear\(\); accountStatus\(\); return r; \};/.test(main));

@@ -15,7 +15,7 @@ const fnSrc = (name) => {
 };
 
 class N {
-  constructor(tag) { this.tag = tag; this.children = []; this._t = ""; this.attrs = {}; this.className = ""; this.title = ""; }
+  constructor(tag) { this.tag = tag; this.children = []; this._t = ""; this.attrs = {}; this.dataset = {}; this.className = ""; this.title = ""; }
   set textContent(v) { this._t = v == null ? "" : String(v); this.children = []; }
   get textContent() { return this._t + this.children.map((c) => c.textContent).join(""); }
   appendChild(c) { if (c.frag) { this.children.push(...c.children); c.children = []; } else this.children.push(c); return c; }

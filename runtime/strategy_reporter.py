@@ -20,6 +20,8 @@ import urllib.error
 import urllib.request
 from zoneinfo import ZoneInfo
 
+import atomic_file
+
 WORKSPACE = os.environ.get("BLAVE_AGENT_WORKSPACE", "/opt/blave-agent/workspace")
 STRATEGIES_DIR = os.path.join(WORKSPACE, "strategies")
 # 剛出生、還沒回測完的策略:源檔存在但 stats.json 還沒寫出來的頭幾秒。此窗內
@@ -80,6 +82,12 @@ _IMG_UPLOAD_BUDGET_SEC = 30
 # record_image_quota() for why this one failure is worth persisting and
 # agent_turn._image_quota_line() for when it is allowed to be mentioned.
 IMG_QUOTA_PATH = os.path.join(STATE_DIR, "strategy_image_quota.json")
+# 報告被永久拒收的事實:report_uploader 寫({id: {at, title, error, origin}})、本模組捎給
+# 平台(manifest 的 report_failures)、agent_turn 讓 agent 下一輪講。路徑只定義在這裡,
+# 理由同 IMG_QUOTA_PATH:三個 process 都已經 import 這支輕模組。
+REPORT_FAILURES_PATH = os.path.join(STATE_DIR, "report_failures.json")
+REPORT_FAILED_DIR = os.path.join(WORKSPACE, "reports", "failed")
+REPORT_FAILURES_MAX = 20
 API_URL = os.environ.get(
     "BLAVE_STRATEGIES_URL", "https://api.blave.org/openclaw/agent/strategies"
 )
@@ -189,6 +197,100 @@ def strategy_consts(src):
             if isinstance(target, ast.Name) and target.id in FIELDS and target.id not in out:
                 out[target.id] = node.value.value
     return out
+
+
+# Telemetry attributes for the platform's funnel events (strategy_created / backtest_done /
+# deployed). Both are read from the strategy FILE, so they exist from the first report and
+# for Type B too; neither may ever block a report — unknown is None, and absent on the wire.
+# Computed in scan() only: signature() runs after every tool step and must not pay a second
+# ast.parse per file (strategy_consts is mirrored verbatim in api and cannot share its tree).
+# Same rule as the desktop app (shell/renderer/export.js xpIsTypeB / xpIsPortfolio);
+# re.ASCII so `# Type: C組合` matches as it does in JS, where \b is ASCII-only.
+_TYPE_RE = re.compile(r"^#\s*Type:\s*([ABC])\b", re.M | re.ASCII)
+# lib.data price fetchers → market. Only PRICE fetchers: a BTC strategy that reads a Taiwan
+# flow as a feature still fetches its bars with fetch_kline.
+_TW_FUTURES = "tw_futures"   # internal: resolved by SYMBOL below, never reported
+_PRICE_FETCHERS = {
+    "fetch_kline": "crypto", "fetch_kline_batch": "crypto", "fetch_bingx_kline": "crypto",
+    "fetch_twstock_price": "tw_stock", "fetch_twstock_price_adj": "tw_stock",
+    "fetch_twstock_price_batch": "tw_stock", "fetch_twstock_price_adj_batch": "tw_stock",
+    "fetch_twstock_ohlcv": "tw_stock",
+    "fetch_twfutures_ohlcv": _TW_FUTURES, "fetch_twfutures_ohlcv_batch": _TW_FUTURES,
+    "fetch_stock_futures_batch_daily": "tw_stock_futures",
+    "fetch_usstock_price": "us_stock",
+    "fetch_db_kline": "global_futures",
+}
+_TW_INDEX_FUTURES = ("TXF", "MXF", "TMF")
+_FETCHER_NAME_RE = re.compile(r"\bfetch_[a-z0-9_]+\b")
+_SYMBOL_RE = re.compile(r'''^\s*SYMBOL\s*=\s*["']([^"']*)["']''', re.M)
+
+
+def strategy_type(src):
+    """'A' / 'B' / 'C' from the `# Type:` header comment (first 2000 chars), else None."""
+    m = _TYPE_RE.search(src[:2000])
+    return m.group(1) if m else None
+
+
+def _referenced_fetchers(src):
+    """(names of the lib.data price fetchers the source refers to, its literal SYMBOL or
+    None). `ast`, so comments and string literals never count and a name is matched whole.
+    Falls back to regexes over comment-stripped lines when the file does not parse."""
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+        m = _SYMBOL_RE.search(code)
+        return ({n for n in _FETCHER_NAME_RE.findall(code) if n in _PRICE_FETCHERS},
+                m.group(1) if m else None)
+    found, symbol = set(), None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            found.add(node.attr)
+        elif isinstance(node, ast.ImportFrom):   # `import fetch_kline as fk` hides the name
+            found.update(a.name for a in node.names)
+        if symbol is None and isinstance(node, ast.Assign) \
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str) \
+                and any(isinstance(t, ast.Name) and t.id == "SYMBOL" for t in node.targets):
+            symbol = node.value.value   # first assignment wins, as strategy_consts
+    return found & set(_PRICE_FETCHERS), symbol
+
+
+def strategy_market(src):
+    """Which market the strategy's prices come from: crypto / tw_index_futures /
+    tw_stock_futures / tw_stock / us_stock / global_futures / mixed (two or more), or None
+    (no lib.data price fetcher — the user's own data — or not decidable).
+
+    fetch_twfutures_ohlcv[_batch] serves index and stock futures alike, so SYMBOL decides:
+    TXF / MXF / TMF (R1 suffix accepted, as the fetcher does) is the index; any other
+    literal SYMBOL is a stock future. No literal SYMBOL → None rather than a guess."""
+    fetchers, symbol = _referenced_fetchers(src)
+    kinds = {_PRICE_FETCHERS[n] for n in fetchers}
+    if _TW_FUTURES in kinds:
+        kinds.discard(_TW_FUTURES)
+        sym = re.sub(r"[^A-Z0-9]", "", symbol.upper()) if symbol else ""
+        if sym.endswith("R1") and len(sym) > 2:
+            sym = sym[:-2]
+        # an undecidable futures leg next to another market is still two markets
+        kinds.add(("tw_index_futures" if sym in _TW_INDEX_FUTURES else "tw_stock_futures")
+                  if sym else None)
+    if len(kinds) > 1:
+        return "mixed"
+    return kinds.pop() if kinds else None
+
+
+def _type_market(s):
+    """{type, market} for one scanned strategy, unknowns left out. Telemetry only: a failure
+    here never costs the strategy its report."""
+    try:
+        src = s.get("code") or ""
+        attrs = {"type": strategy_type(src) or ("C" if s.get("is_portfolio") else None),
+                 "market": strategy_market(src)}
+    except Exception as e:
+        print(f"strategy_reporter: type/market skipped for {s.get('name')}: {e!r}", file=sys.stderr)
+        return {}
+    return {k: v for k, v in attrs.items() if v}
 
 
 def _extract(path, fallback_name):
@@ -620,6 +722,7 @@ def scan(include_newborn=False):
         # here must not be the only defense). False when unknown — fail open,
         # see is_portfolio_stats.
         s["is_portfolio"] = is_portfolio_stats(bt)
+        s.update(_type_market(s))   # the header wins; no header but a Type C backtest → C
     return strategies
 
 
@@ -879,10 +982,8 @@ def _load_state_file(path):
 def _save_state_file(path, state):
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
+        with atomic_file.replacing(path) as f:
             json.dump(state, f)
-        os.replace(tmp, path)
     except OSError:
         pass
 
@@ -1156,19 +1257,6 @@ def _can_report():
     )
 
 
-def _can_watch():
-    """Can this runtime ship watchboard ops / data (.claude/docs/watchboard.md §5.3b)?
-    Same stance as _can_report: the uploader is one file across releases, so the
-    question is whether THIS copy carries the watch sweep — a text probe, not an
-    import, for the reason above."""
-    try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "report_uploader.py"), encoding="utf-8") as f:
-            return "def run_watch_once(" in f.read()
-    except OSError:
-        return False
-
-
 def report_schedules():
     """The `report_schedules` list (.claude/docs/report-schedules.md §5): one entry per
     workspace/report_jobs/<id>/ — the registration plus the last runs.jsonl line and
@@ -1187,8 +1275,6 @@ def report_schedules():
             out.append({"id": job_id, "error": err})
             continue
         cron = job["schedule"]["cron"]
-        if job.get("kind") == "watch":
-            continue  # a watchboard widget's schedule, not a report — the board shows it
         pending = job.get("pending")
         last = report_runner.last_run(job_id)
         entry = {
@@ -1216,6 +1302,30 @@ def report_schedules():
                 entry["last_run"]["error"] = last.get("error") or ""
         out.append(entry)
     return out
+
+
+def report_failures():
+    """The `report_failures` list: reports refused for good that are still sitting in
+    reports/failed/, newest first. An entry whose file is gone (the agent re-sent the id
+    and the uploader cleared it, or someone deleted it by hand) is no longer a failure
+    the user needs to see, so the folder — not the fact file — decides membership."""
+    try:
+        with open(REPORT_FAILURES_PATH, encoding="utf-8") as f:
+            facts = json.load(f)
+    except FileNotFoundError:
+        return []
+    if not isinstance(facts, dict):
+        return []
+    out = []
+    for rid, fact in facts.items():
+        if not isinstance(fact, dict):
+            continue
+        if not os.path.isfile(os.path.join(REPORT_FAILED_DIR, f"{rid}.json")):
+            continue
+        out.append({"id": rid, "at": fact.get("at"), "title": fact.get("title"),
+                    "error": fact.get("error"), "origin": fact.get("origin")})
+    out.sort(key=lambda e: e["at"] if isinstance(e["at"], int) else 0, reverse=True)
+    return out[:REPORT_FAILURES_MAX]
 
 
 # 用戶常駐規則(web「Agent 常駐規則」面板的讀側)。同一個檔
@@ -1454,7 +1564,7 @@ def report_cache(strategies, token=None, image_sigs=None, record=True):
     landed.
 
     The manifest carries the piggyback fields: config_version so the web can flag an
-    outdated workspace config, can_report / can_watch so it can gate those features on
+    outdated workspace config, can_report so it can gate reports on
     this machine, the scheduled-report registry for the 管理定期報告 modal, and the raw
     常駐規則 file (preferences) for the 「Agent 常駐規則」 settings pane.
 
@@ -1508,7 +1618,7 @@ def report_cache(strategies, token=None, image_sigs=None, record=True):
             refused.add(name)
 
     payload = {"names": names, "markers": markers, "round": round_id,
-               "can_report": _can_report(), "can_watch": _can_watch()}
+               "can_report": _can_report()}
     version = _config_version()
     if version:
         payload["config_version"] = version
@@ -1518,6 +1628,12 @@ def report_cache(strategies, token=None, image_sigs=None, record=True):
         # Omitted, not []: the api reads an absent field as "old runtime, keep what
         # you have" — an empty list would wipe the user's schedule list on a hiccup.
         print(f"[strategy_reporter] report_schedules failed: {type(e).__name__}: {e}",
+              file=sys.stderr)
+    try:
+        payload["report_failures"] = report_failures()
+    except Exception as e:
+        # Omitted, not [], for the same reason: [] would clear the list in the web.
+        print(f"[strategy_reporter] report_failures failed: {type(e).__name__}: {e}",
               file=sys.stderr)
     # 常駐規則的原文。這個 key 在不在,就是 api 端「這台機器支不支援在 web 管理規則」
     # 的旗標——所以 None(讀不動)必須整個省略,不能塞 "" 冒充「沒有規則」。

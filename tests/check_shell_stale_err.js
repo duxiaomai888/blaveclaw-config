@@ -18,7 +18,7 @@ const cutBlock = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); if (i
 const pure = cutBlock("/* ── 純邏輯(", "/* ── 純邏輯到此") + cutBlock("/* ── 視角純邏輯(", "/* ── 視角純邏輯到此");
 const cut = (name) => { const i = src.indexOf("function " + name + "("); let d = 0; for (let k = src.indexOf("{", i); k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}" && --d === 0) return src.slice(i, k + 1); } throw new Error("no " + name); };
 
-const node = (tag) => ({ tag, cls: "", kids: [], text: "", appendChild(c) { this.kids.push(c); return c; }, append(...c) { c.forEach((x) => this.kids.push(x)); },
+const node = (tag) => ({ tag, cls: "", kids: [], text: "", dataset: {}, on: {}, addEventListener(e, f) { this.on[e] = f; }, appendChild(c) { this.kids.push(c); return c; }, append(...c) { c.forEach((x) => this.kids.push(x)); },
   setAttribute() {}, get textContent() { return this.text + this.kids.map((k) => (typeof k === "string" ? k : k.textContent)).join(""); }, set textContent(v) { this.text = v; this.kids = []; } });
 const flat = (n, out = []) => { if (n && n.tag) { out.push(n); (n.kids || []).forEach((k) => flat(k, out)); } return out; };
 
@@ -35,7 +35,7 @@ function paint(report, st = {}) {
   };
   ctx.trEl = (tag, cls, text) => { const n = node(tag); n.cls = cls || ""; if (text != null) n.text = text; return n; };
   ctx.trSec = (x) => x; ctx.trTipLabel = (a2, b2) => node("span"); ctx.trHead = () => node("thead");
-  ctx.trMoneyInto = (n, v) => { n.text = String(v); }; ctx.trFmt = (v) => String(v); ctx.trFmt2 = (v) => String(v);
+  ctx.trMoneyInto = (n, v) => { n.text = String(v); }; ctx.trLotsInto = (n, v) => { n.text = String(v) + "口"; }; ctx.trFmt = (v) => String(v); ctx.trFmt2 = (v) => String(v);
   ctx.trUnit = () => "USDT"; ctx.trCcy = () => "USDT"; ctx.TR_STALE_MS = 10 * 60 * 1000;
   ctx.trVenueIds = (r) => Object.keys((r && r.venues) || {}); ctx.trLiveEntry = (r, id) => ((r && r.account && r.account.venues) || {})[id] || null;
   ctx.trOrderErrText = (sym, err) => "ERR:" + sym + ":" + err;

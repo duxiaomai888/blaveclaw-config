@@ -77,7 +77,7 @@ universe = sample_by_sector(by_sector, total=100)
 > 除權息後原始價格會向下跳空，還原價則平滑消除跳空，適合計算指標與回報。  
 > 用戶問「台積電最近走勢怎樣」→ `fetch_twstock_price`；要跑 SMA 回測 → `fetch_twstock_price_adj`。
 
-**免費、免 key、不經 Blave。** 日K 由本機直接向該股所屬交易所逐月抓（上市/上櫃用當日全市場檔判斷，本機快取一天），過去月份抓一次永久快取、當月每次重抓；證交所 3 秒 1 次、櫃買 1 秒 1 次請求（上市 2010 → 今天一檔約 200 次、約 10 分鐘，之後只重抓當月）。**跑之前先估時間**：沒有快取的上市股每檔每年約 36 秒（12 個月 × 3 秒）、上櫃約 12 秒，檔數 × 年數相乘就是要等的時間——五檔上市股從 2015 年起約 35 分鐘，超過一輪能跑的上限（單一指令 30 分鐘）。超過約 25 分鐘就先跟用戶講要多久，並提議先用較短的期間（例如近 3 年，五檔約 9 分鐘）跑第一版，之後拉長期間時已抓的月份不會重抓。每個月抓到就寫進快取，中途被切斷也留著，重跑從斷掉的那個月接續（`references/deployment.md` › *When the job does not finish in the turn*）。**引用這些數字的報告或回覆一律附「資料來源:臺灣證券交易所、證券櫃檯買賣中心(政府資料開放授權)」**——兩所條款對開放資料的豁免以標示來源為條件。限制:TWSE 端點沒有 2010-01-04 以前的資料（更早的 `start` 自動改走下一個來源）、上櫃成交量四捨五入到仟股、上櫃轉上市的股票只有轉上市後的月份。來源順序:交易所 → FinMind 免費層（raw `TaiwanStockPrice`，無 token 每小時 300 次，1994 起；還原係數仍用兩所除權息表）→ Blave 端點（訂閱戶）。**免費來源只在用戶自己的電腦上抓（電腦版 `BLAVE_AGENT_LOCAL=1`）;雲端主機用 Blave 資料**，與改版前一樣；`BLAVE_TWSTOCK_DAILY_SOURCE=public|blave` 兩個方向都可強制。`df.attrs['source']` 寫著實際供應者（`TWSE` / `TPEx` / `FinMind` / `Blave`），退到下一來源時會印 ⚠️。`*_batch` 版本與 `fetch_twstock_ohlcv(…, '1d')` 不變（Blave）。當日 K 在台北 17:35 起才算可用（`FEED_TIMING['twstock_price']`：TWSE 每日收盤行情 14:00 / 15:30 / 17:30 三版，取第三版 + 5 分）。
+**免費、免 key、不經 Blave。** 日K 由本機直接向該股所屬交易所逐月抓（上市/上櫃用當日全市場檔判斷，本機快取一天），過去月份抓一次永久快取、當月每次重抓；證交所 3 秒 1 次、櫃買 1 秒 1 次請求（上市 2010 → 今天一檔約 200 次、約 10 分鐘，之後只重抓當月）。**跑之前先估時間**（只算逐檔的 `fetch_twstock_price` / `fetch_twstock_price_adj`；`*_batch` 走 Blave、全市場也是幾分鐘，不套這個估法）：先看 `cache/twstock_daily_<代號>_<twse|tpex>/` 已有哪些月份，只算缺的月份（當月每次重抓，算一個）——上市每檔每月約 3 秒（每年 36 秒）、上櫃約 1 秒；五檔上市股從 2015 年起全缺約 35 分鐘，超過一輪能跑的上限（單一指令 30 分鐘）。超過約 25 分鐘就先跟用戶講要多久，並提議先用較短的期間（例如近 3 年，五檔約 9 分鐘）跑第一版，之後拉長期間時已抓的月份不會重抓。每個月抓到就寫進快取，中途被切斷也留著，重跑從斷掉的那個月接續（`references/deployment.md` › *When the job does not finish in the turn*）。**引用這些數字的報告或回覆一律附「資料來源:臺灣證券交易所、證券櫃檯買賣中心(政府資料開放授權)」**——兩所條款對開放資料的豁免以標示來源為條件。限制:TWSE 端點沒有 2010-01-04 以前的資料（更早的 `start` 自動改走下一個來源）、上櫃成交量四捨五入到仟股、上櫃轉上市的股票只有轉上市後的月份。來源順序:交易所 → FinMind 免費層（raw `TaiwanStockPrice`，無 token 每小時 300 次，1994 起；還原係數仍用兩所除權息表）→ Blave 端點（訂閱戶）。**免費來源只在用戶自己的電腦上抓（電腦版 `BLAVE_AGENT_LOCAL=1`）;雲端主機用 Blave 資料**，與改版前一樣；`BLAVE_TWSTOCK_DAILY_SOURCE=public|blave` 兩個方向都可強制。`df.attrs['source']` 寫著實際供應者（`TWSE` / `TPEx` / `FinMind` / `Blave`），退到下一來源時會印 ⚠️。`*_batch` 版本與 `fetch_twstock_ohlcv(…, '1d')` 不變（Blave）。當日 K 在台北 17:35 起才算可用（`FEED_TIMING['twstock_price']`：TWSE 每日收盤行情 14:00 / 15:30 / 17:30 三版，取第三版 + 5 分）。
 
 ---
 
@@ -125,6 +125,8 @@ OHLC sanity checks).
 
 - `fetch_twstock_ohlcv(stock_id, schema, headers, start=None, end=None, adjust=False)` →
   DataFrame with Open/High/Low/Close/Volume, UTC index (Asia/Taipei for `1d`).
+  `headers` is the third argument here, unlike the other kline fetchers; the usual
+  order `(stock_id, schema, start, end, headers)` is accepted too.
   `schema`: `'1m'`/`'5m'`/`'15m'`/`'30m'`/`'60m'`/`'1d'`. **Volume is in lots (張),
   not shares.** Bars carry minute-START labels; the 13:30 Taipei bar is the closing
   auction. History from 2019-01. `adjust=True` returns forward-adjusted (後復權)
@@ -416,8 +418,11 @@ taiex = fetch_twmarket_index("2024-01-01", "2026-07-28", hdrs)   # DatetimeIndex
 Notes:
 - `TAIEX` is the only supported `index_id`; any other value returns 400. The index carries no
   volume column — market turnover comes from `fetch_twmarket_turnover`, keyed on the same dates.
-- In `fetch_twmarket_institutional`, 外資自營商 (foreign dealers' own account) is counted in
-  `dealer`, not in `foreign` — the same bucketing FinMind uses.
+- In `fetch_twmarket_institutional`, `foreign + investment_trust + dealer = total` on every day,
+  as TWSE publishes it. 外資自營商 (foreign dealers' own account) is already inside 自營商, so it
+  is part of `dealer` once and never part of `foreign` (`foreign` is 外資及陸資(不含外資自營商)).
+  TWSE prints 外資自營商 as its own row only from 2017-12-18; before that there is one
+  外資(及陸資) row, taken whole as `foreign` (in both this series and the key-free twin).
 - Margin balances are whole-market; `margin_balance_value` is the only TWD column, the rest are lots.
 - TXO put/call ratio is a futures/options dataset — see `fetch_twfutures_pcr` in
   `references/twfutures.md`, not here.
@@ -431,7 +436,7 @@ Notes:
   (`futContractsDateDown`), never through a Blave server. They run only on the user's own
   computer (`BLAVE_AGENT_LOCAL=1`; elsewhere they raise `TwPublicUnavailable`), one request every
   3 seconds to twse.com.tw (1 s to TAIFEX); 三大法人 and 融資 cost one request per trading day on a
-  cold cache. The TAIEX report
+  cold cache. The key-free 三大法人 starts 2004-05-03 (ask from May 2004, not April). The TAIEX report
   templates use them when this turn has no Blave data access; prefer the Blave functions
   otherwise. Anything citing them carries the attribution line `資料來源:臺灣證券交易所網站`
   / `資料來源:臺灣期貨交易所(政府資料開放授權)` (`df.attrs['source']` = `TWSE` / `TAIFEX`) —
@@ -451,8 +456,8 @@ from lib.data import (
     fetch_twstock_institutional_batch,          # (stock_ids, start, end, headers) → foreign_net（= foreign_buy − foreign_sell，單位是股，÷1000 才是張）及原始欄位
     fetch_twstock_shareholding_batch,           # (stock_ids, start, end, headers) → shareholders 欄
     fetch_twstock_foreign_shareholding_batch,   # (stock_ids, start, end, headers) → 外資持股比率/股數
-    fetch_twstock_financials_batch,             # (stock_ids, headers) → 損益表 long format
-    fetch_twstock_balance_sheet_batch,          # (stock_ids, headers) → 資產負債表 long format
+    fetch_twstock_financials_batch,             # (stock_ids, headers, types=None) → 損益表 long format
+    fetch_twstock_balance_sheet_batch,          # (stock_ids, headers, types=None) → 資產負債表 long format
     fetch_twstock_monthly_revenue_batch,        # (stock_ids, headers) → revenue, revenue_month, revenue_year
 )
 ```
@@ -516,6 +521,11 @@ for sid in universe:
     eps_yoy      = fin['EPS'].pct_change(4)                  # EPS YoY（同季比）
     rev_yoy      = rev['revenue'].pct_change(12)             # 月營收 YoY
 ```
+
+Whole market and only a few items needed → pass `types=` (the balance sheet is ~110 items per
+stock, most of the download): `fetch_twstock_balance_sheet_batch(universe, hdrs, types=['Equity'])`.
+Only those `type` rows come back; the full frame's cache is untouched. At most 50 names per
+call; an empty list raises `ValueError` (pass `None` for every item).
 
 損益表 key types：`Revenue`、`GrossProfit`、`OperatingIncome`、`IncomeAfterTaxes`、`EPS`
 

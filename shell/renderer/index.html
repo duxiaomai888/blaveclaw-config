@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="trade.css">
 <link rel="stylesheet" href="capital.css">
 <link rel="stylesheet" href="datasrc.css">
+<link rel="stylesheet" href="apikey.css">
 <link rel="stylesheet" href="rules.css">
 <link rel="stylesheet" href="library.css">
 <link rel="stylesheet" href="report-blocks.css">
@@ -24,6 +25,8 @@
 <link rel="stylesheet" href="browser.css">
 <link rel="stylesheet" href="export.css">
 <link rel="stylesheet" href="versions.css">
+<link rel="stylesheet" href="engine.css">
+<link rel="stylesheet" href="welcome.css">
 </head><body>
 
 <!-- ============ 連結畫面(獨立畫面,不是 modal) ============ -->
@@ -201,7 +204,8 @@
         <div class="lib-head" id="lib-head">
           <div class="lib-head-list" id="lib-head-list">
             <h5 class="main-head-name" id="lib-h" tabindex="-1" data-i18n="lib.nav"></h5>
-            <p class="lib-desc" data-i18n="lib.desc"></p>
+            <!-- 說明句由 library.js libPaintDesc 畫(找點子開著時句尾接文字鈕;不用 data-i18n,換語言時 applyStatic 才不會把鈕洗掉) -->
+            <p class="lib-desc" id="lib-desc"></p>
             <div class="lib-tools">
               <div class="lib-seg" id="lib-seg" role="group" data-i18n-aria="lib.mkt.aria">
                 <button type="button" data-mkt="all" aria-pressed="true" data-i18n="lib.mkt.all"></button>
@@ -211,11 +215,11 @@
             </div>
           </div>
           <!-- 詳情模式:頁首只剩返回鈕 -->
-          <button class="lib-back" id="lib-back" type="button" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span data-i18n="lib.nav"></span></button>
+          <button class="lib-back" id="lib-back" type="button" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span id="lib-back-l" data-i18n="lib.nav"></span><span class="t" id="lib-back-s" hidden></span></button>
         </div>
         <div class="lib-body" id="lib-body" tabindex="0">
-          <!-- 閘門卡(spec-desktop-0.1.6 §3.3):本機視角、付不出資料費時清單頂端那一張;內容由 library.js 的 libGateNode 畫 -->
-          <div class="lib-gate" id="lib-gate" hidden></div>
+          <!-- 沒權限時的兩組(spec-0.1.13 §2.2):section.lib-grp × 2,閘門卡掛在第二組頭上;不分組時空著、列畫在 #lib-rows。內容由 library.js 的 libPaintList 畫 -->
+          <div id="lib-grps"></div>
           <div class="lib-rows" id="lib-rows"></div>
           <p class="lib-state" id="lib-state" role="status" hidden></p>
           <div class="lib-det" id="lib-det" hidden></div>
@@ -257,18 +261,37 @@
       <!-- 起手範例放在中欄(Wei):聊天欄只留一句話;中欄本來就空著,範例鈕在這裡
            同時交代了「這一欄之後會出現什麼」。點了直接送出。 -->
       <div class="main-empty" id="main-empty">
-        <!-- 照雲端工作頁的 welcome(workspace.html `.main-welcome`):品牌記號當浮水印,
-             只比背景亮一階、不加底板——留白就是頁面本身;下面是起手短籤。沒有說明句。 -->
+        <!-- 全部靠左、同一條軸:品牌記號與標題「開始一支策略」並排一行(.wc-head)→ 起手短籤 → 資料清單(一張卡)。
+             記號與籤的基礎值在 app.css(照雲端工作頁的 welcome),靠左、尺寸與顏色由 welcome.css 蓋 -->
         <div class="wc-inner">
-          <svg class="wc-mark" viewBox="0 0 180 180" aria-hidden="true">
-            <path d="M0 108.973 A90 90 0 0 1 76.668 108.182 A20 20 0 0 0 105 90 A45 45 0 0 1 180 56.459 L180 180 L0 180 Z" fill="currentColor" />
-          </svg>
+          <div class="wc-head">
+            <svg class="wc-mark" viewBox="0 0 180 180" aria-hidden="true">
+              <path d="M0 108.973 A90 90 0 0 1 76.668 108.182 A20 20 0 0 0 105 90 A45 45 0 0 1 180 56.459 L180 180 L0 180 Z" fill="currentColor" />
+            </svg>
+            <h4 class="wc-h" data-i18n="wd.start"></h4>
+          </div>
           <div class="wc-chips">
-            <!-- 「看免費策略」開策略庫(不送訊息;同雲端歡迎頁那顆 workspace_chip_free) -->
+            <!-- 「看現成策略」開策略庫(不送訊息;同雲端歡迎頁那顆 workspace_chip_free) -->
             <button class="wc-chip" id="chat-lib" type="button" data-i18n="lib.chip"></button>
+            <!-- 「上網找點子」開找點子框(spec-0.1.13 §5.1;只在這台電腦視角、內建瀏覽器開著、引擎跑得動時出,library.js libIdeaPaint 切 hidden) -->
+            <button class="wc-chip" id="chat-idea" type="button" data-i18n="idea.chip" hidden></button>
             <!-- 「新增策略」開框、不送訊息(同雲端歡迎頁第二顆) -->
             <button class="wc-chip" id="chat-ns" type="button" data-i18n="ns.chip"></button>
-            <button class="wc-chip" id="chat-eg" type="button" data-i18n="ws.chatExample"></button>
+          </div>
+          <!-- 可以回測的資料(renderer/welcome.js;設計 mockup data-scope §1):取代了原本第四顆「回測一支 BTC 20/50 均線策略」的起手籤。
+               依市場分段;帳號狀態決定兩欄對比(免費 vs Blave 資料)或單一清單;整列可點 → 那一句落進輸入框不送出;
+               「看全部資料」用瀏覽器開網站的資料文件頁(welcome.js wdDocs)。列由 wdPaint 畫 -->
+          <div class="wl" id="wl">
+            <div class="wl-top">
+              <span class="wl-cap" data-i18n="wd.title"></span>
+              <span class="lib-seg" id="wl-seg" role="group" data-i18n-aria="wd.title">
+                <button type="button" data-mk="crypto" aria-pressed="true" data-i18n="wd.mk.crypto"></button>
+                <button type="button" data-mk="tw" aria-pressed="false" data-i18n="wd.mk.tw"></button>
+                <button type="button" data-mk="txf" aria-pressed="false" data-i18n="wd.mk.txf"></button>
+              </span>
+            </div>
+            <div class="wl-body" id="wl-body"></div>
+            <div class="wl-foot"><button class="btn-quiet" id="wl-all" type="button" data-i18n="wd.all"></button><p class="wl-state" id="wl-state" aria-live="polite"></p></div>
           </div>
         </div>
       </div>
@@ -310,15 +333,37 @@
              .is-closed 與 inert 同進退,預設收合;小標與 group 的 aria-label 同字,小標 aria-hidden,讀屏只念一份 -->
         <div class="sug-wrap is-closed" id="sug-wrap" inert>
           <div class="sug" role="group" data-i18n-aria="ws.sugGroup">
-            <div class="sug-cap" aria-hidden="true" data-i18n="ws.sugGroup"></div>
+            <!-- 關閉 × 不能放進小標(小標 aria-hidden,讀屏會看不到)。兩個包在 .sug-head:收合時 .sug 往下縮、內容從頂端被裁,
+                 × 釘在 .sug 頂端的話會留在畫面上滑過建議列;釘在 head 才會跟小標一起被裁掉 -->
+            <div class="sug-head">
+              <div class="sug-cap" aria-hidden="true" data-i18n="ws.sugGroup"></div>
+              <button type="button" class="sug-close" id="sug-close" data-i18n-aria="ws.sugClose">✕</button>
+            </div>
             <div class="sug-rows" id="sug-rows"></div>
           </div>
         </div>
         <!-- 回合進行中、草稿非空時按 Enter:不送,這一行講為什麼(e2e 0.1.8 #71);字由 taWaitShow 寫,回合結束即收 -->
         <p class="ta-wait" id="ta-wait" role="status"></p>
+        <!-- 待送附件 chip(照雲端 #attach_chip):檔名 + ✕,隨下一句送出;單檔,再選就取代。
+             貼著輸入框(建議列之下):建議列每輪都會長,chip 放它上面會離輸入框 200 多 px(設計稽核 0.1.17)。
+             chip 是輸入框的狀態,送出後泡泡末行的「迴紋針 + 檔名」另外畫(addMsg),重開 app 從逐字稿尾端那行還原 -->
+        <div class="attach-chip" id="attach-chip" hidden>
+          <span class="attach-name" id="attach-name"></span>
+          <!-- 選的模型不讀圖(DeepSeek):次要字,字由 attachHintPaint 組(帶模型名,不掛 data-i18n) -->
+          <span class="attach-hint" id="attach-hint" role="note" hidden></span>
+          <button type="button" class="attach-clear" id="attach-clear" data-i18n-aria="ws.attachRemove">✕</button>
+        </div>
         <div class="chat-input">
           <textarea id="ta" rows="1" data-i18n-ph="ws.placeholder"></textarea>
           <div class="ci-bar">
+            <!-- 迴紋針(照雲端 #attach_btn,同一顆中性 ghost):雲端放輸入列最左,電腦版的輸入框是上下兩層,放工具列最左。
+                 電腦版另外收拖放到輸入框與貼上剪貼簿的圖(原生能力,雲端沒有) -->
+            <input type="file" id="attach-input" hidden />
+            <button class="btn-attach" id="attach-btn" type="button" data-i18n-aria="ws.attach">
+              <svg class="icon-attach" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M14.29 7.37l-6.13 6.13a4 4 0 01-5.66-5.66l6.13-6.13a2.67 2.67 0 013.77 3.77l-6.13 6.13a1.33 1.33 0 01-1.89-1.89l5.66-5.65" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
             <div class="mp" id="mp" hidden>
               <button class="mp-trigger" id="mp-trigger" type="button"
                       aria-haspopup="dialog" aria-expanded="false" aria-controls="mp-panel">
@@ -386,14 +431,25 @@
               <select class="set-sel" id="set-lang"></select>
             </span>
           </div>
-          <!-- 關於(這一頁最下面;版本唯一出現處):一行「Blave {app} · 雲端主機 {ws} · 已是最新版」+ 右邊一個文字連結(檢查更新 / 重新啟動以完成更新)。
-               字與連結由 app.js 的 upPaint 依 upPlan 畫;沒主機 / 沒登入時雲端那一段不寫 -->
+          <!-- 關於(這一頁最下面;版本唯一出現處):第一行「Blave {app} · 已是最新版」+ 文字連結(檢查更新 / 重新啟動以完成更新),只管電腦版;
+               第二行「雲端主機 {ws} · 有新版 {lv}」+「更新雲端主機」,只在主機在跑或停機時出現。字與連結由 app.js 的 upPaint 依 upPlan 畫 -->
           <div class="set-about" id="set-up">
             <h6 class="set-gl" data-i18n="up.about"></h6>
             <div class="set-up-row">
               <p class="set-up-line" id="set-up-line" role="status"></p>
               <button type="button" class="btn-quiet" id="set-up-btn"></button>
             </div>
+            <div class="set-up-row" id="set-upc" hidden>
+              <p class="set-up-line" id="set-upc-line" role="status"></p>
+              <button type="button" class="btn-quiet" id="set-upc-btn" hidden></button>
+            </div>
+            <!-- 安裝識別碼(只在這裡一處):回報問題、要求刪除使用資料時附上。追蹤關掉也照出——要刪的是關掉之前送出的那些。
+                 值由 app.js 的 aboutIdLoad 填;讀不到或不是 UUID 的形狀就整段不出 -->
+            <div class="set-up-row" id="set-id" hidden>
+              <p class="set-up-line set-id-line"><span data-i18n="about.id"></span><code class="set-idv" id="set-idv"></code></p>
+              <button type="button" class="btn-quiet" id="set-id-copy" data-i18n="about.idCopy"></button>
+            </div>
+            <p class="set-up-line" id="set-id-note" data-i18n="about.idNote" hidden></p>
             <!-- 法遵兩份並排、不成句(不是「使用即表示同意」那種同意文字)。服務條款只有這一個入口;隱私權政策在 設定 › 隱私 另有一個就地的。
                  外開瀏覽器,網址帶目前語言 -->
             <p class="set-legal"><button type="button" class="btn-quiet" id="set-terms" data-i18n="legal.terms"></button> <span aria-hidden="true">·</span> <button type="button" class="btn-quiet" id="set-privacy" data-i18n="legal.privacy"></button></p>
@@ -531,6 +587,33 @@
   </form>
 </div>
 
+<!-- 上網找點子(spec-0.1.13 §5.2;殼照 #ns-modal 搬:.scrim + form.set-modal.del-modal 440,接線在 newstrategy.js)。只在這台電腦視角開得出來,所以沒有雲端記號。
+     市場三選一 + 方向(選填)+ 即時預覽句(.cf-quote)+ 誠實句(不會下單;引擎是 Blave AI 才接費用句) -->
+<div class="scrim" id="idea-scrim" role="dialog" aria-modal="true" aria-labelledby="idea-title" hidden>
+  <form class="set-modal del-modal" id="idea-modal">
+    <div class="modal-head">
+      <h6 id="idea-title" data-i18n="idea.title"></h6>
+      <button type="button" class="modal-close" id="idea-close" data-i18n-aria="set.close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld"><span class="fld-l" id="idea-mkt-l" data-i18n="idea.mkt"></span>
+        <div class="lib-seg idea-seg" id="idea-mkt" role="group" aria-labelledby="idea-mkt-l">
+          <button type="button" data-mkt="crypto" aria-pressed="false" data-i18n="lib.mkt.crypto"></button>
+          <button type="button" data-mkt="tw" aria-pressed="false" data-i18n="lib.mkt.tw"></button>
+          <button type="button" data-mkt="any" aria-pressed="true" data-i18n="idea.any"></button>
+        </div>
+      </div>
+      <label class="fld"><span class="fld-l"><span data-i18n="idea.topic"></span><span class="opt" id="idea-opt"></span></span><input class="f-input txt" id="idea-topic" name="topic" maxlength="40" autocomplete="off" data-i18n-ph="idea.topicPh"></label>
+      <div class="fld"><span class="fld-l" data-i18n="ns.previewLabel"></span><div class="cf-quote" id="idea-preview" aria-live="polite"></div></div>
+      <p class="ns-hint" id="idea-hint"></p>
+    </div>
+    <div class="modal-foot">
+      <span class="foot-msg" id="idea-msg" role="status"></span>
+      <span class="modal-btns"><button type="button" class="btn-out" id="idea-cancel" data-i18n="del.cancel"></button><button type="submit" class="btn-fill" id="idea-submit" data-i18n="ns.submit"></button></span>
+    </div>
+  </form>
+</div>
+
 <!-- 報告公開分享確認框(spec-share-0.1.8 DT2;殼 = .set-modal 640,接線同 #rpn:trapTab、點框外關、Esc 由 app.js escTop 收;由 report-share.js 接線)。
      結構同 web D2:連結預覽 → 作者 → hint → 揭露小字 → 三行 → 勾選 → 腳(條款句 + 取消 + 主鈕)。揭露小字按視角換、標題與主鈕按模式換,由 JS 寫。
      預覽縮圖 = og 固定圖(1200×630 淺底 lockup + 標籤行)縮 0.1 畫:晨報那張圖還沒出,不放點陣圖資產 -->
@@ -618,6 +701,7 @@
 <script src="trade.js"></script>
 <script src="capital.js"></script>
 <script src="datasrc.js"></script>
+<script src="apikey.js"></script>
 <script src="handoff.js"></script>
 <script src="export.js"></script>
 <script src="library.js"></script>
@@ -628,4 +712,6 @@
 <script src="versions.js"></script>
 <script src="browser.js"></script>
 <script src="pine-install.js"></script>
+<script src="engine.js"></script>
+<script src="welcome.js"></script>
 </body></html>

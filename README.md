@@ -18,12 +18,14 @@ Star the repo if this is useful — and Watch › Releases to get notified of ne
 
 ## What Makes It Different
 
-### Backtests That Check Whether It Was Luck
+### Backtests That Check for Overfitting and Use Real Fees
+
+Overfitting: parameters that just happen to fit past data.
 
 - Every Type A backtest runs a Monte Carlo permutation test by default (MCPT, `lib/validation.py`) and records a p-value: could shuffled data have done as well?
 - A parameter scan (`lib/param_scan.py`) looks for a plateau of parameters that all work, not the single best cell.
 - Rolling walk-forward (`lib/walk_forward.py`) measures out-of-sample performance.
-- The fee has to match the real market. A fee of 0 is flagged by `lib/quality_check.py` and treated as a bug.
+- The fee should match the real market. `lib/quality_check.py` warns about a fee of 0 but does not force a change.
 - One idea gets one backtest by default. A poor result is reported as it is; the agent does not quietly re-tune the parameters until the numbers look good (see *Iteration Brakes* in [`AGENTS.md`](AGENTS.md)).
 
 ### See Whether Live Runs the Code You Backtested
@@ -51,8 +53,8 @@ You need:
 - macOS 13 or later. The packaged app is a universal build: Apple Silicon and Intel, one download.
 - Or Windows 10 or 11, x64 (the versions Electron 44 supports; ARM not tested). The Windows installer is not code-signed yet, so SmartScreen warns on first install: choose More info › Run anyway.
 - Node.js 22.12 or later, with npm (`shell/package.json` › `engines`)
-- `python3` on your `PATH`. The packaged app bundles its own Python 3.12; running from source uses your system `python3` to create the venv.
-- Claude Code or Codex installed and signed in, or a Blave account
+- `python3` on your `PATH` (`python` on Windows). The packaged app bundles its own Python 3.12; running from source uses your system Python to create the venv.
+- Claude Code or Codex installed and signed in, a pay-as-you-go DeepSeek API key, or a Blave account
 
 ```
 git clone https://github.com/Blave-TW/blave-agent.git
@@ -61,9 +63,19 @@ npm install
 npm start
 ```
 
+On Windows, in PowerShell (`npm.cmd` runs even when PowerShell's execution policy blocks the `npm` script):
+
+```powershell
+git clone https://github.com/Blave-TW/blave-agent.git
+cd blave-agent\shell
+npm.cmd install
+npm.cmd start
+```
+
 On first launch you choose what powers the agent:
 
 - **Your own Claude Code or Codex.** No Blave account needed, and Blave charges nothing for the AI. The app only launches the CLI; your Claude Code or Codex credentials stay with it.
+- **Your own API key (DeepSeek).** Paste a pay-as-you-go key; DeepSeek bills you directly and Blave charges nothing for the AI. The key stays in this computer's keychain (stored encrypted on Windows) and never reaches the agent: the app relays its requests locally.
 - **Blave AI.** Sign in with a Blave account; billed by usage.
 
 Then describe an idea. For example:
@@ -80,10 +92,14 @@ The agent sorts every idea into one of three types before writing code:
 | C | A portfolio: N symbols and a weight vector that sums to at most 1, rebalanced on a schedule | Required |
 | B | Everything else: screeners, grids, arbitrage, alerts, one-off execution | None |
 
-The interface follows the system language (English or Traditional Chinese). To override: `BLAVE_LANG=en npm start`.
+The interface follows the system language (English or Traditional Chinese). To override: `BLAVE_LANG=en npm start` (PowerShell: `$env:BLAVE_LANG="en"; npm.cmd start`).
 
 ## News
 
+- **2026-10-04** — Desktop 0.1.14: on Windows, Codex and Claude Code installed with npm are now detected (they used to show as not signed in), and Codex can read and write the workspace and run backtests; the Codex model picker appears after the first conversation without a restart; the installation ID moved to Settings › General; a close button on suggested next steps.
+- **2026-10-03** — Desktop 0.1.13: the library splits into "ready now" and "sign in first" — official free strategies on public exchange prices download without an account; ask the agent to search the web for backtestable ideas; leverage reminders at 1/5/10× with a checkbox above 10×; a Signal column in the amounts table and exchange rejections explained in plain words; engine updated to the new Claude Code.
+- **2026-10-03** — Windows version (x64) on the production track. The installer is not code-signed yet, so SmartScreen warns once: More info › Run anyway.
+- **2026-10-02** — Desktop 0.1.12: US stock daily-bar backtests (desktop only, backtest only); install progress on first launch; the built-in browser hands back to the agent in one click; success notes readable in the app; click a strategy name in Positions to see its trades; the parameter scan marks results from before a period or fee change.
 - **2026-10-01** — Desktop 0.1.11: out-of-sample results read on one line (efficiency and verdict); a validation run in the cloud is fetched when you switch back to the tab; a strategy with its amount set to 0 counts as not live yet, and the agent points you to set an amount.
 - **2026-09-30** — Desktop 0.1.10: an Out-of-Sample tab shows whether picking parameters from past data holds up on data it has never seen; "Restart to finish updating" now shows while auto-trading runs, and says first that the restart closes nothing and places no orders until you press Start trading.
 - **2026-09-29** — Desktop 0.1.9: restoring a version goes straight back to it and reruns the backtest on the latest data; Settings › Agent rules, where you see, add and delete the rules the agent keeps to; a menu bar icon with "Pause trading (keep positions)"; up to three suggested next steps after each reply.
@@ -122,7 +138,7 @@ For any other exchange or broker with an API, the agent can write a helper from 
 - Funding amounts and resuming trading are done by you — in the desktop app's Auto trading page, or on the web workspace for a cloud machine. The agent refuses to do them for you, even when asked. The one thing it may always do by itself is trip the kill switch.
 - On the desktop app, orders only go out while Blave is running; after you quit and reopen it, trading stays paused until you press Start trading.
 - The agent verifies before it reports: it re-reads a file after editing it, and queries an order back from the exchange before saying it was placed. Every order attempt is logged to `state/audit.jsonl`.
-- A backtest describes the past. It does not predict or guarantee future results. MCPT and parameter scans lower the odds that you are looking at luck; they do not remove them.
+- A backtest describes the past. It does not predict or guarantee future results. MCPT checks whether a result is statistically significant, and parameter scans check for overfitting; both only lower the odds that a backtest is fooling you, and neither removes them.
 - Nothing here is investment advice. Trading can lose money, including all of it.
 
 ## Run It in the Cloud (Paid)
@@ -131,10 +147,10 @@ If a strategy should keep running with your computer off, Blave Agent runs the s
 
 ## Running From Source: What Goes Where
 
-The first time you connect, the app prepares `~/Blave/`:
+The first time you connect, the app prepares `~/Blave/` (`%USERPROFILE%\Blave\` on Windows):
 
 - `~/Blave/workspace/` — `lib/`, `manager/`, `references/`, `examples/`, `allocators/`, the strategy templates, `AGENTS.md`, `CLAUDE.md` and `VERSION`, copied from this checkout
-- `~/Blave/venv/` — created with `python3 -m venv`, then `claude-agent-sdk`, cryptography, pandas, numpy, matplotlib, pyarrow, requests, python-dotenv and scipy are installed with pip
+- `~/Blave/venv/` — created with `python3 -m venv` (`python -m venv` on Windows), then `claude-agent-sdk`, cryptography, pandas, numpy, matplotlib, pyarrow, requests, python-dotenv and scipy are installed with pip
 - `~/Blave/state/` — chat sessions, chat images and trading state
 
 Your strategies end up in `~/Blave/workspace/strategies/<name>/`. When running from source, the official files are copied again on every launch, so edit `lib/` in the checkout, not in `~/Blave/workspace/`. Your strategies, `.env` and state are never overwritten.
@@ -144,7 +160,7 @@ Your strategies end up in `~/Blave/workspace/strategies/<name>/`. When running f
 | Path | What is in it |
 |---|---|
 | `AGENTS.md` | The agent's rules: verify before reporting, iteration limits, data sources, deployment redlines. Start here. |
-| `lib/` | Shared library: data, backtest runner, MCPT, parameter scan, walk-forward, reports, charts, watchboard, exchange account and order helpers (`account_*.py`, `order_*.py`), kill switch (`guard.py`) |
+| `lib/` | Shared library: data, backtest runner, MCPT, parameter scan, walk-forward, reports, charts, exchange account and order helpers (`account_*.py`, `order_*.py`), kill switch (`guard.py`) |
 | `strategies/` | Strategy templates. Your own strategies live here too and are git-ignored. |
 | `examples/` | Complete reference strategies (crypto, crude oil, Taiwan stocks, Taiwan index futures) and export templates — see [`examples/README.md`](examples/README.md) |
 | `references/` | What the agent reads before acting: library signatures, strategy code rules, deployment, broker guides, report contract |

@@ -1,6 +1,6 @@
 // Blave 電腦版 — 使用追蹤(主行程用)。契約:blave-canon output/backend/2026-09-21-desktop-telemetry-contract.md
 //
-// 只回答一件事:「哪一步發生了(或卡在哪一步)、什麼時候、哪個版本」。十八個事件、每個事件的屬性都是列舉——
+// 只回答一件事:「哪一步發生了(或卡在哪一步)、什麼時候、哪個版本」。二十三個事件、每個事件的屬性都是列舉——
 // 這個檔**沒有任何自由文字的入口**:對話、策略碼、策略名、標的、金額、部位、金鑰、路徑進不來,
 // 不是靠呼叫端自律,是 track() 只認下面這張表(api 端還有同一張白名單再擋一次)。
 //
@@ -14,7 +14,7 @@ const crypto = require("crypto");
 const EVENTS = {
   app_first_open: null,
   app_open: null,            // 每次啟動送一則;api 以「每安裝每 UTC 日」去重(留存、版本觸及率靠它)
-  connect_done: { kind: ["blave", "claude", "codex"] },
+  connect_done: { kind: ["blave", "claude", "codex", "apikey"] },
   login_done: null,
   first_backtest_done: null,
   trade_started: { venue_kind: ["paper", "real"] },
@@ -23,14 +23,26 @@ const EVENTS = {
   acct_card_shown: { card: ["pre_card", "pre_credit", "turn_card", "turn_credit"] },
   acct_card_click: { card: ["pre_card", "pre_credit", "turn_card", "turn_credit"] },
   acct_card_back: { state: ["ready", "no_card", "no_credit"] },
-  turn_failed: { reason: ["402", "403", "429", "engine_missing", "other"] },
-  connect_failed: { kind: ["claude_login", "codex_login", "claude_gone", "codex_gone", "blave_oauth", "blave_cancel", "no_local"] },
-  first_reply_done: { kind: ["blave", "claude", "codex"] },
+  turn_failed: { reason: ["402", "403", "429", "engine_missing", "other", "cap"] },   // cap = 自帶 API 金鑰撞到這一輪的用量上限(0.1.16)
+  connect_failed: { kind: ["claude_login", "codex_login", "claude_gone", "codex_gone", "blave_oauth", "blave_cancel", "no_local",
+    // 0.1.16 自帶 API 金鑰:「連結 / 儲存」驗不過(金鑰不認、餘額不足、連不到、其他);取消不算
+    "apikey_key", "apikey_credit", "apikey_net", "apikey_other"] },
+  first_reply_done: { kind: ["blave", "claude", "codex", "apikey"] },
   plan_start_res: { result: ["ok", "no_card", "no_credit", "error"] },
   update_failed: { stage: ["check", "download", "staging", "install", "other"] },
   lib_blocked: { why: ["signed_out", "no_card", "no_balance", "unknown", "cloud_off", "ai_no_card", "ai_no_credit"] },
   // 每日在線心跳:app 一直開著不重開的人沒有 app_open,靠它量到。事件本身就是「這台在線」;live = 本機對帳器在跑(含模擬)
   heartbeat: { live: ["on", "off"] },
+  // 引擎安裝(0.1.12;shell/enginesetup.js,主行程送):一輪真的有東西要裝的安裝跑完的結果(first / upd × done / net / other / timeout;
+  // 只修 venv 連結的不送),以及選用的那組(美股資料)沒裝好(前綴是組別)。分兩個事件:同一輪會同時有 first_done 與美股失敗
+  engine_setup: { result: ["first_done", "first_net", "first_other", "first_timeout", "upd_done", "upd_net", "upd_other", "upd_timeout"] },
+  engine_opt_fail: { result: ["us_net", "us_other", "us_timeout"] },
+  // 策略庫轉換(0.1.13;spec-0.1.13-library-conversion §8,renderer 送):本機「用這支」回合跑起來時那支的資料需求(未標 = unknown;雲端不送)、
+  // 找點子框送出成功時從哪個入口來。匿名使用不加屬性:看 user_id 有無、同一 install_id 之後有沒有 login_done
+  lib_pick: { data: ["none", "required", "unknown"] },
+  idea_sent: { from: ["welcome", "lib_head", "lib_empty"] },
+  // 0.1.15 偵測失敗(renderer 送,只在連結畫面偵測完時):本機那個 CLI 為什麼不能用。值由主行程 detectWhy 判,語意見 canon 登記表
+  detect_fail: { why: ["claude_none", "claude_timeout", "claude_nonzero", "claude_badjson", "codex_none", "codex_shim", "codex_timeout", "codex_nonzero"] },
   // 用了哪個功能:名字是白名單(canon .claude/docs/product-telemetry.md 的登記表;api 端 desktop_telemetry.EVENTS 同一份),
   // api 每安裝每 name 每 UTC 日去重——回答「誰、哪天、用過哪些功能」,不做逐點擊計數。library_* 的送出點在 renderer/library.js(libTrack),
   // reports_* 在 renderer/reports.js、strategy_new 在 renderer/newstrategy.js(都經 libTrack)。
@@ -68,18 +80,53 @@ const EVENTS = {
     // 樣本外驗證(0.1.10;renderer/app.js):點分頁(同 report_scan)、確認框送出且回合跑起來(同 scan_requested)
     "report_wf", "wf_requested",
     // 更新提示(0.1.10;main.js):「重新啟動以完成更新」真的走下去(直接裝、或下單中確認後)、搬到「應用程式」那一問按了「移」。主行程送
-    "update_restart", "app_move"] },
+    "update_restart", "app_move",
+    // 安裝進度卡(0.1.12;renderer/engine.js engRetry):按了卡上的「重試」(送下一句時自動再試的不算)
+    "engine_retry",
+    // pick_gate_lock:0.1.12 起無送出點(市場檢查出貨前整個拿掉);名字留著,api 白名單已登記、兩端逐字比對連順序都比
+    "pick_gate_lock",
+    // 策略庫成功筆記(0.1.12;renderer/library.js):閱讀頁內文第一次畫成功
+    "library_note",
+    // 內建瀏覽器的交還鈕(0.1.12;renderer/browser.js):標題列那顆、聊天那一列那顆,按了就記(不管有沒有 need;browser_handoff 照舊)
+    "browser_hb_head", "browser_hb_chat",
+    // 部位表點策略名開那支的進出場紀錄(0.1.12;renderer/trade.js trStratOpen):真的換頁才送,點下去才發現不在的不送
+    "trade_strat_open",
+    // 策略庫轉換(0.1.13;renderer/library.js libTurnEnd / libCloudChanged):「用這支」那一輪結束、清單真的多了一支(或覆蓋同名那支);
+    // 本機那一輪結束了但沒看到新策略
+    "lib_installed", "library_no_new",
+    // 下單 UX(0.1.13;renderer/trade.js,ux-order-1-4-5 §4):第 3 級槓桿勾了而且存成功、部位表「N 支策略」拆解被打開。不帶金額
+    "trade_lev_ack", "trade_net_open",
+    // 部位表拒單那一行的「請 agent 查原因」(0.1.13;order-copy #14 §4.4):填進聊天框才算(不送出)
+    "trade_err_ask",
+    // 建議下一步的關閉(renderer/suggest.js sugDismiss):按 × 或 Esc 收掉;送出、換對話、出錯的收合不算。不分 × / Esc(name 16 字裝不下第二格)
+    "suggest_closed",
+    // 關於第二行「更新雲端主機」(0.1.15;renderer/app.js upCloudUpdate / upCloudSend):按下(含投資組合被鎖那一行的雲端入口)、
+    // 確認或直接送出且回合真的跑起來、確認框沒按主鈕就收掉
+    "cloud_upd_open", "cloud_upd_ok", "cloud_upd_cancel",
+    // 缺資料來源金鑰(0.1.15;renderer/app.js rpGoDataSrc):按策略頁缺金鑰那一格的「去資料來源」,不帶來源名
+    "missing_key_go",
+    // 自帶 API 金鑰(0.1.16;renderer/apikey.js):按 API 金鑰那一列的「設定」(連結畫面或設定 › 模型接入)。測試成功 = connect_done kind=apikey
+    "apikey_setup",
+    // 綁卡／儲值入口(0.1.16;預檢卡與 402 卡另有 acct_card_click):bind_* 鈕字是綁卡、topup_* 是儲值／加值,後半是入口——
+    // set = 設定 › 帳號與方案(含錯誤列的鈕)、data = 沒有資料權限卡、cloud = 雲端開通頁與雲端停機的加值鈕、lib = 策略庫閘門與買策略沒卡那一框。
+    // 送出點 renderer/app.js bindGo(…)、renderer/library.js libTrack;策略庫 unknown(「帳號與方案」描邊鈕)不記
+    "bind_set", "topup_set", "bind_data", "topup_data", "bind_cloud", "topup_cloud", "bind_lib", "topup_lib",
+    // 歡迎頁的資料清單(0.1.17;renderer/welcome.js):點一列、那一句落進輸入框(不送出);按「看全部資料」(外開網站的資料文件頁)
+    "welcome_data_row", "welcome_data_all",
+    // 聊天附件(0.1.17;renderer/app.js submitMessage):帶附件的那一句回合真的跑起來才送,只分來源不記檔名——
+    // attach_paste = 在輸入框貼上剪貼簿的(不分圖或檔)、attach_image = 選檔 / 拖放的圖(mime image/*)、attach_file = 選檔 / 拖放的其他檔
+    "attach_file", "attach_image", "attach_paste"] },
 };
 const ONCE = ["app_first_open", "first_backtest_done", "first_reply_done"];   // 每個安裝只送一次:自己記,不靠 api 去重
 // 每安裝每屬性值每 UTC 日只送一次(契約 §「外殼端同日同 name 也不重送」):送過的記在狀態檔、換日整組清掉。
 // 放主行程而不是畫面:被攻破的 renderer 對 track-feature 灌合法名字也只會出門 20 次,搶不到 api 那顆全域熔斷
 const DAILY = ["feature_used", "acct_card_shown", "acct_card_click", "acct_card_back", "turn_failed", "connect_failed",
-  "plan_start_res", "update_failed", "lib_blocked", "heartbeat"];
+  "plan_start_res", "update_failed", "lib_blocked", "heartbeat", "engine_setup", "engine_opt_fail", "lib_pick", "idea_sent", "detect_fail"];
 // 每日一則、不分屬性值:心跳一天只要一列(live 記當天第一次送出那一刻的),下單中途開關不多送
 const DAILY_ONE = ["heartbeat"];
 const HEARTBEAT_MS = 10 * 60 * 1000;   // 啟動後 10 分鐘起每 10 分鐘看一次;當天送過就不出門(啟動當天另有 app_open)
 // 畫面(track-event)只准送這幾個;里程碑(app_first_open、login_done…)與主行程自己判的(plan_start_res、update_failed)不收
-const FROM_RENDERER = ["acct_card_shown", "acct_card_click", "acct_card_back", "turn_failed", "connect_failed", "first_reply_done", "lib_blocked"];
+const FROM_RENDERER = ["acct_card_shown", "acct_card_click", "acct_card_back", "turn_failed", "connect_failed", "first_reply_done", "lib_blocked", "lib_pick", "idea_sent", "detect_fail"];
 const DAY_RE = /^[0-9]{8}$/;
 const DEFAULT_ON = true;   // Wei 2026-09-21:預設開、照實告知、可關
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -186,7 +233,7 @@ function createTelemetry(opts) {
    是設定值,不是使用事件:「使用事件」開關、現在連的是哪個 AI、本機有沒有跑過回測(只有 bt / none)。api 的提醒信
    看到 off 就不寄(隱私權政策 §9.1),連的 AI 與回測過沒有也以這份為準。關掉時只送 off,其他都不送;
    沒登入時 account_status 本來就不打。 */
-const ENGINES = ["blave", "claude", "codex"];
+const ENGINES = ["blave", "claude", "codex", "apikey"];
 function statusHeaders(enabled, kind, backtested) {
   if (enabled !== true) return { "X-Blave-Telemetry": "off" };
   return { "X-Blave-Telemetry": "on", "X-Blave-Engine": ENGINES.indexOf(kind) >= 0 ? kind : "none",

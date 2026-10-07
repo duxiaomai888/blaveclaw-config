@@ -15,6 +15,7 @@
   第七批:#143 #167 回覆裡的時間換成用戶的時區並標明;#148 被要求上線時先講最近一次回測對比基準的結果。
   第九批:#2 前後比較用同一個基準;自己換算的數字寫公式與輸入日期、拿不到就寫「—」不硬算;百分位不當排名。
   第九批:#3 沒有要提議時回覆就此結束,不交代「沒有建議」、不更正自己的上一句。
+  0.1.17 e2e:「跟我討論要怎麼用…做策略」的回覆以編號提案收尾、標一個預設、缺的細節自己填不逐項問;台指期日線策略的 START 用最早可得日、不用 2011。
   第七批:開了就讀(實測開 6 頁只讀 3 頁,中時與鉅亨三頁開了沒讀);新聞與數字先讀媒體或官方原文,論壇貼文 / 轉述 / 聚合頁要標明。
 
 跑法:cd blave-agent && python3 tests/check_reply_rules_018.py
@@ -48,24 +49,35 @@ t("#57 AGENTS › Response Style:警告與收尾不進回覆,影響結果才講�
   and "never the warning itself" in style)
 
 lib = read("references", "lib.md")
-scan = lib[lib.index("**Parameter scan workflow**"):lib.index("The web workspace sends three fixed prompts")]
+scan = lib[lib.index("**Parameter scan workflow**"):lib.index("The web workspace sends four fixed prompts")]
 t("#29 lib.md 掃描流程:指路指「參數掃描」分頁、不指回測分頁",
   "「參數掃描」 tab" in scan and "never send them to the 回測分頁" in scan)
 t("#29 AGENTS › Charts:資料夾圖檔出現在回測分頁只限雲端 web,掃描結果在參數掃描分頁",
   "the desktop backtest tab shows none" in agents and "heatmap and grid are in the 參數掃描 tab" in agents)
 
 mk = read("references", "marketplace.md")
-quality = [l for l in mk.splitlines() if "quality_check.py" in l or l.lstrip().startswith("- Exit 1")]
-install = mk[mk.index("7. **Quality scan**"):mk.index("8. **Run it")]
-t("#32 安裝流程的品質掃描 exit 1:照原樣跑、不問、不改下載的碼、回覆提一句",
-  "run it as it is" in install and "never stop to ask" in install and "never edit the downloaded code" in install
-  and "ask for confirmation" not in install)
-asks = [l for l in quality if "quality_check.py" in l and re.search(r"exit 1: confirm", l)]
-t("#32 bundle / shared 兩條流程的品質掃描 exit 1 也不再問", not asks and mk.count("exit 1: run it as it is") == 2)
-security = mk[mk.index("6. **Security scan**"):mk.index("7. **Quality scan**")]
-t("#32 安全掃描的警告照舊要問(不放寬)", "Exit 1 (warnings) → show findings to user, ask for confirmation" in security)
+quality = [l for l in mk.splitlines() if "quality_check.py" in l or "RESULT: run-as-is" in l]
+install = mk[mk.index("7. **Quality scan, then move**"):mk.index("8. **Run it")]
+# 0.1.16 起「照原樣跑、不問、不改碼、回覆提一句」由 quality_check --context install 的 NEXT 行講(tests/check_scan_context.py 鎖字句)
+t("#32 安裝流程的品質掃描 run-as-is:照 NEXT 行(照原樣跑、不問)、回覆用白話提每個警告",
+  "--context install" in install and "do what its `NEXT:` line says" in install and "move it, then step 8" in install
+  and "no constant names, no tool names" in install and "ask for confirmation" not in install)
+asks = [l for l in quality if "quality_check.py" in l and re.search(r"run-as-is`?: confirm", l)]
+scans = [l for l in quality if "lib/quality_check.py --context install tmp/" in l]
+t("#32 bundle / shared 兩條流程的品質掃描也帶 --context install、跟 NEXT 行,不再問",
+  not asks and len(scans) == 3 and all("NEXT:" in l for l in scans))
+security = mk[mk.index("6. **Security scan**"):mk.index("7. **Quality scan, then move**")]
+t("#32 安全掃描的警告照舊要問(不放寬)", "`RESULT: ask-user` (warnings) → show findings to user, ask for confirmation" in security)
 t("#36 下載檔用 mv 不用 cp;流程結束 tmp/ 不留下載檔",
-  "`mv`, never `cp`" in security and "Leave nothing of the download in `tmp/`" in mk)
+  "`mv` (never `cp`" in install and "Leave nothing of the download in `tmp/`" in mk)
+# 10-04 Windows 測試機:Codex 看到 #101 檔頭「RSI + Bollinger Bands」與 rsi_bb_reversal,判定跟「BTC 通道動能共振」不符而拒裝
+names = [l for l in mk.splitlines() if l.startswith("**Listing name vs code.**")]
+desktop = section(mk, "## Desktop-downloaded picks")
+t("#101 名稱不符:DISPLAY_NAME/SYMBOL/INTERVAL/方向一致就照裝、檔頭與 STRATEGY_NAME 不同不停、回覆提一句;標的/週期/方向不符照樣問",
+  len(names) == 1 and "`DISPLAY_NAME`, `SYMBOL`, `INTERVAL` and long/short side match" in names[0]
+  and "is not a reason to stop" in names[0] and "one sentence in the reply" in names[0]
+  and "does not match, stop before moving it into `strategies/` (step 7) and ask the user" in names[0])
+t("#101 名稱不符:電腦版下載那一節明確套用這條", "*Listing name vs code* above applies." in desktop)
 
 t("#66 AGENTS › Response Style:只提存在的檔案,觸發才寫的 log 不算已建立",
   "Name only files and outputs that exist" in style and "has not been created yet" in style)
@@ -93,9 +105,10 @@ t("#90 tmp/ 的一次性腳本:回覆前刪掉、不抄 tmp/ 裡的舊腳本",
 
 # 第五批
 t("#133 台股免費路徑的估時:AGENTS.md 是一句獨立的指示(先估、先講、超過 25 分鐘先提短期間),範例策略的檔頭也寫了(agent 抄的就是範例)",
-  "**Before a Taiwan backtest on the desktop, work out the wait and say it first:**" in agents and "stocks × years × 36 s" in agents
+  "**Desktop Taiwan backtest: say the wait first**" in agents and "`fetch_twstock_price[_adj]` costs ~36 s per uncached listed stock-year, `*_batch` minutes" in agents
   and all("# Data wait:" in read("examples", n, "strategy.py").split("import sys")[0] and "tell the user before running" in read("examples", n, "strategy.py")
-          for n in ("twstock_momentum", "tw100_foreign_zscore")))
+          for n in ("twstock_momentum", "tw100_foreign_zscore"))
+  and "~36 s per stock-year of the per-stock free fetchers" in read("examples", "tw100_foreign_zscore", "strategy.py"))
 t("I 改參數時,DESCRIPTION 與檔頭裡寫到的同一個數字一起改(策略頁的副標是 DESCRIPTION)",
   "Changing a parameter also changes every place the file states that number: `DESCRIPTION` and the header comment" in agents
   and "**Keep the words true to the code.**" in read("references", "strategy-code.md"))
@@ -161,6 +174,21 @@ t("#5B 規則:AGENTS › Reports 的自訂報告那一句改成從 quickstart() 
 t("#143 #167 時間:回覆、表格、報告裡的時間一律換成用戶的時區並標明;不寫其實是 UTC 的「今天 21:34」,不出「時間(UTC)」欄(AGENTS › Response Style,一句)",
   len([l for l in style.splitlines() if l.startswith("- **Clock times are the user's, and say whose:**")]) == 1 and "converted to the user's timezone" in style and "named once" in style
   and "never a bare 「今天 21:34」 that is really UTC" in style and "no 「時間(UTC)」 column unless the user asked for UTC" in style)
+# 0.1.17 e2e:歡迎頁點列送出的討論句,回合 1 以三個問題收尾(方向／標的／週期),跟畫面上的建議句各講各的。
+# runtime 的結尾規則只管「提議下一步的問句」,問用戶偏好的問句不在它的範圍內
+discuss = [l for l in style.splitlines() if l.startswith("- **Asked to discuss how to build a strategy from some data")]
+t("0.1.17 討論型開場:編號提案收尾、標一個預設、回編號就開始做;缺的細節用預設並寫明、不逐項問、最多一個問題;建議句出自同一組提案(AGENTS › Response Style,一句)",
+  len(discuss) == 1 and "end on your numbered proposals with one marked as the recommended default" in discuss[0] and "replying with a number starts the build" in discuss[0]
+  and "(symbol, interval, contract, capital)" in discuss[0] and "not asked one by one" in discuss[0] and "at most one clarifying question" in discuss[0] and "picked from those same proposals" in discuss[0])
+# 0.1.17 e2e:歡迎頁寫「1998 年起」,agent 寫出的台指期日線策略 START 卻是 2011-01-03(讀了 twfutures.md 裡 Blave 序列的起點就拿來用)
+_dp = read("lib", "data.py")
+_listed = re.search(r"_TAIFEX_INDEX_FUT_LISTED = \{'TXF': '([\d-]+)', 'MXF': '([\d-]+)', 'TMF': '([\d-]+)'\}", _dp).groups()
+_blave0 = re.search(r"_TXF_BLAVE_START = '([\d-]+)'", _dp).group(1)
+_start = " ".join(section(read("references", "twfutures.md"), "## TXF daily bars back to 1998").split())
+t("0.1.17 台指期日線策略的 START:電腦版預設用最早可得日(三個合約的日期逐字同 lib/data.py),2011-01-03 只是 Blave 序列的起點、分線與雲端主機日線才從那天起(references/twfutures.md)",
+  f"defaults to the first bar this fetch returns — TXF `{_listed[0]}`, MXF `{_listed[1]}`, with or without Blave data; TMF `{_listed[2]}` without Blave data (with it `{_blave0}`" in _start
+  and f"`{_blave0}` is where the Blave series begins, not a default" in _start and "only for intraday schemas and for `'1d'` on a cloud machine" in _start
+  and f"- **Cloud machine:** Blave only, from {_blave0}." in _start)
 live_rule = [l for l in agents.splitlines() if l.startswith("**Asked to put a strategy live, say first how its latest backtest did against its benchmark**")]
 t("#148 被要求上線:先講這支最近一次回測對比基準的結果,尤其輸給持有或沒過顯著性;決定權在用戶(AGENTS › Strategy Deployment,一句)",
   len(live_rule) == 1 and "trailed buy-and-hold or did not pass significance" in live_rule[0] and "The decision stays the user's" in live_rule[0]

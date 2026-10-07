@@ -19,12 +19,14 @@ https://github.com/user-attachments/assets/66c747e9-b068-4da9-a372-84d9afa7cb0d
 
 ## 跟別的交易 agent 不一樣的地方
 
-### 回測先檢查是不是運氣
+### 回測先查過度擬合，手續費照實算
+
+過度擬合，指參數只是剛好貼合過去的資料。
 
 - 每次 Type A 回測預設都會跑蒙地卡羅排列檢定（MCPT，`lib/validation.py`），記下 p 值：把資料打亂之後，能不能做出一樣好的成績？
 - 參數掃描（`lib/param_scan.py`）找的是「一整片都有效」的參數平台，不是最高的那一格。
 - 滾動式樣本外驗證（walk-forward，`lib/walk_forward.py`）量樣本外的表現。
-- 手續費要符合真實市場。填 0 會被 `lib/quality_check.py` 標出來，並當成 bug 處理。
+- 手續費應該符合真實市場。填 0 時 `lib/quality_check.py` 會提出警告，但不強制修改。
 - 一個想法預設只回測一次。結果不好就照實回報，agent 不會偷偷調參數調到數字好看（見 [`AGENTS.md`](AGENTS.md) 的 *Iteration Brakes*）。
 
 ### 看得到實盤跑的是不是回測那份
@@ -52,8 +54,8 @@ agent 上網查資料用的是 app 內建的瀏覽器：它正在讀哪一頁，
 - macOS 13 以上。打包版是通用版：Apple Silicon 與 Intel 同一個安裝檔。
 - 或 Windows 10、11，x64（Electron 44 支援的版本；ARM 版尚未測試）。Windows 安裝檔還沒有程式碼簽章，第一次安裝時 SmartScreen 會跳出警告：按「其他資訊」再按「仍要執行」。
 - Node.js 22.12 以上與 npm（`shell/package.json` › `engines`）
-- `PATH` 上有 `python3`。打包版自帶 Python 3.12；從原始碼跑時，venv 用的是你系統的 `python3`。
-- 已安裝並登入的 Claude Code 或 Codex，或一個 Blave 帳號
+- `PATH` 上有 `python3`（Windows 是 `python`）。打包版自帶 Python 3.12；從原始碼跑時，venv 用的是你系統的 Python。
+- 已安裝並登入的 Claude Code 或 Codex、一把隨用隨付的 DeepSeek API 金鑰，或一個 Blave 帳號
 
 ```
 git clone https://github.com/Blave-TW/blave-agent.git
@@ -62,9 +64,19 @@ npm install
 npm start
 ```
 
+Windows 在 PowerShell 裡跑（用 `npm.cmd`：PowerShell 的執行原則擋下 `npm` 指令碼時也能跑）：
+
+```powershell
+git clone https://github.com/Blave-TW/blave-agent.git
+cd blave-agent\shell
+npm.cmd install
+npm.cmd start
+```
+
 第一次開啟時，選 agent 用哪個 AI：
 
 - **自己的 Claude Code 或 Codex。** 不需要 Blave 帳號，Blave 不收 AI 費用。app 只負責啟動 CLI，你的 Claude Code、Codex 登入憑證留在 CLI 自己手上。
+- **自己的 API 金鑰（DeepSeek）。** 貼上隨用隨付的金鑰，DeepSeek 直接向你收費，Blave 不收 AI 費用。金鑰留在這台電腦的鑰匙圈（Windows 上加密儲存），agent 讀不到：請求由 app 在本機轉送。
 - **Blave AI。** 登入 Blave 帳號，按用量計費。
 
 接著講你的想法，例如：
@@ -81,10 +93,14 @@ npm start
 | C | 投資組合：N 個標的加一組權重（總和不超過 1），定期再平衡 | 必做 |
 | B | 其餘全部：選股器、網格、套利、警示、一次性下單 | 不做 |
 
-介面語言跟著系統語系（英文或繁體中文）。要強制指定：`BLAVE_LANG=zh npm start`。
+介面語言跟著系統語系（英文或繁體中文）。要強制指定：`BLAVE_LANG=zh npm start`（PowerShell：`$env:BLAVE_LANG="zh"; npm.cmd start`）。
 
 ## 最新消息
 
+- **2026-10-04**——電腦版 0.1.14：Windows 上用 npm 安裝的 Codex 與 Claude Code 偵測得到（之前會一直顯示尚未登入），Codex 可以讀寫工作資料夾、跑回測；Codex 第一次對話後模型選擇器自動出現；安裝識別碼移到「設定 › 一般」；「建議下一步」多了關閉鈕。
+- **2026-10-03**——電腦版 0.1.13：策略庫分成「現在就能用」與「要先登入」，官方免費、只用交易所公開價格的策略不用登入就能下載；可以請 agent 上網找能回測的點子；自動下單倍數提醒（1／5／10 倍），10 倍以上要勾選確認；金額表多「訊號」欄，交易所退單原因翻成白話；引擎更新到新版 Claude Code。
+- **2026-10-03**——Windows 版（x64）上正式軌。安裝檔尚未簽章，第一次安裝 SmartScreen 會擋一次，點「其他資訊 › 仍要執行」。
+- **2026-10-02**——電腦版 0.1.12：美股日線回測（電腦版限定，只能回測）；首次安裝顯示進度；內建瀏覽器接手後可一鍵交還 agent；策略庫可在 app 內讀成功筆記；部位表點策略名直接看進出場；參數掃描在回測期間或手續費改了會標示舊結果。
 - **2026-10-01**——電腦版 0.1.11：樣本外驗證結果合成一行（效率與判斷）；驗證跑在雲端時，切回分頁會自動抓結果；金額設成 0 的策略算「還沒上線」，agent 會提醒你去設金額。
 - **2026-09-30**——電腦版 0.1.10：策略頁新增「樣本外驗證」分頁，看用過去資料挑參數的做法，放到沒看過的資料上撐不撐得住；自動下單執行中也看得到「重新啟動以完成更新」，按下去先講清楚重開後不平倉、不下單，要再按「啟動下單」才繼續。
 - **2026-09-29**——電腦版 0.1.9：還原舊版本直接回到那一版，背景用最新資料重跑回測；設定新增「Agent 規則」，可以看、新增、刪除 agent 要遵守的規則；選單列圖示，下單中可直接「暫停下單（不動部位）」；agent 回覆後最多出現三句建議下一步。
@@ -123,7 +139,7 @@ npm start
 - 投入金額與恢復交易由你自己做——電腦版在 app 的「自動下單」，雲端主機在網頁工作頁。就算你開口要求，agent 也會拒絕代勞。它唯一可以隨時自己做的，是觸發緊急停止。
 - 電腦版只有在 Blave 開著時才會下單；結束 app 再打開後，交易維持暫停，直到你按「啟動下單」。
 - agent 先驗證再回報：改完檔案會重讀確認，下完單會向交易所查回結果才說「已下單」。每一次下單嘗試都記在 `state/audit.jsonl`。
-- 回測講的是過去，不預測、也不保證未來績效。MCPT 與參數掃描能降低「你看到的只是運氣」的機率，不能把它消掉。
+- 回測講的是過去，不預測、也不保證未來績效。MCPT 檢查成績在統計上顯不顯著，參數掃描檢查是不是過度擬合；兩者都只能降低回測騙到你的機率，不能把它消掉。
 - 這裡沒有任何內容是投資建議。交易可能虧損，包括虧光。
 
 ## 雲端（付費）
@@ -132,10 +148,10 @@ npm start
 
 ## 從原始碼跑：檔案放在哪
 
-第一次連結時，app 會準備好 `~/Blave/`：
+第一次連結時，app 會準備好 `~/Blave/`（Windows 是 `%USERPROFILE%\Blave\`）：
 
 - `~/Blave/workspace/`——從這份 checkout 複製 `lib/`、`manager/`、`references/`、`examples/`、`allocators/`、兩支策略範本、`AGENTS.md`、`CLAUDE.md` 與 `VERSION`
-- `~/Blave/venv/`——用 `python3 -m venv` 建立，再用 pip 裝 `claude-agent-sdk`、cryptography、pandas、numpy、matplotlib、pyarrow、requests、python-dotenv、scipy
+- `~/Blave/venv/`——用 `python3 -m venv`（Windows 是 `python -m venv`）建立，再用 pip 裝 `claude-agent-sdk`、cryptography、pandas、numpy、matplotlib、pyarrow、requests、python-dotenv、scipy
 - `~/Blave/state/`——對話紀錄、對話圖片與下單狀態
 
 你的策略會在 `~/Blave/workspace/strategies/<name>/`。從原始碼執行時，官方檔案每次啟動都會重新複製一次，所以要改 `lib/` 請改 checkout 裡的那份，不要改 `~/Blave/workspace/` 裡的。你的策略、`.env` 與 state 不會被覆寫。
@@ -145,7 +161,7 @@ npm start
 | 路徑 | 裡面是什麼 |
 |---|---|
 | `AGENTS.md` | agent 的行為規則：先驗證再回報、迭代上限、資料來源、上線紅線。從這裡讀起。 |
-| `lib/` | 共用函式庫：資料、回測、MCPT、參數掃描、樣本外驗證、報告、圖表、看盤板、交易所帳戶與下單（`account_*.py`、`order_*.py`）、緊急停止（`guard.py`） |
+| `lib/` | 共用函式庫：資料、回測、MCPT、參數掃描、樣本外驗證、報告、圖表、交易所帳戶與下單（`account_*.py`、`order_*.py`）、緊急停止（`guard.py`） |
 | `strategies/` | 策略範本。你自己的策略也放這裡，已被 git 忽略。 |
 | `examples/` | 完整的參考策略（加密貨幣、原油、台股、台指期）與匯出範本，見 [`examples/README.md`](examples/README.md) |
 | `references/` | agent 動手前要讀的文件：函式簽名、策略程式規則、部署、券商串接、報告格式 |

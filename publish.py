@@ -7,8 +7,30 @@ updater polls the manifest every 5 minutes, so an upload here reaches the whole
 fleet within ~5 minutes (+60s api-side manifest cache).
 
 Usage (from this repo's root; AWS creds come from the environment):
-    python publish.py            # dry-run: show what would ship
-    python publish.py publish    # actually upload
+    python publish.py                     # dry-run: show what would ship
+    python publish.py publish             # upload, whole fleet
+    python publish.py publish --canary    # upload, only the api's canary user_ids
+    python publish.py promote             # point the whole fleet at the canary version
+    python publish.py lock                # after changing runtime/SDK_VERSION (network)
+
+Canary: the tarball goes up as usual, but the manifest is written to
+manifest-canary.json; the api (`release_manifest()`, `_RELEASE_CANARY_UIDS`)
+serves it only to the listed users while it is newer than manifest.json.
+`promote` copies it to manifest.json — same version number, same tarball.
+
+SDK pin (runtime/SDK_VERSION): after changing it, `python publish.py lock`
+resolves `claude-agent-sdk==<pin>` from wheels only for every platform the fleet
+and the desktop run (SDK_TARGETS) and writes runtime/sdk-lock-<key>.txt — every
+package of the tree pinned with the sha256 of each of its wheels. pip picks the
+versions/wheels; the package set is the closure under each target's own PEP 508
+markers (TARGET_ENV — pip evaluates markers on the Mac running it). Commit those
+with the pin; publish refuses a missing or stale lock, re-checks each lock against
+that closure using PyPI's Requires-Dist for the pinned versions (network, ~20s),
+and ships them in the tarball (sdk_sync.py and provision install with
+--require-hashes). Only pip (and its vendored `packaging`) is used — nothing else
+to install on the publishing machine. A pin PyPI has
+no win_amd64 wheel for (0.2.157, 0.2.160–0.2.163) fails `lock`: on Windows it
+would never install (or, without --only-binary, install with no bundled CLI).
 
 Credentials — this repo is PUBLIC, so nothing here reads api/common/config.py:
     BLAVE_S3_KEY      AWS access key id
@@ -38,6 +60,206 @@ RUNTIME = os.path.join(HERE, "runtime")
 # silently on the fleet.
 SYSTEMD = os.path.join(os.path.dirname(HERE), "api", "blave_agent", "systemd")
 S3_PREFIX = "blave-agent"
+# (lock key, pip --platform, --python-version): Linux cloud (Ubuntu 22.04), Windows
+# cloud, Windows desktop, Mac desktop arm64 / Intel. The key is what
+# sdk_pin.lock_key() computes on the machine itself.
+SDK_TARGETS = [
+    ("linux_x86_64-py3.10", "manylinux_2_17_x86_64", "3.10"),
+    ("win_amd64-py3.14", "win_amd64", "3.14"),
+    ("win_amd64-py3.12", "win_amd64", "3.12"),
+    ("macosx_arm64-py3.12", "macosx_11_0_arm64", "3.12"),
+    ("macosx_x86_64-py3.12", "macosx_11_0_x86_64", "3.12"),
+]
+# PEP 508 marker environment of each target. pip's --platform / --python-version
+# only pick wheels; requirement markers (`sys_platform == "win32"`,
+# `python_version < "3.11"`) are still evaluated against the interpreter running
+# pip — a lock built on a Mac silently dropped mcp's pywin32 from the Windows lock
+# (runtime 1.1.109 canary, uid=1). So the closure is recomputed here per target.
+_POSIX = {"os_name": "posix", "implementation_name": "cpython",
+          "platform_python_implementation": "CPython", "platform_release": "", "platform_version": ""}
+_WIN = {**_POSIX, "os_name": "nt", "sys_platform": "win32", "platform_system": "Windows",
+        "platform_machine": "AMD64"}
+_MAC = {**_POSIX, "sys_platform": "darwin", "platform_system": "Darwin"}
+TARGET_ENV = {
+    "linux_x86_64-py3.10": {**_POSIX, "sys_platform": "linux", "platform_system": "Linux",
+                            "platform_machine": "x86_64", "python_version": "3.10",
+                            "python_full_version": "3.10.12"},
+    "win_amd64-py3.14": {**_WIN, "python_version": "3.14", "python_full_version": "3.14.0"},
+    "win_amd64-py3.12": {**_WIN, "python_version": "3.12", "python_full_version": "3.12.10"},
+    "macosx_arm64-py3.12": {**_MAC, "platform_machine": "arm64", "python_version": "3.12",
+                            "python_full_version": "3.12.14"},
+    "macosx_x86_64-py3.12": {**_MAC, "platform_machine": "x86_64", "python_version": "3.12",
+                             "python_full_version": "3.12.14"},
+}
+SDK_ROOT_PKG = "claude-agent-sdk"
+
+
+def _packaging():
+    # pip's vendored copy: publish already needs pip, so no extra dependency
+    try:
+        from packaging.requirements import Requirement
+        from packaging.utils import canonicalize_name
+    except ImportError:
+        from pip._vendor.packaging.requirements import Requirement
+        from pip._vendor.packaging.utils import canonicalize_name
+    return Requirement, canonicalize_name
+
+
+def lock_path(key):
+    return os.path.join(RUNTIME, f"sdk-lock-{key}.txt")
+
+
+def _pypi(name, version):
+    import urllib.request
+
+    with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json", timeout=60) as r:
+        return json.load(r)
+
+
+def _wheel_hashes(name, version):
+    """Every wheel PyPI has for name==version: the machine's pip picks the wheel
+    for its own tags (a newer manylinux than the one resolved here), and that
+    file's hash has to be in the lock."""
+    return sorted({f["digests"]["sha256"] for f in _pypi(name, version)["urls"]
+                   if f["filename"].endswith(".whl")})
+
+
+def target_closure(root, requires_of, env):
+    """{canonical name: [Requirement, ...]} reachable from `root` (a requirement
+    string) when every marker is evaluated in `env`. requires_of(name) gives that
+    package's Requires-Dist list, or None when it is not known."""
+    Requirement, canon = _packaging()
+    need, seen, todo = {}, set(), [Requirement(root)]
+    while todo:
+        req = todo.pop()
+        name = canon(req.name)
+        need.setdefault(name, []).append(req)
+        for extra in [""] + sorted(req.extras):
+            if (name, extra) in seen:
+                continue
+            seen.add((name, extra))
+            for spec in requires_of(name) or []:
+                r = Requirement(spec)
+                if r.marker is None or r.marker.evaluate({**env, "extra": extra}):
+                    todo.append(r)
+    return need
+
+
+def _closure_problems(need, versions):
+    """need: target_closure(); versions: {canonical name: version} actually pinned."""
+    bad = [f"missing {n}" for n in sorted(set(need) - set(versions))]
+    bad += [f"not needed on this platform: {n}" for n in sorted(set(versions) - set(need))]
+    for n in sorted(set(need) & set(versions)):
+        for r in need[n]:
+            if not r.specifier.contains(versions[n], prereleases=True):
+                bad.append(f"{n}=={versions[n]} does not satisfy {r}")
+    return bad
+
+
+def _pip_report(roots, plat, py):
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report = os.path.join(tmp, "report.json")
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--dry-run", "--ignore-installed",
+             "--only-binary=:all:", "--platform", plat, "--python-version", py,
+             "--implementation", "cp", "--target", os.path.join(tmp, "t"), "--quiet",
+             "--disable-pip-version-check", "--report", report, *roots],
+            capture_output=True, text=True, timeout=300)
+        return json.load(open(report))["install"] if r.returncode == 0 else None
+
+
+def sdk_lock_text(pin, key, plat, py):
+    """The pinned, hashed requirement set for one target, or None when it cannot be
+    resolved from wheels only. pip picks versions and wheels for the target's tags
+    (--dry-run reads index metadata, nothing is downloaded); the package SET is the
+    closure under the target's own markers — anything pip skipped because the Mac
+    running it is not the target is added as an extra root and resolved again."""
+    Requirement, canon = _packaging()
+    env, root = TARGET_ENV[key], f"{SDK_ROOT_PKG}=={pin}"
+    roots = [root]
+    for _ in range(6):
+        items = _pip_report(roots, plat, py)
+        if items is None:
+            return None
+        meta = {canon(i["metadata"]["name"]): i["metadata"] for i in items}
+        need = target_closure(root, lambda n: (meta[n].get("requires_dist") or []) if n in meta else None, env)
+        missing = sorted(set(need) - set(meta))
+        if not missing:
+            break
+        for n in missing:
+            reqs = need[n]
+            extras = sorted({e for r in reqs for e in r.extras})
+            spec = ",".join(str(r.specifier) for r in reqs if str(r.specifier))
+            roots.append(f"{reqs[0].name}{'[' + ','.join(extras) + ']' if extras else ''}{spec}")
+    else:
+        return None
+    versions = {n: meta[n]["version"] for n in need}
+    if _closure_problems(need, versions):
+        return None
+    lines = [f"# {SDK_ROOT_PKG}=={pin} {key} — written by `python publish.py lock`, do not edit"]
+    for n in sorted(need):
+        name, version = meta[n]["name"], meta[n]["version"]
+        hashes = " ".join(f"--hash=sha256:{h}" for h in _wheel_hashes(name, version))
+        lines.append(f"{name}=={version} {hashes}")
+    return "\n".join(lines) + "\n"
+
+
+def read_lock(key):
+    """{canonical name: version} pinned in runtime/sdk-lock-<key>.txt."""
+    _, canon = _packaging()
+    out = {}
+    for line in open(lock_path(key), encoding="utf-8"):
+        if line.strip() and not line.startswith("#"):
+            name, version = line.split()[0].split("==")
+            out[canon(name)] = version
+    return out
+
+
+def lock_problems(pin, key, requires_of=None, versions=None):
+    """Is the committed lock exactly the closure of claude-agent-sdk==<pin> under the
+    target's markers? Each package's Requires-Dist comes from PyPI for the pinned
+    version (network). [] = complete."""
+    versions = read_lock(key) if versions is None else versions
+    if requires_of is None:
+        names = {n: n for n in versions}
+
+        def requires_of(n):
+            return (_pypi(names[n], versions[n])["info"].get("requires_dist") or []) if n in versions else None
+    return _closure_problems(target_closure(f"{SDK_ROOT_PKG}=={pin}", requires_of, TARGET_ENV[key]),
+                             versions)
+
+
+def write_locks(pin, targets=SDK_TARGETS):
+    """(Re)write runtime/sdk-lock-<key>.txt for every target; returns the keys that
+    could not be resolved (nothing is written for those — the old file is removed)."""
+    bad = []
+    for key, plat, py in targets:
+        text = sdk_lock_text(pin, key, plat, py)
+        if text is None:
+            bad.append(key)
+            if os.path.exists(lock_path(key)):
+                os.remove(lock_path(key))
+            continue
+        with open(lock_path(key), "w", encoding="utf-8") as f:
+            f.write(text)
+    return bad
+
+
+def stale_locks(pin, targets=SDK_TARGETS):
+    """Targets whose committed lock is missing or was written for another pin."""
+    bad = []
+    for key, _, _ in targets:
+        try:
+            with open(lock_path(key), encoding="utf-8") as f:
+                head = f.readline()
+        except OSError:
+            head = ""
+        if not head.startswith(f"# {SDK_ROOT_PKG}=={pin} {key} "):
+            bad.append(key)
+    return bad
 
 
 def build_tarball():
@@ -61,7 +283,8 @@ def build_tarball():
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for name in sorted(os.listdir(RUNTIME)):
-            if name.endswith(".py") or name in ("VERSION", "jobs.json"):
+            if (name.endswith(".py") or name in ("VERSION", "SDK_VERSION", "jobs.json")
+                    or (name.startswith("sdk-lock-") and name.endswith(".txt"))):
                 tar.add(os.path.join(RUNTIME, name), arcname=name)
         for name in unit_names:
             path = os.path.join(SYSTEMD, name)
@@ -72,17 +295,7 @@ def build_tarball():
     return version, buf.getvalue()
 
 
-def main():
-    do_publish = len(sys.argv) > 1 and sys.argv[1] == "publish"
-    version, data = build_tarball()
-    sha = hashlib.sha256(data).hexdigest()
-    manifest = {"latest": version, "sha256": sha, "size": len(data)}
-    print(f"release {version}: {len(data)} bytes, sha256={sha}")
-
-    if not do_publish:
-        print("dry-run only — rerun with `publish` to upload")
-        return
-
+def _s3():
     import boto3
 
     try:
@@ -92,38 +305,112 @@ def main():
             aws_secret_access_key=os.environ["BLAVE_S3_SECRET"],
             region_name=os.environ["BLAVE_S3_REGION"],
         )
-        bucket = os.environ["BLAVE_S3_BUCKET"]
+        return s3, os.environ["BLAVE_S3_BUCKET"]
     except KeyError as e:
         # fail loudly and name the variable — a half-set environment must not
         # silently fall back to an ambient profile and publish to the wrong bucket
         sys.exit(f"ERROR: {e.args[0]} not set — see this file's docstring")
-    tar_key = f"{S3_PREFIX}/releases/{version}.tar.gz"
 
-    # refuse to overwrite an existing version — rolled-back machines skip
-    # re-attempts of the same number, so a silent overwrite would strand them.
-    # Only a genuine 404 means "not published yet": a wrong bucket, bad key or
-    # wrong region must NOT read as one. (It used to be `except Exception: pass`,
-    # which swallowed all of those and fell through to the upload — harmless while
-    # the creds came from common/config.py, live the moment they come from four
-    # environment variables that a human types.)
+
+def _exists(s3, bucket, key):
+    # Only a genuine 404 means "not there": a wrong bucket, bad key or wrong region
+    # must NOT read as one (it used to be `except Exception: pass`, which fell
+    # through to the upload).
     try:
-        s3.head_object(Bucket=bucket, Key=tar_key)
+        s3.head_object(Bucket=bucket, Key=key)
     except Exception as e:
         code = getattr(e, "response", {}).get("Error", {}).get("Code")
         if code not in ("404", "NoSuchKey", "NotFound"):
             raise
-    else:
+        return False
+    return True
+
+
+def _vkey(v):
+    return tuple(int(x) for x in str(v).split("."))
+
+
+def promote(s3=None, bucket=None):
+    """Point manifest.json at the canary — only if the canary is newer than what the
+    fleet has, and only if the tarball it names is byte-for-byte what it claims."""
+    if s3 is None:
+        s3, bucket = _s3()
+    body = s3.get_object(Bucket=bucket, Key=f"{S3_PREFIX}/manifest-canary.json")["Body"].read()
+    canary = json.loads(body)
+    try:
+        current = json.loads(
+            s3.get_object(Bucket=bucket, Key=f"{S3_PREFIX}/manifest.json")["Body"].read())
+    except Exception as e:
+        code = getattr(e, "response", {}).get("Error", {}).get("Code")
+        if code not in ("404", "NoSuchKey", "NotFound"):
+            raise
+        current = {"latest": "0"}
+    if _vkey(canary["latest"]) <= _vkey(current["latest"]):
+        sys.exit(f"ERROR: canary {canary['latest']} is not newer than the fleet's "
+                 f"{current['latest']} — nothing to promote")
+    tar = s3.get_object(Bucket=bucket,
+                        Key=f"{S3_PREFIX}/releases/{canary['latest']}.tar.gz")["Body"].read()
+    if hashlib.sha256(tar).hexdigest() != canary["sha256"] or len(tar) != canary["size"]:
+        sys.exit(f"ERROR: tarball {canary['latest']} does not match the canary manifest's "
+                 f"sha256/size — not promoting")
+    s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}/manifest.json", Body=body,
+                  ContentType="application/json")
+    print(f"promoted {canary['latest']} to the whole fleet — picked up within ~6 minutes")
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["promote"]:
+        return promote()
+    if args[:1] == ["lock"]:
+        pin = open(os.path.join(RUNTIME, "SDK_VERSION")).read().strip()
+        bad = write_locks(pin)
+        if bad:
+            sys.exit(f"ERROR: claude-agent-sdk=={pin} has no wheel-only install for {', '.join(bad)} "
+                     f"— pick a pin PyPI ships for every platform (runtime/SDK_VERSION)")
+        print(f"wrote {len(SDK_TARGETS)} lock files for {pin} — commit them with the pin")
+        return
+    do_publish = args[:1] == ["publish"]
+    canary = "--canary" in args
+    version, data = build_tarball()
+    sha = hashlib.sha256(data).hexdigest()
+    manifest = {"latest": version, "sha256": sha, "size": len(data)}
+    print(f"release {version}: {len(data)} bytes, sha256={sha}")
+    pin = open(os.path.join(RUNTIME, "SDK_VERSION")).read().strip()
+    stale = stale_locks(pin)
+    if stale:
+        sys.exit(f"ERROR: runtime/sdk-lock-*.txt missing or not for {pin}: {', '.join(stale)} "
+                 f"— run `python publish.py lock` and commit the result")
+    incomplete = {key: p for key, _, _ in SDK_TARGETS for p in [lock_problems(pin, key)] if p}
+    if incomplete:
+        sys.exit("ERROR: lock does not match the dependency closure under that platform's markers — "
+                 + "; ".join(f"{k}: {', '.join(p)}" for k, p in incomplete.items())
+                 + " — rerun `python publish.py lock`")
+    print(f"sdk pin {pin}: hash-locked and complete for {len(SDK_TARGETS)} platforms")
+
+    if not do_publish:
+        print("dry-run only — rerun with `publish` to upload")
+        return
+
+    s3, bucket = _s3()
+    tar_key = f"{S3_PREFIX}/releases/{version}.tar.gz"
+    # refuse to overwrite an existing version — rolled-back machines skip
+    # re-attempts of the same number, so a silent overwrite would strand them.
+    if _exists(s3, bucket, tar_key):
         print(f"ERROR: {version} already published — bump runtime/VERSION first")
         sys.exit(1)
 
     s3.put_object(Bucket=bucket, Key=tar_key, Body=data)
     s3.put_object(
         Bucket=bucket,
-        Key=f"{S3_PREFIX}/manifest.json",
+        Key=f"{S3_PREFIX}/manifest-canary.json" if canary else f"{S3_PREFIX}/manifest.json",
         Body=json.dumps(manifest).encode(),
         ContentType="application/json",
     )
-    print(f"published — fleet picks it up within ~6 minutes")
+    if canary:
+        print("published to the canary users only — `python publish.py promote` for the fleet")
+    else:
+        print("published — fleet picks it up within ~6 minutes")
 
 
 if __name__ == "__main__":

@@ -10,11 +10,11 @@ cache/
 │   ├── 2022-01.parquet
 │   ├── 2022-02.parquet
 │   └── ...
-├── twfutures_1m_TXF/
+├── twfutures3_1m_TXF/
 │   ├── 2020-03.parquet
 │   ├── 2020-04.parquet
 │   └── ...
-├── twfutures_bav_TXF/         ← bid/ask vol (monthly since 2022-01)
+├── twfutures_bav_TXF/         ← bid/ask vol (monthly since 2018-02)
 │   └── ...
 ├── twstock_price_2330.parquet      ← daily 台股/台市 datasets: ONE file per stock, coverage meta in the parquet footer (see below)
 ├── twstock_daily_2330_twse/   ← 台股日K from the exchange itself (src = twse / tpex / finmind), monthly files
@@ -61,7 +61,7 @@ _normalise_index(df)                 # convert tz-aware → tz-naive UTC
 | Type | Cache style | Location |
 |---|---|---|
 | Broker/trader per-day flows | One file per trading day | `cache/twstock_broker_stock_{id}/{date}.parquet` |
-| Fundamental data (financials, balance sheet, revenue) | Single file, 30-day mtime TTL | `cache/twstock_fin_{id}.parquet` |
+| Fundamental data (financials, balance sheet, revenue) | Single file, 30-day mtime TTL | `cache/twstock_fin_{id}.parquet`; a `types=` subset in `twstock_fin_types-{hash}_{id}.parquet` |
 
 These types have their own caching logic and are not affected by the monthly system.
 

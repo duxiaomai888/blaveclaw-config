@@ -304,7 +304,7 @@ const okc = (state, extra = {}) => ({ code: "OK", machine: { state }, strategies
   // 寫進雲端的確認框要標明目的地(規格 §5:刻意講三次);本機不給那兩個參數,框逐位元組不變
   { const app2 = fs.readFileSync(path.join(R, "app.js"), "utf8"), html2 = fs.readFileSync(path.join(R, "index.html"), "utf8");
     ok("confirmBox 有 env / footWhere / lead 三個選用參數,DOM 兩個槽在,關框時一起收掉",
-      /function confirmBox\(\{ title, lines, ok, onOk, opener, alt, mark, markKind, extra, okDisabled, okWhy, env, footWhere, lead, single, cancel, choices, choicesLabel, keep, details, detailsOpen \}\)/.test(app2)
+      /function confirmBox\(\{ title, lines, ok, onOk, opener, alt, mark, markKind, extra, okDisabled, okWhy, env, footWhere, lead, single, cancel, choices, choicesLabel, keep, details, detailsOpen, onCancel \}\)/.test(app2)
       && /<span class="envm" id="del-env" hidden><\/span>/.test(html2) && /<span class="del-where" id="del-where" hidden><\/span>/.test(html2)
       && /\$\("del-env"\)\.hidden = true; \$\("del-where"\)\.hidden = true; \$\("del-modal"\)\.querySelector\("\.modal-head"\)\.classList\.remove\("cloud"\); \$\("del-cancel"\)\.hidden = false;/.test(app2.slice(app2.indexOf("function delClose"))));
     ok("雲端的框:灰標題列 + 「雲端」記號 + 錢記號 + 鈕上方的目的地那一行;暫停與啟動都經過同一支",
@@ -584,6 +584,17 @@ const okc = (state, extra = {}) => ({ code: "OK", machine: { state }, strategies
       && /envDotInto\(nm, up && envRunDot\(b\.dataset\.name, st, now, L\.just\)\)/.test(src));
     ok("呼吸點樣式沿用 .run-dot.live:--color-green、--motion-blink ×3、reduced-motion 停格", /\.run-dot\.live \{ background: var\(--color-green\); animation: trRunPulse calc\(var\(--motion-blink\) \* 3\)/.test(css)
       && /@media \(prefers-reduced-motion: reduce\) \{\n\s*\.run-dot\.live \{ animation: none; \}/.test(css)); }
+
+  // 0.1.12 市場檢查出貨前整個拿掉:舊開發版機器的報告就算還帶 market_gate.holds,切換器、呼吸點、雲端列尾、側欄都不理它
+  { const J = JSON.stringify, H = (holds, extra = {}) => rep({ market_gate: { verdicts: {}, holds }, states: { a: { updated_at: Date.now() / 1000 } },
+      config: { amounts: { a: 100 } }, scheduled: ["a"], ...extra });
+    const held = H({ a: { venue: "binance", reason: "src" } }), none = H({});
+    const e1 = envCell("local", { alive: true, report: held }), e0 = envCell("local", { alive: true, report: none });
+    const ch = envCell("cloud", cloudSt(okc("running"), held), true);
+    ok("報告帶舊的 market_gate.holds:切換器、雲端在途、呼吸點、雲端列尾都跟沒帶一樣(沒有停單這回事)",
+      J(e1) === J(e0) && e1.dot !== "bad" && ch.dot === "busy" && ch.word === "env.st.sending"
+      && envRunDot("a", { report: held }, Date.now(), null) === true && envStratWord("a", { report: held, alive: true }) === null, J([e1, e0, ch]));
+    ok("原文:沒有停單那一套(trHoldOf / trHoldWhole / trHeldNames、hold-mk、env.st.held、market_gate)", !/trHold(Of|Whole|R5|SymText)\b|trHeldNames|hold-mk|env\.st\.held|market_gate/.test(src)); }
 
   process.removeAllListeners("beforeExit");
   console.log(red ? red + " 紅" : "ALL PASS"); process.exit(red ? 1 : 0);

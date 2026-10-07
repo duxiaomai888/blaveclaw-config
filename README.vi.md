@@ -8,7 +8,7 @@ Miễn phí, mã nguồn mở. Kết nối Claude Code hoặc Codex của bạn.
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Español](README.es.md) | [Português](README.pt.md) | **Tiếng Việt**
 
-> Bản dịch này dịch từ README tiếng Anh tại commit [`d2c342a`](https://github.com/Blave-TW/blave-agent/blob/d2c342a/README.md) và chỉ gồm các phần ít thay đổi. Tin mới, sàn giao dịch và dữ liệu, đám mây, cấu trúc thư mục, cách đóng góp và ghi chú cho người bảo trì xem ở [bản tiếng Anh](README.md). Nếu có chỗ khác nhau, bản gốc tiếng Anh là chuẩn.
+> Bản dịch này dịch từ README tiếng Anh tại commit [`6944ddd`](https://github.com/Blave-TW/blave-agent/blob/6944ddd/README.md) và chỉ gồm các phần ít thay đổi. Tin mới, sàn giao dịch và dữ liệu, đám mây, cấu trúc thư mục, cách đóng góp và ghi chú cho người bảo trì xem ở [bản tiếng Anh](README.md). Nếu có chỗ khác nhau, bản gốc tiếng Anh là chuẩn.
 
 ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey) ![Platform: macOS | Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
@@ -20,12 +20,14 @@ Nếu thấy hữu ích, hãy Star repo — và bật Watch › Releases để �
 
 ## Điểm khác biệt
 
-### Backtest có kiểm tra xem có phải do may mắn
+### Backtest có kiểm tra overfitting và tính phí thật
+
+Overfitting: tham số chỉ tình cờ khớp với dữ liệu quá khứ.
 
 - Mỗi lần backtest Type A, mặc định đều chạy kiểm định hoán vị Monte Carlo (MCPT, `lib/validation.py`) và ghi lại p-value: dữ liệu bị xáo trộn có làm được tốt như vậy không?
 - Quét tham số (`lib/param_scan.py`) tìm một cao nguyên tham số mà cả vùng đều hiệu quả, không phải một ô tốt nhất.
 - Walk-forward cuốn chiếu (`lib/walk_forward.py`) đo hiệu quả ngoài mẫu.
-- Phí phải khớp với thị trường thật. Phí bằng 0 sẽ bị `lib/quality_check.py` đánh dấu và xử lý như một lỗi.
+- Phí nên khớp với thị trường thật. Phí bằng 0 sẽ bị `lib/quality_check.py` cảnh báo, nhưng không bắt buộc phải sửa.
 - Mặc định, mỗi ý tưởng chỉ backtest một lần. Kết quả kém thì báo đúng như vậy; agent không âm thầm chỉnh lại tham số cho đến khi con số trông đẹp (xem *Iteration Brakes* trong [`AGENTS.md`](AGENTS.md)).
 
 ### Biết được khi chạy thật có đúng là code đã backtest
@@ -53,8 +55,8 @@ Bạn cần:
 - macOS 13 trở lên. App đóng gói là bản universal: chip Apple và Intel, một lần tải.
 - Hoặc Windows 10, 11, x64 (các phiên bản Electron 44 hỗ trợ; ARM chưa kiểm thử). Trình cài đặt chưa có chữ ký mã, nên lần cài đầu tiên Windows sẽ cảnh báo: nhấn vào liên kết bên dưới đoạn mô tả, rồi nhấn nút mới hiện ra ở bên dưới.
 - Node.js 22.12 trở lên, kèm npm (`shell/package.json` › `engines`)
-- `python3` trong `PATH` của bạn. App đóng gói có sẵn Python 3.12 riêng; khi chạy từ mã nguồn, `python3` của hệ thống được dùng để tạo venv.
-- Claude Code hoặc Codex đã cài và đăng nhập, hoặc một tài khoản Blave
+- `python3` trong `PATH` của bạn (`python` trên Windows). App đóng gói có sẵn Python 3.12 riêng; khi chạy từ mã nguồn, Python của hệ thống được dùng để tạo venv.
+- Claude Code hoặc Codex đã cài và đăng nhập, một API key DeepSeek trả theo mức dùng, hoặc một tài khoản Blave
 
 ```
 git clone https://github.com/Blave-TW/blave-agent.git
@@ -63,9 +65,19 @@ npm install
 npm start
 ```
 
+Trên Windows, chạy trong PowerShell (`npm.cmd` vẫn chạy được khi chính sách thực thi của PowerShell chặn script `npm`):
+
+```powershell
+git clone https://github.com/Blave-TW/blave-agent.git
+cd blave-agent\shell
+npm.cmd install
+npm.cmd start
+```
+
 Lần mở đầu tiên, bạn chọn AI nào chạy agent:
 
 - **Claude Code hoặc Codex của chính bạn.** Không cần tài khoản Blave, và Blave không thu phí AI. App chỉ khởi chạy CLI; thông tin đăng nhập Claude Code hoặc Codex của bạn vẫn nằm ở CLI.
+- **API key của chính bạn (DeepSeek).** Dán một key trả theo mức dùng; DeepSeek tính phí trực tiếp với bạn và Blave không thu phí AI. Key nằm trong keychain của máy này (mã hóa trên Windows) và agent không đọc được: app chuyển tiếp yêu cầu ngay trên máy.
 - **Blave AI.** Đăng nhập bằng tài khoản Blave; tính phí theo mức dùng.
 
 Sau đó, hãy nói ý tưởng của bạn. Ví dụ:
@@ -82,7 +94,7 @@ Trước khi viết code, agent xếp mỗi ý tưởng vào một trong ba lo�
 | C | Một danh mục: N mã và một vector tỷ trọng có tổng tối đa là 1, tái cân bằng theo lịch | Bắt buộc |
 | B | Mọi thứ còn lại: bộ lọc, lưới, chênh lệch giá, cảnh báo, thực thi một lần | Không |
 
-Giao diện theo ngôn ngữ hệ thống (tiếng Anh hoặc tiếng Trung phồn thể). Để chỉ định: `BLAVE_LANG=en npm start`.
+Giao diện theo ngôn ngữ hệ thống (tiếng Anh hoặc tiếng Trung phồn thể). Để chỉ định: `BLAVE_LANG=en npm start` (PowerShell: `$env:BLAVE_LANG="en"; npm.cmd start`).
 
 ## Tin mới
 
@@ -94,7 +106,7 @@ Tin mới xem ở bản tiếng Anh: [README.md › News](README.md#news)
 - Số tiền đầu tư và việc tiếp tục giao dịch do chính bạn làm — trên trang Giao dịch tự động của bản máy tính, hoặc trên workspace web với máy chủ đám mây. Agent sẽ từ chối làm thay bạn, kể cả khi được yêu cầu. Việc duy nhất nó luôn được tự làm là kích hoạt kill switch.
 - Trên bản máy tính, lệnh chỉ được gửi khi Blave đang mở; sau khi thoát rồi mở lại, giao dịch vẫn tạm dừng cho đến khi bạn nhấn Bắt đầu giao dịch.
 - Agent kiểm tra rồi mới báo: sửa tệp xong sẽ đọc lại, đặt lệnh xong sẽ truy vấn lại sàn rồi mới nói lệnh đã được đặt. Mọi lần thử đặt lệnh đều được ghi vào `state/audit.jsonl`.
-- Backtest mô tả quá khứ. Nó không dự đoán hay bảo đảm kết quả tương lai. MCPT và quét tham số giảm khả năng bạn đang nhìn thấy may mắn; chúng không loại bỏ được khả năng đó.
+- Backtest mô tả quá khứ. Nó không dự đoán hay bảo đảm kết quả tương lai. MCPT kiểm tra kết quả có ý nghĩa thống kê hay không, còn quét tham số kiểm tra có overfitting hay không; cả hai chỉ giảm khả năng bạn bị backtest đánh lừa, và không cái nào loại bỏ được khả năng đó.
 - Không có nội dung nào ở đây là tư vấn đầu tư. Giao dịch có thể thua lỗ, kể cả mất toàn bộ.
 
 ## Chính sách ký mã

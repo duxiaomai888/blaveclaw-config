@@ -1,5 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("blave", {
+  // 聊天附件檔名上限:主行程 shell/attach.js 的 ATTACH_NAME_MAX,經 webPreferences.additionalArguments 進來(數字只寫在那一處)。0 = 沒拿到:畫面不擋,仍由主行程擋
+  attachNameMax: Number(((process.argv || []).find((a) => a.indexOf("--blave-attach-name-max=") === 0) || "").split("=")[1]) || 0,
   platform: process.platform,   // app.js 掛到 <html data-platform>:Windows 的捲軸樣式只認這個記號
   detectAgents: () => ipcRenderer.invoke("detect-agents"),
   saveConnection: (choice) => ipcRenderer.invoke("save-connection", choice),
@@ -28,6 +30,7 @@ contextBridge.exposeInMainWorld("blave", {
   balance: () => ipcRenderer.invoke("balance"),   // Blave 餘額:{ balance, trial } 或 null(讀不到);憑證在主行程
   planStart: () => ipcRenderer.invoke("plan-start"),
   publicPricing: () => ipcRenderer.invoke("public-pricing"),
+  txfQuote: () => ipcRenderer.invoke("txf-quote"),   // 台指期指數(雲端視角口數列的參考金額);問不到 = null
   tradeLabels: (labels) => ipcRenderer.send("trade-labels", labels),
   cloudStatus: () => ipcRenderer.invoke("cloud-status"),
   cloudRefresh: () => ipcRenderer.invoke("cloud-refresh"),
@@ -100,15 +103,23 @@ contextBridge.exposeInMainWorld("blave", {
   modelOptions: (kind) => ipcRenderer.invoke("model-options", kind),
   loadModelPrefs: () => ipcRenderer.invoke("load-model-prefs"),
   saveModelPrefs: (prefs) => ipcRenderer.invoke("save-model-prefs", prefs),
-  startOAuth: (lang) => ipcRenderer.invoke("start-oauth", lang),
+  startOAuth: (lang, intent) => ipcRenderer.invoke("start-oauth", lang, intent),
   cancelOAuth: () => ipcRenderer.invoke("cancel-oauth"),
   clearConnection: () => ipcRenderer.invoke("clear-connection"),
   hasBlaveToken: () => ipcRenderer.invoke("has-blave-token"),
+  // 自帶 API 金鑰(renderer/apikey.js):金鑰值只經過 apikeySet 一次(主行程先打供應商驗過才存);test 重驗已存的那把、remove 刪掉、cancel 中止驗證。
+  // **沒有讀出金鑰的路**:回應只有 { ok, code, status },存了哪一家跟著 detectAgents 回來(apikey.saved)
+  apikeySet: (a) => ipcRenderer.invoke("apikey-set", { preset: a && a.preset, key: a && a.key, connect: !!a && a.connect === true }),
+  apikeyTest: () => ipcRenderer.invoke("apikey-test"),
+  apikeyRemove: () => ipcRenderer.invoke("apikey-remove"),
+  apikeyCancel: () => ipcRenderer.invoke("apikey-cancel"),
   // 策略庫(renderer/library.js):清單由主行程打 api(畫面的 CSP 不外連);購買帶登入憑證、只在主行程;已安裝對照表存 userData
   libraryList: (lang, force) => ipcRenderer.invoke("library-list", lang, force),
   libraryReport: (id, lang) => ipcRenderer.invoke("library-report", id, lang),
+  libraryNote: (id) => ipcRenderer.invoke("library-note", id),
   libraryPurchase: (id, confirmTopup) => ipcRenderer.invoke("library-purchase", id, confirmTopup),
   libraryInstalled: (patch) => ipcRenderer.invoke("library-installed", patch),
+  libraryDownload: (id) => ipcRenderer.invoke("library-download", id),
   // 本機報告(renderer/reports.js):信封清單 / 一份本體 + sidecar 圖(data URI);renderer 不碰 fs
   reportsList: () => ipcRenderer.invoke("reports-list"),
   reportLoad: (id) => ipcRenderer.invoke("report-load", id),
@@ -118,7 +129,9 @@ contextBridge.exposeInMainWorld("blave", {
   ensureEngine: () => ipcRenderer.invoke("ensure-engine"),
   sendMessage: (payload) => ipcRenderer.invoke("send-message", payload),
   stopTurn: () => ipcRenderer.invoke("stop-turn"),   // true = 停止旗標寫下了;結果照樣等 turn-end
-  onEngineProgress: (fn) => ipcRenderer.on("engine-progress", (_e, t) => fn(t)),
+  // 安裝進度(renderer/engine.js):主行程那一份快照,拉一次 + 之後每次變動推過來
+  engineState: () => ipcRenderer.invoke("engine-state"),
+  onEngineState: (fn) => ipcRenderer.on("engine-state", (_e, s) => fn(s)),
   onTurnEvent: (fn) => ipcRenderer.on("turn-event", (_e, c) => fn(c)),
   onTurnEnd: (fn) => ipcRenderer.on("turn-end", (_e, r) => fn(r)),
   onWindowActive: (fn) => ipcRenderer.on("window-active", (_e, on) => fn(on === true)),

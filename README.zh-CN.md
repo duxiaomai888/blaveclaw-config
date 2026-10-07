@@ -9,7 +9,7 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | **简体中文** | [日本語](README.ja.md) | [Español](README.es.md) | [Português](README.pt.md) | [Tiếng Việt](README.vi.md)
 
-> 本文译自英文版 README 的 commit [`d2c342a`](https://github.com/Blave-TW/blave-agent/blob/d2c342a/README.md)，只涵盖变动较少的段落；最新消息、交易场所与数据、云端主机、目录结构、贡献方式与维护者说明请看[英文版](README.md)。内容有出入时，以英文原文为准。
+> 本文译自英文版 README 的 commit [`6944ddd`](https://github.com/Blave-TW/blave-agent/blob/6944ddd/README.md)，只涵盖变动较少的段落；最新消息、交易场所与数据、云端主机、目录结构、贡献方式与维护者说明请看[英文版](README.md)。内容有出入时，以英文原文为准。
 
 ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey) ![Platform: macOS | Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
@@ -21,12 +21,14 @@ https://github.com/user-attachments/assets/66c747e9-b068-4da9-a372-84d9afa7cb0d
 
 ## 跟别的交易 agent 不一样的地方
 
-### 回测先检查是不是运气
+### 回测先查过拟合，手续费照实算
+
+过拟合，指参数只是刚好贴合过去的数据。
 
 - 每次 Type A 回测默认都会跑蒙特卡洛排列检验（MCPT，`lib/validation.py`），记下 p 值：把数据打乱之后，能不能做出一样好的成绩？
 - 参数扫描（`lib/param_scan.py`）找的是「一整片都有效」的参数平台，不是最高的那一格。
 - 滚动式样本外验证（walk-forward，`lib/walk_forward.py`）量样本外的表现。
-- 手续费要符合真实市场。填 0 会被 `lib/quality_check.py` 标出来，并当成 bug 处理。
+- 手续费应该符合真实市场。填 0 时 `lib/quality_check.py` 会提出警告，但不强制修改。
 - 一个想法默认只回测一次。结果不好就照实回报，agent 不会偷偷调参数调到数字好看（见 [`AGENTS.md`](AGENTS.md) 的 *Iteration Brakes*）。
 
 ### 看得到实盘跑的是不是回测那份
@@ -54,8 +56,8 @@ agent 上网查数据用的是 app 内置的浏览器：它正在读哪一页，
 - macOS 13 以上。打包版是通用版：Apple Silicon 与 Intel 同一个安装文件。
 - 或 Windows 10、11，x64（Electron 44 支持的版本；ARM 版尚未测试）。Windows 安装文件还没有代码签名，第一次安装时 Windows 会先弹出安全警告：点说明文字下方的链接，再点底部多出来的按钮。
 - Node.js 22.12 以上与 npm（`shell/package.json` › `engines`）
-- `PATH` 上有 `python3`。打包版自带 Python 3.12；从源代码跑时，venv 用的是你系统的 `python3`。
-- 已安装并登录的 Claude Code 或 Codex，或一个 Blave 账号
+- `PATH` 上有 `python3`（Windows 是 `python`）。打包版自带 Python 3.12；从源代码跑时，venv 用的是你系统的 Python。
+- 已安装并登录的 Claude Code 或 Codex、一把按量付费的 DeepSeek API 密钥，或一个 Blave 账号
 
 ```
 git clone https://github.com/Blave-TW/blave-agent.git
@@ -64,9 +66,19 @@ npm install
 npm start
 ```
 
+Windows 在 PowerShell 里跑（用 `npm.cmd`：PowerShell 的执行策略挡下 `npm` 脚本时也能跑）：
+
+```powershell
+git clone https://github.com/Blave-TW/blave-agent.git
+cd blave-agent\shell
+npm.cmd install
+npm.cmd start
+```
+
 第一次打开时，选 agent 用哪个 AI：
 
 - **自己的 Claude Code 或 Codex。** 不需要 Blave 账号，Blave 不收 AI 费用。app 只负责启动 CLI，你的 Claude Code、Codex 登录凭证留在 CLI 自己手上。
+- **自己的 API 密钥（DeepSeek）。** 粘贴按量付费的密钥，DeepSeek 直接向你收费，Blave 不收 AI 费用。密钥留在这台电脑的钥匙串（Windows 上加密存储），agent 读不到：请求由 app 在本机转发。
 - **Blave AI。** 登录 Blave 账号，按用量计费。
 
 接着讲你的想法，例如：
@@ -83,7 +95,7 @@ npm start
 | C | 投资组合：N 个标的加一组权重（总和不超过 1），定期再平衡 | 必做 |
 | B | 其余全部：选股器、网格、套利、警示、一次性下单 | 不做 |
 
-界面语言跟着系统语言（英文或繁体中文）。要强制指定：`BLAVE_LANG=zh npm start`。
+界面语言跟着系统语言（英文或繁体中文）。要强制指定：`BLAVE_LANG=zh npm start`（PowerShell：`$env:BLAVE_LANG="zh"; npm.cmd start`）。
 
 ## 最新消息
 
@@ -95,7 +107,7 @@ npm start
 - 投入金额与恢复交易由你自己做——电脑版在 app 的「自动下单」，云端主机在网页工作页。就算你开口要求，agent 也会拒绝代劳。它唯一可以随时自己做的，是触发紧急停止。
 - 电脑版只有在 Blave 开着时才会下单；结束 app 再打开后，交易维持暂停，直到你点「启动下单」。
 - agent 先验证再回报：改完文件会重读确认，下完单会向交易所查回结果才说「已下单」。每一次下单尝试都记在 `state/audit.jsonl`。
-- 回测讲的是过去，不预测、也不保证未来绩效。MCPT 与参数扫描能降低「你看到的只是运气」的概率，不能把它消掉。
+- 回测讲的是过去，不预测、也不保证未来绩效。MCPT 检查成绩在统计上显不显著，参数扫描检查是不是过拟合；两者都只能降低回测骗到你的概率，不能把它消掉。
 - 这里没有任何内容是投资建议。交易可能亏损，包括亏光。
 
 ## 代码签名政策

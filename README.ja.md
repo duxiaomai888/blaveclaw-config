@@ -8,7 +8,7 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | **日本語** | [Español](README.es.md) | [Português](README.pt.md) | [Tiếng Việt](README.vi.md)
 
-> この文書は英語版 README の commit [`d2c342a`](https://github.com/Blave-TW/blave-agent/blob/d2c342a/README.md) から翻訳したもので、変更の少ない節だけを訳しています。最新情報、対応取引所とデータ、クラウドサーバー、ディレクトリ構成、コントリビュート方法、メンテナー向けの説明は[英語版](README.md)をご覧ください。内容に食い違いがある場合は、英語の原文が優先されます。
+> この文書は英語版 README の commit [`6944ddd`](https://github.com/Blave-TW/blave-agent/blob/6944ddd/README.md) から翻訳したもので、変更の少ない節だけを訳しています。最新情報、対応取引所とデータ、クラウドサーバー、ディレクトリ構成、コントリビュート方法、メンテナー向けの説明は[英語版](README.md)をご覧ください。内容に食い違いがある場合は、英語の原文が優先されます。
 
 ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey) ![Platform: macOS | Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
@@ -20,12 +20,14 @@ https://github.com/user-attachments/assets/7b33edb7-9c65-4e19-854a-40295c6e8b74
 
 ## ほかのトレーディングエージェントとの違い
 
-### 運だったのかを確かめるバックテスト
+### 過剰最適化を確かめ、実際の手数料で計算するバックテスト
+
+過剰最適化とは、パラメータがたまたま過去のデータに合っているだけの状態のことです。
 
 - Type A のバックテストでは、毎回デフォルトでモンテカルロ順列検定（MCPT、`lib/validation.py`）を実行し、p 値を記録します。データをシャッフルしても同じくらいの成績が出せたのではないか、を確かめるためです。
 - パラメータ探索（`lib/param_scan.py`）が探すのは、いちばん成績のよい 1 マスではなく、どれを選んでも機能するパラメータの平坦域です。
 - ローリング walk-forward（`lib/walk_forward.py`）でアウトオブサンプルの成績を測ります。
-- 手数料は実際の市場に合わせる必要があります。手数料 0 は `lib/quality_check.py` が検出し、バグとして扱います。
+- 手数料は実際の市場に合わせるべきです。手数料 0 は `lib/quality_check.py` が警告しますが、変更を強制はしません。
 - 1 つのアイデアにつき、バックテストはデフォルトで 1 回です。結果が悪ければそのまま報告し、数字がよく見えるまでこっそりパラメータを調整し直すことはしません（[`AGENTS.md`](AGENTS.md) の *Iteration Brakes* を参照）。
 
 ### 実運用で動いているのがバックテストしたコードかがわかる
@@ -53,8 +55,8 @@ https://github.com/user-attachments/assets/7b33edb7-9c65-4e19-854a-40295c6e8b74
 - macOS 13 以降。パッケージ版はユニバーサルビルドで、Apple Silicon と Intel のどちらも 1 つのダウンロードで動きます。
 - または Windows 10、11 の x64（Electron 44 が対応するバージョン。ARM は未テスト）。Windows インストーラーにはまだコード署名がないため、初回インストール時に Windows が警告を表示します。説明文の下にあるリンクをクリックし、続けて画面の下に増えたボタンをクリックしてください。
 - Node.js 22.12 以降と npm（`shell/package.json` › `engines`）
-- `PATH` 上の `python3`。パッケージ版は Python 3.12 を同梱しています。ソースから実行する場合は、システムの `python3` で venv を作成します。
-- インストールしてサインイン済みの Claude Code または Codex、あるいは Blave アカウント
+- `PATH` 上の `python3`（Windows では `python`）。パッケージ版は Python 3.12 を同梱しています。ソースから実行する場合は、システムの Python で venv を作成します。
+- インストールしてサインイン済みの Claude Code または Codex、従量課金の DeepSeek API キー、あるいは Blave アカウント
 
 ```
 git clone https://github.com/Blave-TW/blave-agent.git
@@ -63,9 +65,19 @@ npm install
 npm start
 ```
 
+Windows では PowerShell で実行します（PowerShell の実行ポリシーで `npm` スクリプトがブロックされても、`npm.cmd` なら動きます）：
+
+```powershell
+git clone https://github.com/Blave-TW/blave-agent.git
+cd blave-agent\shell
+npm.cmd install
+npm.cmd start
+```
+
 初回起動時に、エージェントを動かす AI を選びます：
 
 - **自分の Claude Code または Codex。** Blave アカウントは不要で、Blave は AI の料金を一切請求しません。アプリは CLI を起動するだけで、Claude Code や Codex の認証情報は CLI 側に残ります。
+- **自分の API キー（DeepSeek）。** 従量課金のキーを貼り付けます。料金は DeepSeek から直接請求され、Blave は AI の料金を一切請求しません。キーはこのコンピューターのキーチェーンに残り（Windows では暗号化して保存）、agent からは読めません。リクエストはアプリがローカルで中継します。
 - **Blave AI。** Blave アカウントでサインインします。従量課金です。
 
 あとはアイデアを話すだけです。たとえば：
@@ -82,7 +94,7 @@ npm start
 | C | ポートフォリオ：N 銘柄と、合計が 1 以下のウェイトベクトル。スケジュールでリバランス | 必須 |
 | B | それ以外すべて：スクリーナー、グリッド、アービトラージ、アラート、単発の執行 | なし |
 
-インターフェースはシステムの言語に従います（英語または繁体字中国語）。上書きするには：`BLAVE_LANG=en npm start`。
+インターフェースはシステムの言語に従います（英語または繁体字中国語）。上書きするには：`BLAVE_LANG=en npm start`（PowerShell：`$env:BLAVE_LANG="en"; npm.cmd start`）。
 
 ## 最新情報
 
@@ -94,7 +106,7 @@ npm start
 - 投入金額の設定と取引の再開は、あなた自身が行います——デスクトップ版はアプリの「自動売買」ページ、クラウドサーバーは Web のワークスペースで。頼まれても、エージェントは代わりに行いません。エージェントがいつでも自分の判断で行ってよいのは、キルスイッチを作動させることだけです。
 - デスクトップ版では、Blave が起動している間だけ注文が出ます。終了して開き直したあとは、「取引を開始」を押すまで取引は一時停止したままです。
 - エージェントは確かめてから報告します。ファイルを編集したら読み直し、注文を出したら取引所に照会してから「発注した」と伝えます。すべての注文試行は `state/audit.jsonl` に記録されます。
-- バックテストが示すのは過去です。将来の結果を予測も保証もしません。MCPT とパラメータ探索は「運を見ている」可能性を下げますが、なくすわけではありません。
+- バックテストが示すのは過去です。将来の結果を予測も保証もしません。MCPT は成績が統計的に有意かどうかを、パラメータ探索は過剰最適化していないかを確かめます。どちらもバックテストに騙される可能性を下げるだけで、なくすことはできません。
 - ここにあるものはいずれも投資助言ではありません。取引では損失が出ることがあり、全額を失うこともあります。
 
 ## コード署名ポリシー

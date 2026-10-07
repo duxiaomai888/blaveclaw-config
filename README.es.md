@@ -8,7 +8,7 @@ Gratis y de código abierto. Conecta tu Claude Code o Codex. Tú describes la id
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | **Español** | [Português](README.pt.md) | [Tiếng Việt](README.vi.md)
 
-> Esta traducción parte del README en inglés en el commit [`d2c342a`](https://github.com/Blave-TW/blave-agent/blob/d2c342a/README.md) y cubre solo las secciones que cambian poco. Las novedades, los exchanges y datos, la nube, la estructura del repositorio, cómo contribuir y las notas para mantenedores están en la [versión en inglés](README.md). Si algo no coincide, prevalece el original en inglés.
+> Esta traducción parte del README en inglés en el commit [`6944ddd`](https://github.com/Blave-TW/blave-agent/blob/6944ddd/README.md) y cubre solo las secciones que cambian poco. Las novedades, los exchanges y datos, la nube, la estructura del repositorio, cómo contribuir y las notas para mantenedores están en la [versión en inglés](README.md). Si algo no coincide, prevalece el original en inglés.
 
 ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey) ![Platform: macOS | Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
@@ -20,12 +20,14 @@ Si te resulta útil, dale una estrella al repositorio, y activa Watch › Releas
 
 ## Qué lo hace diferente
 
-### Backtests que comprueban si fue suerte
+### Backtests que comprueban el sobreajuste y usan comisiones reales
+
+Sobreajuste: parámetros que solo por casualidad encajan con los datos pasados.
 
 - Cada backtest de Tipo A ejecuta por defecto una prueba de permutación de Monte Carlo (MCPT, `lib/validation.py`) y registra un valor p: ¿unos datos barajados podrían haberlo hecho igual de bien?
 - Un barrido de parámetros (`lib/param_scan.py`) busca una meseta de parámetros que funcionen todos, no la mejor celda aislada.
 - Un walk-forward móvil (`lib/walk_forward.py`) mide el rendimiento fuera de muestra.
-- La comisión tiene que corresponder al mercado real. Una comisión de 0 la marca `lib/quality_check.py` y se trata como un bug.
+- La comisión debería corresponder al mercado real. Con una comisión de 0, `lib/quality_check.py` avisa, pero no obliga a cambiarla.
 - Por defecto, una idea recibe un solo backtest. Un mal resultado se informa tal cual; el agente no reajusta los parámetros a escondidas hasta que los números se vean bien (consulta *Iteration Brakes* en [`AGENTS.md`](AGENTS.md)).
 
 ### Comprueba si en vivo corre el código que pasó el backtest
@@ -53,8 +55,8 @@ Necesitas:
 - macOS 13 o superior. La app empaquetada es una compilación universal: Apple Silicon e Intel, una sola descarga.
 - O Windows 10 u 11, x64 (las versiones que soporta Electron 44; ARM no está probado). El instalador aún no tiene firma de código, así que Windows avisa en la primera instalación: haz clic en el enlace que aparece debajo del texto y luego en el botón nuevo que aparece abajo.
 - Node.js 22.12 o superior, con npm (`shell/package.json` › `engines`)
-- `python3` en tu `PATH`. La app empaquetada trae su propio Python 3.12; al ejecutar desde el código fuente se usa el `python3` de tu sistema para crear el venv.
-- Claude Code o Codex instalado y con sesión iniciada, o una cuenta de Blave
+- `python3` en tu `PATH` (`python` en Windows). La app empaquetada trae su propio Python 3.12; al ejecutar desde el código fuente se usa el Python de tu sistema para crear el venv.
+- Claude Code o Codex instalado y con sesión iniciada, una clave de API de DeepSeek de pago por uso, o una cuenta de Blave
 
 ```
 git clone https://github.com/Blave-TW/blave-agent.git
@@ -63,9 +65,19 @@ npm install
 npm start
 ```
 
+En Windows, en PowerShell (`npm.cmd` funciona aunque la directiva de ejecución de PowerShell bloquee el script `npm`):
+
+```powershell
+git clone https://github.com/Blave-TW/blave-agent.git
+cd blave-agent\shell
+npm.cmd install
+npm.cmd start
+```
+
 En el primer inicio eliges qué impulsa al agente:
 
 - **Tu propio Claude Code o Codex.** No hace falta una cuenta de Blave, y Blave no cobra nada por la IA. La app solo lanza el CLI; tus credenciales de Claude Code o Codex se quedan con él.
+- **Tu propia clave de API (DeepSeek).** Pega una clave de pago por uso; DeepSeek te cobra directamente y Blave no cobra nada por la IA. La clave se queda en el llavero de este equipo (cifrada en Windows) y el agente nunca la ve: la app reenvía sus solicitudes en local.
 - **Blave AI.** Inicia sesión con una cuenta de Blave; se cobra por uso.
 
 Después, describe una idea. Por ejemplo:
@@ -82,7 +94,7 @@ Antes de escribir código, el agente clasifica cada idea en uno de tres tipos:
 | C | Un portafolio: N símbolos y un vector de pesos que suma como máximo 1, rebalanceado según un calendario | Obligatorio |
 | B | Todo lo demás: screeners, grids, arbitraje, alertas, ejecución puntual | Ninguno |
 
-La interfaz sigue el idioma del sistema (inglés o chino tradicional). Para forzarlo: `BLAVE_LANG=en npm start`.
+La interfaz sigue el idioma del sistema (inglés o chino tradicional). Para forzarlo: `BLAVE_LANG=en npm start` (PowerShell: `$env:BLAVE_LANG="en"; npm.cmd start`).
 
 ## Novedades
 
@@ -94,7 +106,7 @@ Las novedades están en la versión en inglés: [README.md › News](README.md#n
 - Los montos a invertir y la reanudación del trading los haces tú: en la página Trading automático de la app de escritorio, o en el espacio de trabajo web si usas un servidor en la nube. El agente se niega a hacerlo por ti, aunque se lo pidas. Lo único que siempre puede hacer por su cuenta es activar el kill switch.
 - En la app de escritorio, las órdenes solo salen mientras Blave está abierto; después de cerrarlo y volver a abrirlo, el trading queda en pausa hasta que pulses Iniciar trading.
 - El agente verifica antes de informar: vuelve a leer un archivo después de editarlo y consulta una orden en el exchange antes de decir que se colocó. Cada intento de orden queda registrado en `state/audit.jsonl`.
-- Un backtest describe el pasado. No predice ni garantiza resultados futuros. MCPT y los barridos de parámetros reducen la probabilidad de que estés viendo suerte; no la eliminan.
+- Un backtest describe el pasado. No predice ni garantiza resultados futuros. MCPT comprueba si un resultado es estadísticamente significativo, y los barridos de parámetros comprueban si hay sobreajuste; ambos solo reducen la probabilidad de que el backtest te engañe, y ninguno la elimina.
 - Nada de esto constituye asesoramiento de inversión. Operar puede hacerte perder dinero, incluso todo.
 
 ## Política de firma de código

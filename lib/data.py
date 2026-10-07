@@ -1,6 +1,11 @@
 import os
 import io
+import re
+import collections
+import contextlib
+import itertools
 import csv
+import hashlib
 import json
 import shutil
 import numbers
@@ -871,6 +876,16 @@ def _sanity_check_ohlc(df, label):
     Dropping leaves a gap in the bar series (shift/pct_change will span it) —
     same as an exchange outage. The dropped timestamps are printed so the gap
     is diagnosable; corrupt bars are strictly worse than a visible gap.
+
+    A bar whose open or close lies outside its own high-low range is repaired,
+    not dropped: the high is raised / the low lowered to hold them. Measured
+    2026-10-01 over the existing caches: 0 such bars in ~7.4M crypto, ~3.6M
+    Taiwan futures and ~25k Yahoo US bars; 76 in ~168k Blave 台股原始日K bars,
+    all of them an Open off the range by a median 0.3–0.65 % (max 2.9 %) with
+    the Close inside (6669 / 6770 before listing). Those prints did trade, so
+    the range held them; dropping the bar would cut the close every indicator
+    reads, keeping it as is would let an intrabar exit fire at a level the
+    bar's own high never reached.
     """
     if df.empty or not all(c in df.columns for c in ('Open', 'High', 'Low', 'Close')):
         return df
@@ -882,6 +897,19 @@ def _sanity_check_ohlc(df, label):
         print(f"  ⚠️  {label}: dropped {int(bad.sum())} bar(s) with invalid OHLC "
               f"(high<low, non-positive or NaN price) at: {ts}{more}")
         df = df[~bad]
+    body_hi = df[['Open', 'Close']].max(axis=1)
+    body_lo = df[['Open', 'Close']].min(axis=1)
+    # 1e-9 relative: rescaled bars (Yahoo's adjclose next to high × adjclose/close) differ by
+    # float rounding (≤ 2e-16 measured); the smallest real case measured was 1.4e-4
+    fix = (df['High'] < body_hi * (1 - 1e-9)) | (df['Low'] > body_lo * (1 + 1e-9))
+    if fix.any():
+        ts = ', '.join(str(t) for t in df.index[fix][:5])
+        more = '' if int(fix.sum()) <= 5 else f' (+{int(fix.sum()) - 5} more)'
+        print(f"  ⚠️  {label}: widened the high/low of {int(fix.sum())} bar(s) whose open or "
+              f"close lay outside it at: {ts}{more}")
+        df = df.copy()
+        df['High'] = df['High'].where(~fix, np.maximum(df['High'], body_hi))
+        df['Low'] = df['Low'].where(~fix, np.minimum(df['Low'], body_lo))
     return df
 
 
@@ -1057,15 +1085,21 @@ def fetch_kline_batch(symbols, interval, start, end, headers):
             df['Volume'] = 0
         return df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
 
-    results = _fetch_batch_cached(
-        f'kline3_{interval}', f'{BASE}/kline/batch?period={interval}', 'symbols',
-        lambda sid, s, e, hdrs: _fetch_kline_raw(sid, interval, s, e, hdrs),
-        _parse, symbols, start, end, headers,
-        chunk_size=20, start_param='start_date', end_param='end_date',
-        date_chunk_days=30 if _is_sub_5min(interval) else 365,
-    )
-    return {sid: _drop_forming_bar(_sanity_check_ohlc(df, f'{sid} {interval} kline'), interval)
-            for sid, df in results.items()}
+    def _clean(results):
+        return {sid: _drop_forming_bar(_sanity_check_ohlc(df, f'{sid} {interval} kline'), interval)
+                for sid, df in results.items()}
+    try:
+        results = _fetch_batch_cached(
+            f'kline3_{interval}', f'{BASE}/kline/batch?period={interval}', 'symbols',
+            lambda sid, s, e, hdrs: _fetch_kline_raw(sid, interval, s, e, hdrs),
+            _parse, symbols, start, end, headers,
+            chunk_size=20, start_param='start_date', end_param='end_date',
+            date_chunk_days=30 if _is_sub_5min(interval) else 365,
+        )
+    except BatchIncomplete as e:
+        e.partial = _clean(e.partial)   # a caller that degrades gets the same frames a full result would hold
+        raise
+    return _clean(results)
 
 
 def _binance_batch(uniq, interval, start, end, headers):
@@ -1536,9 +1570,51 @@ def fetch_open_interest_coin(symbol, headers):
         line), total_exchanges[], price[] + price_symbol / price_multiplier,
         provisional_from
       symbol, token_id, updated_at
-    `symbol` accepts BTC / BTCUSDT / btc. 404 → None; 503 propagates."""
+    `symbol` accepts BTC / BTCUSDT / btc. 404 → None; 503 propagates.
+    This is the last 7 days only; for a backtest-length series use
+    fetch_open_interest_history (one exchange, coin units — a different basis)."""
     return _raw_snapshot('oi_imbalance/get_coin', headers,
                          {'symbol': symbol}, allow_404=True)
+
+
+# First 5-minute bucket per exchange. The cache asks for whole months (from the 1st), and a
+# window starting before the exchange's history is a 400, so every request is moved up to this.
+# Move these earlier if the platform backfills deeper — anything before them is silently dropped.
+_OI_HISTORY_START = {'binance': '2021-12-01', 'bybit': '2025-08-21', 'gate': '2026-03-28'}
+
+
+def fetch_open_interest_history(symbol, interval, start, end, headers, exchange='binance'):
+    """未平倉量歷史 Open interest history (GET /oi_imbalance/get_history) — ONE coin on ONE
+    exchange, backtestable. Returns DataFrame with 'alpha' column, UTC index (bucket start).
+    alpha = **one-sided open interest in COINS, not USD**; multiplied contracts are already
+    converted back to coins (1000PEPE → PEPE count). Same basis as the Studio dashboard 未平倉量
+    card. Each bucket is the LAST reading of its period (a stock level, never summed); the
+    current bucket (today's, on '1d') keeps moving until its period closes, as with klines.
+    exchange: 'binance' (default) / 'bybit' / 'gate'. History starts (5-minute resolution):
+    binance 2021-12-01 (or the coin's listing), bybit 2025-08-21, gate 2026-03-28 — an earlier
+    `start` is moved up to that day, so read df.index[0] for the real first bucket. Only
+    currently listed contracts; a delisted coin, or one this exchange (or Binance perps) does
+    not list, raises requests.HTTPError 404 "<TOKEN> is not a collected symbol on <exchange>".
+    interval: min / h / d units, minimum 5min ('5min', '1h', '4h', '1d'); '1w' is a 400.
+    USD OI: alpha × the price of ONE coin. On a multiplied contract fetch_kline's close is per
+    contract unit (per 1000 coins for 1000PEPEUSDT), so divide it by the multiplier first;
+    for BTC-style contracts alpha × close ≈ USD OI.
+    NOT the same number as fetch_open_interest_table / _coin (5 exchanges summed, USD) and NOT
+    the OI 失衡 indicator. 400 / 404 raise at once (body in the message); 503 is retried, then
+    raises. Cached monthly; an empty or partial past month is re-checked after 24 h."""
+    # 'Gate' would miss its floor and get a cache dir of its own
+    exchange = exchange.lower()
+    params = {'symbol': symbol, 'period': interval}
+    # default omitted, as in fetch_funding_rate
+    if exchange != 'binance':
+        params['oi_exchange'] = exchange
+    floor = _OI_HISTORY_START.get(exchange)
+    endpoint = 'oi_imbalance/get_history'
+    return _extend_cache_monthly(
+        'oi_history', params,
+        lambda s, e: _fetch_alpha_raw(endpoint, params, headers, max(s, floor) if floor else s, e),
+        start, end, empty_marker_ttl_hours=24,
+    )
 
 
 def fetch_liquidation_map(symbol, headers):
@@ -2306,7 +2382,12 @@ def fetch_twstock_ohlcv(stock_id, schema, headers, start=None, end=None, adjust=
     self-heals the cache.
 
     For 1d: index is Asia/Taipei tz so df.index[-1].date() returns the correct trading date.
+
+    headers is the THIRD argument here, unlike every other kline fetcher; the usual order
+    (stock_id, schema, start, end, headers) is accepted too.
     """
+    if isinstance(end, dict):
+        headers, start, end = end, headers, start
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     if not start:
         lookback = _TWSTOCK_MINUTE_MAX_DAYS.get(schema, 31)
@@ -2460,9 +2541,10 @@ def fetch_twstock_dividend(stock_id, start, end, headers):
 def fetch_twstock_dividend_batch(stock_ids, start, end, headers):
     """Batch 台股股利事件. Returns dict {stock_id: DataFrame} (same columns as
     fetch_twstock_dividend). Ids with no dividend history are silently absent
-    (the batch API's contract); ids in the API's `failed` list are reported and
-    absent — re-call for those. Cache-first per stock (1-day TTL, full history),
-    uncached ids fetched in chunks of 50; ranges sliced locally."""
+    (the batch API's contract); ids in the API's `failed` list (or of an errored request) get one
+    serial retry in chunks of 10, and if still failing BatchIncomplete is raised with the rest in
+    `.partial`. Cache-first per stock (1-day TTL, full history), uncached ids fetched in chunks of 50;
+    ranges sliced locally."""
     results, uncached = {}, []
     for sid in stock_ids:
         path = _fundamental_cache_path('twstock_dividend', sid)
@@ -2472,27 +2554,43 @@ def fetch_twstock_dividend_batch(stock_ids, start, end, headers):
         else:
             uncached.append(sid)
 
-    for i in range(0, len(uncached), 50):
-        chunk = uncached[i:i + 50]
-        try:
-            r = _retry_get(f'{BASE}/studio/market/twstock/batch/dividend',
-                           headers=headers,
-                           params={'stock_ids': ','.join(chunk)}, timeout=120)
-            payload = r.json()
-            failed = payload.get('failed', [])
-            if failed:
-                print(f'  [batch] dividend server-side fetch failed for {failed} — '
-                      f'absent from results, re-call for those ids')
-            for sid, records in payload.get('data', {}).items():
-                if not records:
+    url = f'{BASE}/studio/market/twstock/batch/dividend'
+    pending = list(dict.fromkeys(uncached))
+    for size in (50, 10):
+        if not pending:
+            break
+        failed, answered = [], False
+        for i in range(0, len(pending), size):
+            chunk = pending[i:i + size]
+            try:
+                payload = _retry_get(url, headers=headers, params={'stock_ids': ','.join(chunk)}, timeout=120).json()
+            except DataAccessError:
+                raise
+            except requests.HTTPError as e:
+                status = getattr(e.response, 'status_code', None)
+                if status is not None and status < 500 and status != 429:
+                    raise
+                failed.extend(chunk)
+                continue
+            except (requests.RequestException, ValueError):
+                failed.extend(chunk)
+                continue
+            answered = True
+            server_failed = set(payload.get('failed') or ())
+            failed.extend(sid for sid in chunk if sid in server_failed)
+            for sid, records in (payload.get('data') or {}).items():
+                if not records or sid in server_failed:
                     continue
                 df = pd.DataFrame(records)
-                _save_fundamental_cache(
-                    _fundamental_cache_path('twstock_dividend', sid), df)
+                _save_fundamental_cache(_fundamental_cache_path('twstock_dividend', sid), df)
                 results[sid] = _dividend_slice(df, start, end).reset_index(drop=True)
-        except Exception as e:
-            print(f'  [batch] dividend chunk {i//50 + 1} error: {e}')
-
+        pending = failed
+        if not answered:
+            break
+    if pending:
+        raise BatchIncomplete(f'{url}: {len(pending)} stock ids still failed after retrying — refusing to '
+                              f'return a result missing them: {pending}. Usually temporary: run again later.',
+                              results, pending)
     return results
 
 
@@ -2756,8 +2854,42 @@ def fetch_twstock_branch_daily_net(stock_id, start, end, headers,
 
 # ── Taiwan fundamental data (quarterly / monthly) ────────────────────────────
 
-def _fundamental_cache_path(prefix, stock_id):
-    return _CACHE_DIR / f'{prefix}_{stock_id}.parquet'
+def _fundamental_cache_path(prefix, stock_id, types=None):
+    """`types` (a normalized tuple) gets its own file: a subset must never sit under the
+    full frame's name, or every later full read would silently get only those rows."""
+    if not types:
+        return _CACHE_DIR / f'{prefix}_{stock_id}.parquet'
+    tag = hashlib.sha1('\x1f'.join(types).encode()).hexdigest()[:10]
+    return _CACHE_DIR / f'{prefix}_types-{tag}_{stock_id}.parquet'
+
+
+_STATEMENT_TYPE_RE = re.compile(r'[\w\-()（）]{1,100}')
+_STATEMENT_TYPES_MAX = 50
+
+
+def _statement_types(types):
+    """None → None; a str or an iterable of FinMind `type` names → a sorted, de-duplicated
+    tuple (the cache key). Same whitelist as the api's `types` parameter."""
+    if types is None:
+        return None
+    if isinstance(types, str):
+        types = [types]
+    out = tuple(sorted({str(t).strip() for t in types}))
+    if not out:
+        raise ValueError('types must name at least one statement item, or be None for all')
+    bad = [t for t in out if not _STATEMENT_TYPE_RE.fullmatch(t)]
+    if bad:
+        raise ValueError(f'invalid statement type name(s): {bad}')
+    if len(out) > _STATEMENT_TYPES_MAX:
+        raise ValueError(f'at most {_STATEMENT_TYPES_MAX} types per call, got {len(out)}')
+    return out
+
+
+def _only_types(df, types):
+    """An api that predates `types` answers every item; the subset is cut here either way."""
+    if not types or df.empty:
+        return df
+    return df[df['type'].isin(types)]
 
 
 def _load_fundamental_cache(path, max_age_days=30, prefix=None):
@@ -2970,50 +3102,139 @@ def fetch_twstock_market_value_all(headers, top=None):
     return out
 
 
-def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers):
+# Retry passes for ids the server could not fetch: smaller chunks, longer waits. The first
+# pass keeps up to _FUNDAMENTAL_BATCH_WORKERS requests in flight: these datasets are read from the
+# api's own whole-market store (no FinMind quota behind them), and a whole-market run is
+# ~40 requests per dataset against the 500 / 5 min per-IP and per-key limit, which counts
+# requests, not concurrency. Retry passes stay one request at a time — they only run when
+# the server is already struggling.
+_FUNDAMENTAL_RETRY_PASSES = ((50, 0), (10, 10), (5, 30))
+_FUNDAMENTAL_BATCH_WORKERS = 4
+
+
+def _in_order(fn, items, workers):
+    """fn over items with at most `workers` calls in flight, results yielded in input
+    order. Closing the generator (the caller raised) stops handing out new calls; only
+    the ones already in flight finish."""
+    if workers <= 1:
+        yield from map(fn, items)
+        return
+    it = iter(items)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        window = collections.deque(pool.submit(fn, x) for x in itertools.islice(it, workers))
+        while window:
+            done = window.popleft().result()
+            for x in itertools.islice(it, 1):
+                window.append(pool.submit(fn, x))
+            yield done
+
+
+def _fetch_fundamental_batch(prefix, endpoint, stock_ids, headers, types=None):
     """Batch fetch fundamental data. Returns dict {stock_id: DataFrame}.
-    Uses cache first; fetches uncached stocks in chunks of 50 via batch API."""
+    Uses cache first; fetches uncached stocks via the batch API.
+
+    `types` (statements only) keeps just those `type` rows: cut locally from a fresh full
+    cache file when there is one, otherwise asked of the api and cached under a
+    types-specific file, never the full one.
+
+    An id the server reports in `failed` (rate limit / upstream error), or whose request
+    errored, is retried; if it still fails, raises RuntimeError naming the ids instead of
+    returning a result that silently lacks them. Ids absent from both `data` and `failed`
+    genuinely have no data and are simply absent from the result."""
+    types = _statement_types(types)
     results = {}
-    uncached = []
+    pending = []
 
     for sid in stock_ids:
-        path = _fundamental_cache_path(prefix, sid)
-        df = _load_fundamental_cache(path, prefix=prefix)
+        df = _load_fundamental_cache(_fundamental_cache_path(prefix, sid), prefix=prefix)
+        if df is not None and types:
+            df = _only_types(df, types)
+            if df.empty:
+                continue   # full file has none of them: same answer the api would give
+        elif df is None and types:
+            df = _load_fundamental_cache(_fundamental_cache_path(prefix, sid, types), prefix=prefix)
         if df is not None:
             results[sid] = df
         else:
-            uncached.append(sid)
+            pending.append(sid)
+    pending = list(dict.fromkeys(pending))
 
-    for i in range(0, len(uncached), 50):
-        chunk = uncached[i:i + 50]
+    url = f'{BASE}/studio/market/twstock/batch/{endpoint}'
+    params = {'types': ','.join(types)} if types else {}
+
+    def _request(chunk):
         try:
-            r = _retry_get(f'{BASE}/studio/market/twstock/batch/{endpoint}',
-                           headers=headers,
-                           params={'stock_ids': ','.join(chunk)},
-                           timeout=120)
-            batch_data = r.json().get('data', {})
-            for sid, records in batch_data.items():
-                if not records:
-                    continue
-                df = pd.DataFrame(records)
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date').sort_index()
-                _save_fundamental_cache(_fundamental_cache_path(prefix, sid), df)
-                results[sid] = df
-        except Exception as e:
-            print(f'  [batch] {endpoint} chunk {i//50 + 1} error: {e}')
+            r = _retry_get(url, headers=headers,
+                           params={'stock_ids': ','.join(chunk), **params}, timeout=120)
+            return r.json()
+        except Exception as e:   # handed back and judged in order by the caller
+            return e
 
+    for pass_no, (chunk_size, wait) in enumerate(_FUNDAMENTAL_RETRY_PASSES):
+        if not pending:
+            break
+        if wait:
+            print(f'  [batch] {endpoint}: retrying {len(pending)} failed ids in {wait}s')
+            time.sleep(wait)
+        chunks = [pending[i:i + chunk_size] for i in range(0, len(pending), chunk_size)]
+        workers = _FUNDAMENTAL_BATCH_WORKERS if pass_no == 0 else 1
+        failed, answered = [], False
+        with contextlib.closing(_in_order(_request, chunks, workers)) as answers:
+            for chunk, body in zip(chunks, answers):
+                if isinstance(body, DataAccessError):
+                    raise body
+                if isinstance(body, requests.HTTPError):
+                    status = getattr(body.response, 'status_code', None)
+                    if status is not None and status < 500 and status != 429:
+                        raise body   # bad request / auth: retrying cannot change the answer
+                    failed.extend(chunk)
+                    continue
+                if isinstance(body, (requests.RequestException, ValueError)):
+                    failed.extend(chunk)
+                    continue
+                if isinstance(body, BaseException):
+                    raise body
+                answered = True
+                server_failed = set(body.get('failed') or ())
+                failed.extend(sid for sid in chunk if sid in server_failed)
+                for sid, records in (body.get('data') or {}).items():
+                    if not records or sid in server_failed:
+                        continue
+                    df = pd.DataFrame(records)
+                    df['date'] = pd.to_datetime(df['date'])
+                    df = df.set_index('date').sort_index()
+                    if types and not df['type'].isin(types).all():
+                        # an api that predates `types` sent every item: that is the full frame
+                        _save_fundamental_cache(_fundamental_cache_path(prefix, sid), df)
+                        df = _only_types(df, types)
+                    if df.empty:
+                        continue
+                    _save_fundamental_cache(_fundamental_cache_path(prefix, sid, types), df)
+                    results[sid] = df
+        pending = failed
+        if not answered:
+            # Every request already exhausted _retry_get's backoff: the server is not
+            # answering, and smaller chunks would only multiply that wait.
+            break
+
+    if pending:
+        raise RuntimeError(
+            f'{url}: {len(pending)} stock ids still failed after retrying '
+            f'(server rate limit, upstream error or no response) '
+            f'— refusing to return a result missing them: {pending}')
     return results
 
 
-def fetch_twstock_financials_batch(stock_ids, headers):
-    """Batch fetch 台股季頻綜合損益表. Returns dict {stock_id: DataFrame}."""
-    return _fetch_fundamental_batch('twstock_fin', 'financials', stock_ids, headers)
+def fetch_twstock_financials_batch(stock_ids, headers, types=None):
+    """Batch fetch 台股季頻綜合損益表. Returns dict {stock_id: DataFrame}.
+    types=['IncomeAfterTaxes', ...] returns only those items (much less to download)."""
+    return _fetch_fundamental_batch('twstock_fin', 'financials', stock_ids, headers, types)
 
 
-def fetch_twstock_balance_sheet_batch(stock_ids, headers):
-    """Batch fetch 台股季頻資產負債表. Returns dict {stock_id: DataFrame}."""
-    return _fetch_fundamental_batch('twstock_bs', 'balance_sheet', stock_ids, headers)
+def fetch_twstock_balance_sheet_batch(stock_ids, headers, types=None):
+    """Batch fetch 台股季頻資產負債表. Returns dict {stock_id: DataFrame}.
+    types=['Equity', ...] returns only those items (much less to download)."""
+    return _fetch_fundamental_batch('twstock_bs', 'balance_sheet', stock_ids, headers, types)
 
 
 def fetch_twstock_monthly_revenue_batch(stock_ids, headers):
@@ -3040,6 +3261,16 @@ def _mark_empty_months(prefix, sid, start, end):
         path = cache_dir / f'{ym}.parquet'
         if not path.exists():
             pd.DataFrame().to_parquet(path)
+
+
+class BatchIncomplete(RuntimeError):
+    """A batch fetch where some ids still failed after the retry pass (server `failed` —
+    upstream quota / error — or an errored request). `partial` holds the ids that did come
+    back, `failed` the rest; a caller that can degrade (a report) may use `partial`, a
+    backtest or live tick must not."""
+    def __init__(self, msg, partial, failed):
+        super().__init__(msg)
+        self.partial, self.failed = partial, failed
 
 
 def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids, start, end, headers,
@@ -3090,14 +3321,18 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
             cursor = span_end + timedelta(days=1)
         return spans
 
-    def _fetch_batch_range(id_list, range_start, range_end):
-        """chunk_size ids per request x date_chunk_days-sized date spans, all issued
-        concurrently. Returns ({id: DataFrame}, failed_ids): frames merged across spans,
+    answered = []
+
+    def _fetch_batch_range(id_list, range_start, range_end, size=chunk_size, workers=8, give_up_after=None):
+        """size ids per request x date_chunk_days-sized date spans, `workers` at a time.
+        give_up_after=N (serial only): when the first N requests all fail outright, the rest are
+        not sent and their ids count as failed — a dead upstream answers the same to every one.
+        Returns ({id: DataFrame}, failed_ids): frames merged across spans,
         missing/empty ids simply absent (caller treats absence as 'no data') — EXCEPT
         ids in failed_ids, whose chunk errored or was server-side rate-limited; for
         those, absence is unknown, not 'empty', and must never be cached as empty."""
         out, failed_ids = {}, set()
-        id_chunks = [id_list[i:i + chunk_size] for i in range(0, len(id_list), chunk_size)]
+        id_chunks = [id_list[i:i + size] for i in range(0, len(id_list), size)]
         date_spans = _date_spans(range_start, range_end)
         jobs = [(idx, chunk, span) for idx, chunk in enumerate(id_chunks) for span in date_spans]
 
@@ -3108,6 +3343,7 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
                 params = {id_param_name: ','.join(chunk), start_param: span_start, end_param: span_end}
                 r = _retry_get(batch_url, headers=headers, params=params, timeout=120)
                 body = r.json()
+                answered.append(True)
                 failed = body.get('failed', [])
                 if failed:
                     print(f'  [batch] {batch_url} server-side fetch failed (rate limit or upstream error), dropped: {failed}')
@@ -3115,16 +3351,39 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
                 for _id, records in body.get('data', {}).items():
                     if records:
                         partial[_id] = _normalise_index(parse_fn(records))
+            except DataAccessError:
+                raise
+            except requests.HTTPError as e:
+                status = getattr(e.response, 'status_code', None)
+                if status is not None and status < 500 and status != 429:
+                    raise   # bad request / auth / unknown symbol: not a quota problem, retrying cannot help
+                print(f'  [batch] {batch_url} chunk {idx + 1} {span}: error: {e}')
+                failed_ids.update(chunk)
             except Exception as e:
                 print(f'  [batch] {batch_url} chunk {idx + 1} {span}: error: {e}')
                 failed_ids.update(chunk)
             return partial
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [pool.submit(_fetch_chunk, idx, chunk, span) for idx, chunk, span in jobs]
-            for future in as_completed(futures):
-                for _id, df in future.result().items():
-                    out[_id] = pd.concat([out[_id], df]) if _id in out else df
+        def _merge(partial):
+            for _id, df in partial.items():
+                out[_id] = pd.concat([out[_id], df]) if _id in out else df
+
+        if workers == 1:
+            dead = 0
+            for n, (idx, chunk, span) in enumerate(jobs):
+                if give_up_after and n >= give_up_after and dead == n:
+                    print(f'  [batch] {batch_url}: first {n} retries all failed — not sending the rest')
+                    for _, rest, _ in jobs[n:]:
+                        failed_ids.update(rest)
+                    break
+                partial = _fetch_chunk(idx, chunk, span)
+                dead += not partial and set(chunk) <= failed_ids
+                _merge(partial)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_fetch_chunk, idx, chunk, span) for idx, chunk, span in jobs]
+                for future in as_completed(futures):
+                    _merge(future.result())
 
         for _id, df in out.items():
             out[_id] = df[~df.index.duplicated(keep='last')].sort_index()
@@ -3203,11 +3462,28 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
     # (Single layout only: the monthly batch path keeps its exact `start` — sub-5min
     # kline batches are validated against the server's earliest date and a month-
     # aligned start before it is a hard 400, not a clamp.)
-    fetched, failed_ids = _fetch_batch_range(uncached, f'{start[:7]}-01' if (single and start) else start, end)
+    full_start = f'{start[:7]}-01' if (single and start) else start
+    answered.clear()
+    fetched, failed_ids = _fetch_batch_range(uncached, full_start, end)
+    # One serial pass in smaller chunks, no waiting and no loop: the usual cause is the server's
+    # hourly upstream quota (2026-10-03: FinMind 27k calls against 18k, 7,254 stock-requests
+    # dropped and a backtest went through with 0 trades), which will not come back within the run.
+    # Skipped when no request got any answer — _retry_get already backed off.
+    if failed_ids and answered:
+        retry_ids = [_id for _id in dict.fromkeys(uncached) if _id in failed_ids]
+        retry_ids += sorted(failed_ids.difference(retry_ids))
+        print(f'  [batch] {batch_url}: retrying {len(retry_ids)} failed ids, one request at a time')
+        again, failed_ids = _fetch_batch_range(retry_ids, full_start, end,
+                                               size=max(1, chunk_size // 5), workers=1, give_up_after=3)
+        for _id, df in again.items():
+            df = pd.concat([fetched[_id], df]) if _id in fetched else df
+            fetched[_id] = df[~df.index.duplicated(keep='last')].sort_index()
     end_str = end or datetime.utcnow().strftime('%Y-%m-%d')
     start_ts = pd.Timestamp(start)
     end_ts = pd.Timestamp(end_str) + pd.Timedelta(days=1)
     for _id, df in fetched.items():
+        if _id in failed_ids:
+            continue   # partial spans of a failed id: caching them would freeze the hole
         if single:
             _save_single(prefix, {'id': _id}, df, start, end)
         else:
@@ -3233,6 +3509,14 @@ def _fetch_batch_cached(prefix, batch_url, id_param_name, raw_fn, parse_fn, ids,
             else:
                 _mark_empty_months(prefix, _id, start, end)
 
+    if failed_ids:
+        failed = sorted(failed_ids)
+        shown = ', '.join(map(str, failed[:100])) + (f' … (+{len(failed) - 100} more)' if len(failed) > 100 else '')
+        raise BatchIncomplete(
+            f'{batch_url}: {len(failed)} ids still failed after retrying — refusing to return a result missing '
+            f'them: {shown}. Usually temporary (the server\'s data quota or an upstream outage): run again later. '
+            f'If the same ids fail on every run, they do not exist or are delisted on this source — remove them '
+            f'from the universe.', results, failed)
     return results
 
 
@@ -3400,11 +3684,53 @@ def fetch_twmarket_turnover(start, end, headers):
     )
 
 
+def _inst_off_total(df):
+    """Rows where foreign + investment_trust + dealer is not 合計 (NaN counts as off)."""
+    return ~((df['foreign'] + df['investment_trust'] + df['dealer'] - df['total']).abs() <= 0.5)
+
+
+_INST_SUM_MAX_DROPS = 3
+
+
+def _drop_twmarket_inst_off_total():
+    """The Blave series used to add 外資自營商 to dealer a second time (it is already inside
+    自營商), and past rows in the cache are never re-fetched. Delete the cached file while any row
+    is off 合計; mark it good once a file passes, so a copy downloaded before the api served the
+    fix is dropped again instead of frozen. At most one drop per UTC day and
+    _INST_SUM_MAX_DROPS in all: a row the api itself still serves off 合計 must not cost a full
+    re-download on every call. NaN rows are skipped (a source gap, not this bug)."""
+    path = _single_path('twmarket_institutional', {'id': 'TWSE'})
+    good = path.with_name(f'{path.name}.dealer_sum')
+    if good.exists():
+        return
+    try:
+        df = pd.read_parquet(path, columns=_TWMARKET_INST_COLUMNS)
+    except Exception:
+        return                            # nothing cached yet, or an old monthly dir not migrated
+    drops = path.with_name(f'{path.name}.dealer_sum_drops')
+    try:
+        days = drops.read_text().split()
+    except OSError:
+        days = []
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    try:
+        if not _inst_off_total(df.dropna()).any() or len(days) >= _INST_SUM_MAX_DROPS:
+            good.touch()
+            drops.unlink(missing_ok=True)
+        elif today not in days:
+            path.unlink(missing_ok=True)
+            drops.write_text(' '.join(days + [today]))
+    except OSError:
+        return                            # file in use (Windows) — try again next call
+
+
 def fetch_twmarket_institutional(start, end, headers):
     """全市場三大法人每日買賣超. Returns DataFrame with columns:
     foreign / investment_trust / dealer / total,皆為淨買賣超金額（元,買 - 賣）。
-    2004-04-07 起。外資自營商計入 dealer,不計入 foreign。
+    2004-04-07 起。foreign + investment_trust + dealer = total:外資自營商已含在 dealer
+    (自營商)裡,foreign 不含外資自營商。
     個股層級請改用 fetch_twstock_institutional。"""
+    _drop_twmarket_inst_off_total()
     return _extend_cache_monthly(
         'twmarket_institutional', {'id': 'TWSE'},
         lambda s, e: _fetch_twmarket_raw('institutional', _TWMARKET_INST_COLUMNS, s, e, headers),
@@ -3699,7 +4025,7 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     Volume is in contracts (口數).
 
     A Shioaji-style 'R1' suffix (TXFR1, MXFR1, CDFR1…) is accepted and mapped to
-    the endpoint's own name (TXF…): the underlying series IS the R1 continuous
+    the endpoint's own name (TXF…): the underlying series is the continuous
     near-month, only the naming differs. 'R2' (next-month continuous) is NOT this
     data and is deliberately not mapped — it still 400s server-side.
 
@@ -3711,16 +4037,32 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
     SYMBOL='TMF' fetches TXF bars while the order layer trades TM0000.
 
     For 1d: index is Asia/Taipei tz so df.index[-1].date() returns the correct trading date.
+
+    TXF '1d' on the desktop (BLAVE_AGENT_LOCAL=1) reaches back to 1998: with no Blave data
+    access this turn the whole frame comes from TAIFEX (fetch_txf_daily_public, attrs['source']
+    = 'TAIFEX'); with access the Blave series is unchanged and a `start` before its first bar
+    (2011-01-03) gets the TAIFEX bars in front of it (attrs['source'] = 'TAIFEX/Blave'). A
+    cloud machine, and every intraday schema, is the Blave series alone as before.
     """
     symbol = symbol.upper()
     if symbol.endswith('R1') and len(symbol) > 2:
         symbol = symbol[:-2]
+    traded = symbol
     if symbol in ('MXF', 'TMF'):
         symbol = 'TXF'
+    txf_daily_desktop = symbol == 'TXF' and schema == '1d' and tw_market_public_allowed()
+    if txf_daily_desktop and _no_data_access(headers):
+        return fetch_txf_daily_public(start, end, traded)
+    # Past months are never re-fetched, so a server-side rebuild needs a fresh namespace:
+    # twfutures2 (2026-10-03, stock futures re-stamped), twfutures3 (2026-10, every series —
+    # settlement day is the expiring month all day, the next month from the 15:00 session).
+    # The TAIFEX head below covers everything before the Blave series: asking Blave for those
+    # months would only leave empty markers that are re-asked every day.
+    blave_start = max(start, _TXF_BLAVE_START[:8] + '01') if txf_daily_desktop else start
     df = _extend_cache_monthly(
-        f'twfutures_{schema}', {'symbol': symbol},
+        f'twfutures3_{schema}', {'symbol': symbol},
         lambda s, e: _fetch_twfutures_raw_smart(symbol, schema, s, e, headers),
-        start, end,
+        blave_start, end,
         empty_marker_ttl_hours=24,   # history is backfilled progressively server-side
     )
     df = _sanity_check_ohlc(df, f'{symbol} {schema} twfutures')
@@ -3729,6 +4071,8 @@ def fetch_twfutures_ohlcv(symbol, schema, start, end, headers):
         # so the index date matches the actual trading date.
         df = df.copy()
         df.index = pd.to_datetime(df.index, utc=True).tz_convert('Asia/Taipei')
+    if txf_daily_desktop and start < _TXF_BLAVE_START:
+        df = _txf_daily_with_taifex_head(df, traded, start, end)
     return df
 
 
@@ -3758,34 +4102,33 @@ def fetch_twfutures_ohlcv_batch(symbols, schema, start, end, headers, max_worker
     return results
 
 
+_TW_BAV_START = '2018-02-22'   # first row the server has (blave-quant-skill: "Data from 2018-02-22 (TXF)")
+
+
 def _fetch_twfutures_bid_ask_vol_raw(start, end, headers):
-    """Fetch raw bid/ask vol for a date range (≤31 days per chunk)."""
+    """Raw bid/ask vol for [start, end], one request per ≤31 days (the endpoint's cap), so a
+    calendar month is one request. The endpoint reads through end + 1 day by itself.
+
+    Two tries per request (≈2 min at worst: 60 s × 2 + 2 s), not _retry_get's six (≈7 min): a
+    live tick must not sit that long, and a cold backfill resumes from the months already
+    cached. Nothing is asked before _TW_BAV_START — a range with no data at all is a 503 that
+    makes the server query its upstream again on every try."""
     _check_data_access(headers)
-    s = datetime.strptime(start, '%Y-%m-%d')
-    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d') + timedelta(days=1)
-    chunk_days = 28
+    s = datetime.strptime(max(start, _TW_BAV_START), '%Y-%m-%d')
+    e = datetime.utcnow() if not end else datetime.strptime(end, '%Y-%m-%d')
 
-    chunks, cursor = [], s
+    rows, cursor = [], s
     while cursor < e:
-        chunk_end = min(cursor + timedelta(days=chunk_days), e)
-        chunks.append((cursor.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d')))
-        cursor = chunk_end
-
-    def _fetch_one(cs, ce):
-        r = requests.get(
+        chunk_end = min(cursor + timedelta(days=31), e)
+        r = _retry_get(
             f'{BASE}/studio/market/twfutures/bid_ask_vol/TXF',
+            max_retries=2,
             headers=headers,
-            params={'start': cs, 'end': ce},
+            params={'start': cursor.strftime('%Y-%m-%d'), 'end': chunk_end.strftime('%Y-%m-%d')},
             timeout=60,
         )
-        r.raise_for_status()
-        return r.json().get('data', [])
-
-    rows = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_fetch_one, cs, ce): (cs, ce) for cs, ce in chunks}
-        for future in as_completed(futures):
-            rows.extend(future.result())
+        rows.extend(r.json().get('data', []))
+        cursor = chunk_end
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -3893,7 +4236,13 @@ PUBLIC_SOURCE_EN = {_TW_PUBLIC_SOURCE_ZH: _TW_PUBLIC_SOURCE_EN, _TWSE_SOURCE_ZH:
 # TWSE answers 200 + stat for everything: these mean "no rows for that date", anything
 # else non-OK (throttle, layout change) raises and is never cached as an empty day.
 _TWSE_NO_DATA = ('很抱歉', '沒有符合條件', '查詢日期大於', '查詢日期小於')
-_BFI82U_BUCKET = {'外資及陸資(不含外資自營商)': 'foreign', '外資自營商': 'dealer', '投信': 'investment_trust',
+# BFI82U row names changed twice per side: 外資 → 外資及陸資 (2009-05) → 外資及陸資(不含外資自營商)
+# + 外資自營商 (2017-12-18); 自營商 → 自營商(自行買賣) + 自營商(避險) (2014-12-01). One day only ever
+# carries one era's names, so each bucket is summed from rows that never overlap. 外資自營商 maps to
+# None: TWSE already counts it inside 自營商 and leaves it out of 合計, so foreign + investment_trust
+# + dealer = 合計 on every day.
+_BFI82U_BUCKET = {'外資': 'foreign', '外資及陸資': 'foreign', '外資及陸資(不含外資自營商)': 'foreign',
+                  '外資自營商': None, '投信': 'investment_trust', '自營商': 'dealer',
                   '自營商(自行買賣)': 'dealer', '自營商(避險)': 'dealer', '合計': 'total'}
 _TAIFEX_INST_COMMODITY = {'TX': 'TXF', 'MTX': 'MXF', 'TMF': 'TMF'}
 _TAIFEX_INVESTOR = {'外資及陸資': 'foreign', '外資': 'foreign', '投信': 'investment_trust', '自營商': 'dealer'}
@@ -3962,12 +4311,16 @@ def _twse_daily_raw(url, label, params, cols, parse, s, e):
 def _bfi82u_row(j):
     net = {}
     for x in j.get('data') or []:
-        bucket = _BFI82U_BUCKET.get(str(x[0]).strip())
-        if bucket:
+        name = str(x[0]).strip()
+        if name not in _BFI82U_BUCKET:   # an unmapped rename would be cached as a NaN column for good
+            raise TwPublicUnavailable(f'TWSE BFI82U: unknown row {name[:20]}')
+        bucket = _BFI82U_BUCKET[name]
+        if bucket is not None:
             net[bucket] = net.get(bucket, 0.0) + _tw_num(x[3])
-    if 'total' not in net:
-        raise TwPublicUnavailable('TWSE BFI82U: no 合計 row')
-    return tuple(net.get(c, float('nan')) for c in _TWMARKET_INST_COLUMNS)
+    out = tuple(net.get(c, float('nan')) for c in _TWMARKET_INST_COLUMNS)
+    if np.isnan(out).any():   # a missing row or '--' would be cached as NaN for good
+        raise TwPublicUnavailable(f'TWSE BFI82U: missing or blank row ({sorted(net)})')
+    return out
 
 
 def _mi_margn_row(j):
@@ -3981,9 +4334,10 @@ def _mi_margn_row(j):
     return _tw_num(m[5]), _tw_num(m[4]), _tw_num(v[5]) * 1000, _tw_num(s[5]), _tw_num(s[4])
 
 
-def _public_series(kind, raw, start, end, source):
+def _public_series(kind, raw, start, end, source, month_by_month=False):
     _tw_market_public_gate()
-    df = _extend_cache_monthly('twmarket_public', {'kind': kind}, raw, start, end)
+    df = _extend_cache_monthly('twmarket_public', {'kind': kind}, raw, start, end,
+                               month_by_month=month_by_month)
     df.attrs['source'] = source
     return df
 
@@ -4003,12 +4357,39 @@ def fetch_twmarket_turnover_public(start, end):
     return _public_series('turnover', raw, start, end, 'TWSE')
 
 
+def _drop_bfi82u_stale_months():
+    """Months cached by older mappings are wrong and, being past, never re-fetched: up to 2017-12
+    NaN foreign (dealer up to 2014-11) from the unmapped old row names, and from 2017-12-18
+    dealer + 外資自營商 again. Both show as foreign + investment_trust + dealer ≠ total, so delete
+    exactly those month files once. Only the broken months go (a kind/version bump would
+    re-download every correct day at 3 s each); the marker makes it a single pass per machine."""
+    d = _monthly_cache_dir('twmarket_public', {'kind': 'institutional'})
+    marker = d / '.bfi82u_dealer_sum'
+    if marker.exists():
+        return
+    for path in d.glob('*.parquet'):
+        try:
+            if not set(_TWMARKET_INST_COLUMNS) <= set(pq.read_schema(path).names):
+                continue                      # empty-month marker
+            if _inst_off_total(pd.read_parquet(path, columns=_TWMARKET_INST_COLUMNS)).any():
+                path.unlink(missing_ok=True)
+        except Exception:
+            path.unlink(missing_ok=True)      # unreadable → re-fetch, as _extend_cache_monthly would
+    d.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+
 def fetch_twmarket_institutional_public(start, end):
     """fetch_twmarket_institutional from TWSE BFI82U, one trading day per request (net 元;
-    外資自營商 counted in dealer, as the Blave series)."""
+    foreign + investment_trust + dealer = total, as the Blave series: 外資自營商 is already inside
+    自營商 and is not added again). From 2004-05-03; before 2017-12-18 TWSE prints one 外資(及陸資)
+    row with no 外資自營商 split, and it lands in foreign."""
+    _tw_market_public_gate()
+    _drop_bfi82u_stale_months()
     raw = lambda s, e: _twse_daily_raw(_TWSE_BFI82U, 'BFI82U', lambda d: {'type': 'day', 'dayDate': d},
                                        _TWMARKET_INST_COLUMNS, _bfi82u_row, s, e)
-    return _public_series('institutional', raw, start, end, 'TWSE')
+    # one request per day: a cold ten-year span is hours, so each month is kept as it lands
+    return _public_series('institutional', raw, start, end, 'TWSE', month_by_month=True)
 
 
 def fetch_twmarket_margin_public(start, end):
@@ -4016,7 +4397,7 @@ def fetch_twmarket_margin_public(start, end):
     (balances in 張, margin_balance_value 元 = 融資金額仟元 × 1,000)."""
     raw = lambda s, e: _twse_daily_raw(_TWSE_MI_MARGN, 'MI_MARGN', lambda d: {'date': d, 'selectType': 'MS'},
                                        _TWMARKET_MARGIN_COLUMNS, _mi_margn_row, s, e)
-    return _public_series('margin', raw, start, end, 'TWSE')
+    return _public_series('margin', raw, start, end, 'TWSE', month_by_month=True)
 
 
 def _tw_public_post(url, data, tries=3):
@@ -4085,22 +4466,222 @@ def fetch_twfutures_institutional_public(futures_id, start, end):
     return _public_series(f'futinst_{fid}', lambda s, e: _taifex_inst_raw(commodity, s, e), start, end, 'TAIFEX')
 
 
+# ── TXF daily bars straight from TAIFEX (free, no key) ───────────────────────
+# The key-free twin of fetch_twfutures_ohlcv('TXF', '1d'): TAIFEX 期貨每日交易行情 (futDataDown,
+# one CSV row per contract month and session) stitched into a near-month continuous series of
+# the same shape. Desktop only, like the series above. Settlement day is the expiring month on
+# both; where it differs from the Blave series (holiday-eve evening session, spread-leg
+# volume): references/twfutures.md.
+_TAIFEX_FUT_DAILY = 'https://www.taifex.com.tw/cht/3/futDataDown'
+_TXF_BLAVE_START = '2011-01-03'    # first bar of the Blave continuous series
+# First trading day on futDataDown per contract (MTX and TMF probed 2026-10-06): the key-free
+# bars are TX prices for all three, served only from the day the traded contract existed.
+_TAIFEX_INDEX_FUT_LISTED = {'TXF': '1998-07-21', 'MXF': '2001-04-09', 'TMF': '2024-07-29'}
+
+
+def _taifex_fut_daily_window(commodity, first, last):
+    """One futDataDown POST for the calendar window [first, last] (dates, both inclusive) →
+    (rows, col). TAIFEX caps a query at one month (an HTML alert past that — never a CSV); a
+    window before listing or past the last published day answers the header alone."""
+    r = _tw_public_post(_TAIFEX_FUT_DAILY, {'down_type': '1', 'commodity_id': commodity,
+                                             'queryStartDate': first.strftime('%Y/%m/%d'),
+                                             'queryEndDate': last.strftime('%Y/%m/%d')})
+    lines = [ln for ln in r.content.decode('cp950', errors='replace').splitlines() if ln.strip()]
+    if not lines or '交易日期' not in lines[0]:
+        raise TwPublicUnavailable(f'TAIFEX futDataDown {commodity} {first}–{last}: not a CSV answer')
+    rows = list(csv.reader(lines))
+    col = {name.strip(): i for i, name in enumerate(rows[0])}
+    need = ('交易日期', '到期月份(週別)', '開盤價', '最高價', '最低價', '收盤價', '成交量', '交易時段')
+    if any(n not in col for n in need):
+        raise TwPublicUnavailable(f'TAIFEX futDataDown: unexpected header {sorted(col)[:6]}')
+    return rows[1:], col
+
+
+def _taifex_near_month_bars(rows, col):
+    """Per-contract session rows → one bar per trading date on the near month: the lowest
+    outright month (YYYYMM — no weeklies, no calendar spreads) with a 一般 row that day, so on
+    settlement day still the expiring month, holiday-shifted settlements included (the rule
+    the Blave continuous series follows too). TAIFEX dates a 盤後 row by the business day it settles
+    to, so a date's bar is its 盤後 row (Open, High/Low) then its 一般 row (Close), Volume both;
+    a date whose 一般 row is not out yet has no bar. Index naive UTC (Taipei midnight − 8h),
+    the shape fetch_twfutures_ohlcv('1d') caches."""
+    by_date = {}
+    for x in rows:
+        month = x[col['到期月份(週別)']].strip()
+        if len(month) != 6 or not month.isdigit():
+            continue
+        o = _tw_num(x[col['開盤價']])
+        if o != o:
+            continue   # listed, no trade
+        h, lo, c = (_tw_num(x[col[k]]) for k in ('最高價', '最低價', '收盤價'))
+        # a single-trade session prints '-' for high/low
+        h, lo = (h if h == h else max(o, c)), (lo if lo == lo else min(o, c))
+        date = x[col['交易日期']].strip().replace('/', '-')
+        sessions = by_date.setdefault(date, {}).setdefault(month, {})
+        sessions[x[col['交易時段']].strip()] = (o, h, lo, c, _tw_num(x[col['成交量']]))
+    out = []
+    for date, months in by_date.items():
+        near = min((m for m, s in months.items() if '一般' in s), default=None)
+        if near is None:
+            continue
+        o, h, lo, c, v = months[near]['一般']
+        night = months[near].get('盤後')
+        if night:
+            o, h, lo, v = night[0], max(h, night[1]), min(lo, night[2]), v + night[4]
+        out.append((pd.Timestamp(date) - pd.Timedelta(hours=8), o, h, lo, c, v))
+    df = pd.DataFrame(out, columns=['time'] + _TW_DAILY_COLS).set_index('time').sort_index()
+    return df.astype(float)
+
+
+def _taifex_txf_daily_raw(s, e):
+    """Bars for the dates [s, e], one POST per window of at most one month. A long-settled
+    window with no rows is an outage (TX has traded every month since listing), raised so it
+    is never cached as an empty month."""
+    today = datetime.now(_TPE).date()
+    first, last = pd.Timestamp(s).date(), pd.Timestamp(e).date()
+    rows, col, cursor = [], None, first
+    while cursor <= last:
+        w_end = min(last, (pd.Timestamp(cursor) + pd.DateOffset(months=1)).date())
+        chunk, col = _taifex_fut_daily_window('TX', cursor, w_end)
+        rows.extend(chunk)
+        cursor = w_end + timedelta(days=1)
+    if not rows and (last - first).days >= 12 and (today - last).days > 12:
+        raise TwPublicUnavailable(f'TAIFEX futDataDown TX {first}–{last}: no rows for a settled window')
+    return _taifex_near_month_bars(rows, col)
+
+
+def fetch_txf_daily_public(start, end=None, symbol='TXF'):
+    """fetch_twfutures_ohlcv('TXF', '1d') from TAIFEX futDataDown — the same frame (Open/High/
+    Low/Close/Volume in contracts, Asia/Taipei midnight index), no Blave key. Desktop only
+    (tw_market_public_allowed); attrs['source'] = 'TAIFEX'. One request per month through the
+    monthly cache (cache/twfutures_public_1d_TXF/: a past month is fetched once and kept, the
+    current month is re-asked from its last bar), so a cold 1998→today backfill is ~340
+    requests at one per second. History from 1998-07-21; an earlier start is clamped.
+    symbol 'MXF' / 'TMF': the same TX bars, from that contract's own listing day on."""
+    _tw_market_public_gate()
+    listed = _TAIFEX_INDEX_FUT_LISTED.get(symbol)
+    if listed is None:
+        raise TwPublicUnavailable(f'TAIFEX daily bars: {symbol} is not TXF / MXF / TMF')
+    start = max(start, listed[:8] + '01')
+    if end is not None and end < start:
+        df = pd.DataFrame(columns=_TW_DAILY_COLS, dtype=float)
+    else:
+        df = _extend_cache_monthly('twfutures_public_1d', {'symbol': 'TXF'}, _taifex_txf_daily_raw,
+                                   start, end, month_by_month=True)
+    df = _sanity_check_ohlc(df, 'TXF 1d taifex')
+    if not df.empty:
+        df = df.copy()
+        df.index = pd.to_datetime(df.index, utc=True).tz_convert('Asia/Taipei')
+        df = df[df.index >= pd.Timestamp(listed, tz='Asia/Taipei')]
+    df.attrs['source'] = 'TAIFEX'
+    return df
+
+
+def _no_data_access(headers):
+    try:
+        _check_data_access(headers)
+    except DataAccessError:
+        return True
+    return False
+
+
+def _txf_daily_with_taifex_head(blave, traded, start, end):
+    """The Blave daily series with the TAIFEX bars before its first bar in front (no price
+    adjustment — both are unadjusted near-month prices). TAIFEX being unreachable leaves the
+    Blave series as it was, with a printed warning, never a failed fetch."""
+    first = blave.index[0] if not blave.empty else None
+    head_end = (first - pd.Timedelta(days=1)).strftime('%Y-%m-%d') if first is not None else end
+    try:
+        head = fetch_txf_daily_public(start, head_end, traded)
+    except (TwPublicUnavailable, requests.exceptions.RequestException) as e:
+        print(f"  ⚠️  {traded} daily bars before {_TXF_BLAVE_START}: TAIFEX unavailable "
+              f"({type(e).__name__}: {str(e)[:120]}) — returning the Blave series only")
+        return blave
+    if first is not None and not head.empty:
+        head = head[head.index < first]
+    if head.empty:
+        return blave
+    df = pd.concat([head, blave]) if first is not None else head
+    df.attrs['source'] = 'TAIFEX/Blave' if first is not None else 'TAIFEX'
+    return df
+
+
+# Third Wednesday that was closed → the day TXF settled instead. Every case since the Blave TXF
+# series begins (2011), the same four txf_settlement_mask's docstring and the API's settlement
+# calendar name; the two inside the bid/ask history (2018-02-22 on) were checked against the
+# server's own TXF bar and bid/ask stores, where they are the only third Wednesdays without a
+# day session. A postponement after 2026 is not here until someone adds it.
+_TXF_POSTPONED_SETTLEMENT = {
+    '2013-08-21': '2013-08-22',   # typhoon
+    '2015-02-18': '2015-02-24',   # Lunar New Year
+    '2023-01-18': '2023-01-30',   # Lunar New Year
+    '2026-02-18': '2026-02-23',   # Lunar New Year
+}
+
+
+def _drop_txf_settlement_window(df):
+    """Bid/ask rows without the ones between the expiring month's 13:30 close and the 15:00
+    night open on monthly settlement days — the continuous series is the expiring month for
+    the whole settlement day, the next month from 15:00. The rebuilt server no longer has
+    those rows; months cached before the rebuild still do, and this makes both read the same.
+
+    The store mixes two minute labels, told per day as the server's rebuild does: a day that
+    opens with an 08:45 row and holds no zero-volume row is minute-START (tick aggregates) —
+    its 13:30 row is already after the close and goes; a day that opens at 08:46 with
+    zero-volume rows is minute-END (the Touchance import) — its 13:30 row is the expiring
+    month's last minute and stays. Any other day loses only 13:31–14:59, which is past the
+    close under either label.
+
+    Settlement day = the third Wednesday, or its entry in _TXF_POSTPONED_SETTLEMENT — a fixed
+    calendar, NOT txf_settlement_mask's reading of the index: there a third Wednesday without
+    rows moves the settlement to the next day that has some, which is right for flattening a
+    position (once too often costs nothing) and wrong for deleting rows, because a hole in the
+    cache looks exactly like a closed market. A third Wednesday with no rows and no entry
+    deletes nothing; a postponed settlement not listed yet is left to the server, which no
+    longer produces those rows."""
+    if df.empty:
+        return df
+    utc = df.index.tz_localize('UTC') if df.index.tz is None else df.index.tz_convert('UTC')
+    local = utc.tz_convert('Asia/Taipei')
+    hm = local.hour * 100 + local.minute
+    day = local.normalize()
+    settle = []
+    for first in pd.date_range(local.min().strftime('%Y-%m-01'), local.max().strftime('%Y-%m-%d'), freq='MS'):
+        wed = (first + pd.Timedelta(days=(2 - first.weekday()) % 7 + 14)).strftime('%Y-%m-%d')
+        settle.append(_TXF_POSTPONED_SETTLEMENT.get(wed, wed))
+    on_settle = (hm >= 845) & (hm < 1500) & day.isin(pd.DatetimeIndex(settle, tz='Asia/Taipei'))
+    if not on_settle.any():
+        return df
+    rows = pd.DataFrame({'day': day[on_settle], 'hm': hm[on_settle],
+                         'zero': (df['total_vol'].to_numpy() == 0)[on_settle]})
+    per_day = rows.groupby('day').agg(first=('hm', 'min'), zero=('zero', 'any'))
+    start_label = set(per_day.index[(per_day['first'] == 845) & ~per_day['zero']])
+    cut = np.where(day.isin(start_label), 1330, 1331)
+    return df[~(on_settle & (hm >= cut))]
+
+
 def fetch_twfutures_bid_ask_vol(start, end, headers):
     """台指期內外盤成交量（1 分鐘）. Returns DataFrame indexed by UTC time.
 
     Columns: bid_vol (內盤口數), ask_vol (外盤口數), total_vol (總口數).
     Both day session (08:45-13:45 TWN) and night session included.
-    (History range: see the blave-quant skill / Notion API doc.)
-    Monthly cache: cache/twfutures_bav_TXF/YYYY-MM.parquet
+    History from 2018-02-22; an earlier start is clamped to it.
+    Monthly cache: cache/twfutures_bav_TXF/YYYY-MM.parquet, one request and one file per
+    month, so a cold fetch cut short resumes with the months it lacks. Settlement day follows
+    the bars' roll rule — no rows between the 13:30 close and the 15:00 night open — applied
+    here on return (_drop_txf_settlement_window), so months cached before the 2026-10 server
+    rebuild need no re-fetch.
     """
     result = _extend_cache_monthly(
         'twfutures_bav', {'symbol': 'TXF'},
         lambda s, e: _fetch_twfutures_bid_ask_vol_raw(s, e, headers),
-        start, end,
+        max(start, _TW_BAV_START), end,
         empty_marker_ttl_hours=24,   # history is backfilled progressively server-side
+        month_by_month=True,
     )
     if result.empty:
         return result
+    result = _drop_txf_settlement_window(result)
     for col in ['bid_vol', 'ask_vol', 'total_vol']:
         if col in result.columns:
             result[col] = result[col].astype(int)
@@ -4184,22 +4765,32 @@ def fetch_stock_futures_ohlcv_symbols(headers):
 
 def txf_settlement_mask(index):
     """Return a boolean Series (same index) that is True on the last bar strictly
-    before each TAIFEX monthly settlement (3rd Wednesday, 13:30 TWN).
+    before each TAIFEX monthly settlement (13:30 TWN on the 3rd Wednesday, or on the
+    next day the market traded when that Wednesday was closed — 2013-08-22, 2015-02-24,
+    2023-01-30, 2026-02-23).
 
     Interval-agnostic: 1m data marks the 13:29 bar, 60m data marks the 13:00 bar,
     etc. Applies to every TAIFEX monthly-settled product — TXF and individual
     stock futures share the same settlement calendar — and MUST be applied by any
-    strategy on `fetch_twfutures_*` data: the source is Shioaji's R1 continuous
-    near-month series, which switches contracts at settlement WITHOUT price
-    adjustment, so an unmasked position books the contract-basis gap as fake PnL
-    (measured 2018-2026 across 10 stock futures: mean +0.36%/roll, std 3.9%,
-    August dividend-season mean -1.9%).
+    strategy on `fetch_twfutures_*` data: the source is a continuous near-month
+    series (the expiring month through its 13:30 close on settlement day, the next
+    month from the 15:00 session) WITHOUT price adjustment, so an unmasked position
+    books the contract-basis gap as fake PnL (measured 2018-2026 across 10 stock
+    futures: mean +0.36%/roll, std 3.9%, August dividend-season mean -1.9%).
+
+    A postponed settlement is read from the index itself, not from a calendar: a 3rd
+    Wednesday with no day-session bar (08:00–13:59 TWN; any bar for daily data) moves
+    the settlement to the next date that has one, and the Wednesday keeps its own mark,
+    so a symbol that merely did not trade that day is flattened once more, never less.
+    Blind spot: a daily series that carries a bar on the holiday itself (the Blave 1d
+    series dates a holiday-eve evening session that way) looks open on that Wednesday.
 
     Usage in compute_signals:
         settle = txf_settlement_mask(df.index)
         signal[settle] = 0.0        # Type A;  Type C: weights.loc[settle] = 0.0
         return signal, settle       # settle doubles as exec_at_close
     """
+    import bisect
     import datetime
     from zoneinfo import ZoneInfo   # stdlib — no pytz dependency (pandas 3.x stopped pulling it in;
                                     # a fresh Windows box had no pytz and every 台指期 backtest died here)
@@ -4215,6 +4806,11 @@ def txf_settlement_mask(index):
                     return d
             d = d + datetime.timedelta(days=1)
 
+    def _moment(d):
+        ts = pd.Timestamp(datetime.datetime(d.year, d.month, d.day, 13, 30, tzinfo=twn)
+                          .astimezone(datetime.timezone.utc))
+        return ts.tz_localize(None) if index.tz is None else ts
+
     mask  = pd.Series(False, index=index)
     start = index.min()
     end   = index.max()
@@ -4226,22 +4822,29 @@ def txf_settlement_mask(index):
     if pd.notna(bar):
         end = end + bar
 
-    year, month = start.year, start.month
-    while True:
-        wed = _third_wed(year, month)
-        ts_settle = pd.Timestamp(
-            datetime.datetime(wed.year, wed.month, wed.day, 13, 30, tzinfo=twn)
-            .astimezone(datetime.timezone.utc)
-        )
-        if index.tz is None:
-            ts_settle = ts_settle.tz_localize(None)
-        if ts_settle > end:
-            break
+    local = (index.tz_localize('UTC') if index.tz is None else index).tz_convert(twn)
+    daily = pd.notna(bar) and bar >= pd.Timedelta(days=1)
+    day_session = local if daily else local[(local.hour >= 8) & (local.hour < 14)]
+    open_days = sorted(set(day_session.normalize().unique().date))
+    open_set = set(open_days)
+
+    def _mark(ts_settle):
         # last bar with label strictly before the settlement moment; guard
         # against marking a far-away bar when the symbol has a data gap
         pos = index.searchsorted(ts_settle) - 1
         if pos >= 0 and (ts_settle - index[pos]) <= pd.Timedelta(days=1):
             mask.iloc[pos] = True
+
+    year, month = start.year, start.month
+    while True:
+        wed = _third_wed(year, month)
+        if _moment(wed) > end:
+            break
+        _mark(_moment(wed))
+        if wed not in open_set:
+            nxt = open_days[bisect.bisect_right(open_days, wed):][:1]
+            if nxt and (nxt[0] - wed).days <= 14 and _moment(nxt[0]) <= end:
+                _mark(_moment(nxt[0]))
         month += 1
         if month > 12:
             month, year = 1, year + 1
@@ -4535,6 +5138,330 @@ def fetch_fear_greed(start=None, end=None):
     return df
 
 
+# ── US stock daily bars: Yahoo Finance, desktop only ──────────────────────────
+# Fetched only by the desktop app, on the user's own computer for the user's own use
+# (data-onboarding canon §9, gate BLAVE_AGENT_LOCAL=1); anywhere else the fetcher raises.
+# Yahoo's public v8 chart endpoint first, the yfinance package as the fallback.
+#
+# Caliber, both sources: Yahoo's quote series is split-adjusted but not dividend-adjusted.
+# Open/High/Low are scaled by adjclose / close and Close becomes adjclose; Volume stays as
+# Yahoo has it — yfinance's own auto_adjust (yfinance/utils.py, 1.7.0) step for step, so a
+# series reads the same whichever source served it.
+#
+# Cache: one parquet per (symbol, source) holding the whole history from ONE answer. Not the
+# monthly layout: every split or dividend rescales all earlier bars, so months fetched on
+# different days would sit on different factors. A snapshot is replaced whole, never merged;
+# one request returns all of it (AAPL from 1980: 11.5k bars, 1.3 MB).
+_YAHOO_CHART   = 'https://query1.finance.yahoo.com/v8/finance/chart/'
+# Measured 2026-10-01 from a home connection: this UA → 200; requests' default UA and a
+# desktop-Chrome UA sent over requests' own TLS → 429 every time.
+_YAHOO_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; blave-agent; +https://blave.org)'}
+_YAHOO_LIMITER = _RateLimiter(1, 1.0)
+_YAHOO_SESSION = None
+_YAHOO_PERIOD1 = -2208988800          # 1900-01-01: from the first bar
+_US_TZ         = 'America/New_York'
+_US_PREFIX     = 'usstock_daily'
+_US_RAW_COLS   = ['Open', 'High', 'Low', 'Close', 'AdjClose', 'Volume']
+_US_SOURCE_ZH  = '資料來源:Yahoo Finance(僅供個人使用,可能失效或有誤)'
+_US_SOURCE_EN  = 'Source: Yahoo Finance (personal use only; may be unavailable or wrong)'
+PUBLIC_SOURCE_EN[_US_SOURCE_ZH] = _US_SOURCE_EN
+_YF_CACHE_SET  = False
+# Circuit breaker: once a source is still rate-limiting after its retries, the rest of this
+# process skips it instead of asking again for every symbol of a universe (and lengthening the block).
+_US_BLOCK_S    = 900
+_US_BLOCKED    = {'yahoo': 0.0, 'yfinance': 0.0}
+
+_US_DESKTOP_ONLY = (
+    "US stock data is fetched only by the desktop app, on the user's own computer — in its chat "
+    "turns, backtests and scheduled reports — never on a cloud machine. Stop here (no other source, no web page) and "
+    "tell the user in one sentence: 美股資料目前只在電腦版可用 / US stock data is currently "
+    "available only in the desktop app.")
+
+
+_US_NOT_LIVE = (
+    "US stock data is fetched only in the desktop app's chat turns, backtests and scheduled reports; "
+    "a live trading tick (desktop or cloud) cannot fetch it, so a US strategy cannot go live yet. "
+    "Stop here and tell the user in one sentence: 美股策略目前還不能上線,美股資料只能在電腦版回測與對話裡用 / "
+    "US stock strategies cannot go live yet; US data works only for backtests and chat in the desktop app.")
+
+
+class UsStockUnavailable(RuntimeError):
+    """US daily bars cannot be served here: not the desktop app, or neither Yahoo nor yfinance
+    answered. The message is written to be relayed to the user, not debugged."""
+
+
+class UsStockNotHere(UsStockUnavailable):
+    """This process may not fetch US data at all (no desktop flag) — raised before any request."""
+
+
+class UsStockNotFound(LookupError):
+    """Yahoo has no such ticker (its 404 "No data found, symbol may be delisted") — yfinance
+    asks the same Yahoo, so the chain stops here."""
+
+
+def _usstock_allowed():
+    return os.environ.get('BLAVE_AGENT_LOCAL') == '1'
+
+
+def _us_require_desktop():
+    """Every function that sends a request to Yahoo calls this first, so no path — public or
+    private — reaches Yahoo off the desktop. A live trading tick gets the "cannot go live yet"
+    sentence; a cloud machine (scheduled report included, which also runs with BLAVE_MODE=live)
+    gets the desktop-only one."""
+    if _usstock_allowed():
+        return
+    live_tick = os.environ.get('BLAVE_MODE') == 'live' and os.environ.get('BLAVE_SCHEDULED_RUN') != '1'
+    raise UsStockNotHere(_US_NOT_LIVE if live_tick else _US_DESKTOP_ONLY)
+
+
+def _us_check_block(src):
+    left = _US_BLOCKED[src] - time.time()
+    if left > 0:
+        raise UsStockUnavailable(f"{src} rate-limited this process; not asked again for {left / 60:.0f} min")
+
+
+def _us_symbol(symbol):
+    """'aapl' → 'AAPL', 'BRK.B' → 'BRK-B' (Yahoo's class-share spelling). ValueError naming the
+    right fetcher for a Taiwan id or a Binance perp, and for anything that is not a ticker."""
+    s = str(symbol or '').strip().upper()
+    if s[:1].isdigit():
+        raise ValueError(f"fetch_usstock_price: {symbol!r} looks like a Taiwan stock id — "
+                         f"use fetch_twstock_price")
+    if s.endswith(('USDT', 'USDC')):
+        raise ValueError(f"fetch_usstock_price: {symbol!r} is a Binance perp symbol (tokenized US "
+                         f"stocks included) — use fetch_kline")
+    s = s.replace('.', '-')
+    if not re.fullmatch(r'[A-Z]{1,5}(-[A-Z]{1,2})?', s):
+        raise ValueError(f"fetch_usstock_price: expects a US ticker as Yahoo spells it ('AAPL', "
+                         f"'SPY', 'BRK-B'), got {symbol!r}; indices (^GSPC, ^IXIC) are not offered")
+    return s
+
+
+def _yahoo_session():
+    """Yahoo's own session — and the desktop gate every direct Yahoo request passes."""
+    global _YAHOO_SESSION
+    _us_require_desktop()
+    if _YAHOO_SESSION is None:
+        _YAHOO_SESSION = requests.Session()
+    return _YAHOO_SESSION
+
+
+def _yahoo_get(url, params, tries=3):
+    """One throttled GET at Yahoo on its own session, User-Agent and throttle — never the Taiwan
+    sources' (_tw_public_get), whose requests stay exactly as they are. Timeouts, connection
+    errors, 429 and 5xx are retried twice; the answer comes back unraised so a 404 can be read.
+    A 429 that outlasts the retries opens the circuit breaker for the rest of the process. The
+    desktop gate is in _yahoo_session, which every request here goes through."""
+    _us_check_block('yahoo')
+    for attempt in range(tries):
+        _YAHOO_LIMITER.acquire()
+        try:
+            r = _yahoo_session().get(url, params=params, headers=_YAHOO_HEADERS, timeout=30)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt == tries - 1:
+                raise
+            time.sleep(2 ** (attempt + 1))
+            continue
+        if (r.status_code == 429 or r.status_code >= 500) and attempt < tries - 1:
+            time.sleep(2 ** (attempt + 1))
+            continue
+        if r.status_code == 429:
+            _US_BLOCKED['yahoo'] = time.time() + _US_BLOCK_S
+            raise UsStockUnavailable(f'Yahoo answered 429 (rate-limited) {tries} times; '
+                                     f'not asked again for {_US_BLOCK_S // 60} min')
+        return r
+
+
+def _us_empty():
+    return pd.DataFrame(columns=_US_RAW_COLS, index=pd.DatetimeIndex([], name='date'), dtype=float)
+
+
+def _us_tidy(df):
+    """Raw frame → floats on naive New York dates, one row a day, slots without a close dropped
+    (Yahoo pads non-trading slots with nulls)."""
+    df = df.astype(float)
+    df.index.name = 'date'
+    df = df[df['Close'].notna()]
+    return df[~df.index.duplicated(keep='last')].sort_index()
+
+
+def _fetch_usstock_yahoo_raw(sym):
+    """The whole daily history in one v8 chart answer → _US_RAW_COLS."""
+    r = _yahoo_get(_YAHOO_CHART + sym, {'interval': '1d', 'events': 'div,splits',
+                                        'period1': _YAHOO_PERIOD1, 'period2': int(time.time()) + 86400})
+    try:
+        j = r.json()
+    except ValueError:
+        j = {}
+    err = (j.get('chart') or {}).get('error') or {}
+    if r.status_code == 404 and err.get('code') == 'Not Found':
+        raise UsStockNotFound(f"Yahoo has no US ticker {sym!r} ({err.get('description')}) — "
+                              f"check the symbol with the user")
+    r.raise_for_status()
+    if err:
+        raise UsStockUnavailable(f"Yahoo chart {sym}: {err.get('code')} {str(err.get('description'))[:120]}")
+    res = ((j.get('chart') or {}).get('result') or [None])[0] or {}
+    stamps = res.get('timestamp') or []
+    if not stamps:
+        # a ticker Yahoo does not have is a 404 (above); 200 with nothing in it is a soft block or
+        # a glitch, and caching it would serve an empty history until the next bar is final
+        raise UsStockUnavailable(f'Yahoo chart {sym}: 200 with no bars')
+    ind = res.get('indicators') or {}
+    q = (ind.get('quote') or [{}])[0] or {}
+    adj = ((ind.get('adjclose') or [{}])[0] or {}).get('adjclose')
+    if adj is None:
+        # without it the caliber cannot be reached — never hand back half-adjusted bars
+        raise UsStockUnavailable(f'Yahoo chart {sym}: the answer has no adjclose series')
+    idx = pd.to_datetime(stamps, unit='s', utc=True).tz_convert(_US_TZ).tz_localize(None).normalize()
+    return _us_tidy(pd.DataFrame({'Open': q.get('open'), 'High': q.get('high'), 'Low': q.get('low'),
+                                  'Close': q.get('close'), 'AdjClose': adj,
+                                  'Volume': q.get('volume')}, index=idx))
+
+
+def _fetch_usstock_yfinance_raw(sym):
+    """Same frame from yfinance (Chrome-impersonating TLS via curl_cffi), auto_adjust=False so
+    the one adjustment below applies to both sources."""
+    global _YF_CACHE_SET
+    _us_require_desktop()
+    _us_check_block('yfinance')
+    try:
+        import yfinance as yf
+    except ImportError as e:
+        raise UsStockUnavailable('the yfinance package is not installed here') from e
+    if not _YF_CACHE_SET:
+        (_CACHE_DIR / 'yfinance').mkdir(parents=True, exist_ok=True)
+        yf.set_tz_cache_location(str(_CACHE_DIR / 'yfinance'))   # its timezone/cookie db stays in the workspace
+        cfg = getattr(yf, 'config', None)
+        if cfg is not None:
+            cfg.debug.hide_exceptions = False   # raise instead of logging (raise_errors= is deprecated)
+        _YF_CACHE_SET = True
+    _YAHOO_LIMITER.acquire()
+    try:
+        h = yf.Ticker(sym).history(period='max', interval='1d', auto_adjust=False, actions=True)
+    except Exception as e:
+        if type(e).__name__ == 'YFRateLimitError':
+            _US_BLOCKED['yfinance'] = time.time() + _US_BLOCK_S
+        raise
+    if h is None or h.empty:
+        raise UsStockUnavailable(f'yfinance {sym}: no bars')
+    div = h['Dividends'] if 'Dividends' in h.columns else pd.Series(0.0, index=h.index)
+    # yfinance fills a missing adjclose with Close (yfinance/utils.py parse_quotes): with a dividend
+    # after the first bar, Adj Close equal to Close on every bar is that fill, not an adjustment
+    if bool((div.iloc[1:] > 0).any()) and bool((h['Adj Close'] == h['Close']).all()):
+        raise UsStockUnavailable(f'yfinance {sym}: the answer has no adjclose series (Adj Close is Close)')
+    idx = pd.DatetimeIndex(h.index)
+    idx = (idx.tz_convert(_US_TZ).tz_localize(None) if idx.tz is not None else idx).normalize()
+    return _us_tidy(pd.DataFrame({'Open': h['Open'].to_numpy(), 'High': h['High'].to_numpy(),
+                                  'Low': h['Low'].to_numpy(), 'Close': h['Close'].to_numpy(),
+                                  'AdjClose': h['Adj Close'].to_numpy(),
+                                  'Volume': h['Volume'].to_numpy()}, index=idx))
+
+
+def _us_adjust(raw):
+    """yfinance's auto_adjust on a raw frame: Open/High/Low × adjclose/close, Close = adjclose,
+    Volume untouched."""
+    ratio = raw['AdjClose'] / raw['Close']
+    out = pd.DataFrame({c: raw[c] * ratio for c in ('Open', 'High', 'Low')}, index=raw.index)
+    out['Close'] = raw['AdjClose']
+    out['Volume'] = raw['Volume']
+    return out
+
+
+def _us_final_at(days):
+    """Naive New York dates → when each day's bar is final (FEED_TIMING['usstock_price'])."""
+    return FEED_TIMING['usstock_price']['available'](pd.DatetimeIndex(days).tz_localize(_US_TZ))
+
+
+def _us_published(df, now):
+    """Rows whose bar is final by `now`: Yahoo hands today's bar back while the session is still
+    open, and a half session must reach neither the cache nor a backtest."""
+    if df.empty:
+        return df
+    return df[np.asarray(_us_final_at(df.index) <= now)]
+
+
+def _us_stale(fetched_at, end, now):
+    """True when a snapshot taken at `fetched_at` may lack a bar the request covers: the latest
+    weekday on or before min(end, New York today) whose bar is final by `now` became final after
+    the snapshot. A market holiday counts as a weekday — one refetch it did not need."""
+    day = now.tz_convert(_US_TZ).tz_localize(None).normalize()
+    if end:
+        day = min(day, pd.Timestamp(end))
+    for _ in range(7):
+        if day.dayofweek < 5:
+            final = _us_final_at([day])[0]
+            if final <= now:
+                return final > fetched_at
+        day -= pd.Timedelta(days=1)
+    return False
+
+
+def _us_cache_read(sym, src):
+    path = _single_path(_US_PREFIX, {'symbol': sym, 'src': src})
+    try:
+        meta = json.loads((pq.read_schema(path).metadata or {})[_META_KEY])
+        return pd.read_parquet(path), pd.Timestamp(meta['fetched_at'], tz='UTC')
+    except Exception:
+        return None, None
+
+
+def _usstock_daily(sym, end):
+    """Raw snapshot for `sym` from the first source that can serve it, cached or fetched, with
+    attrs['source'] naming it. Each call answers from ONE source's snapshot."""
+    _us_require_desktop()
+    now = pd.Timestamp.now(tz='UTC')
+    failed = []
+    for src, label, fetch in (('yahoo', 'Yahoo', _fetch_usstock_yahoo_raw),
+                              ('yfinance', 'yfinance', _fetch_usstock_yfinance_raw)):
+        df, fetched_at = _us_cache_read(sym, src)
+        if df is None or _us_stale(fetched_at, end, now):
+            try:
+                df = _us_published(fetch(sym), now)
+            except UsStockNotFound:
+                raise
+            except Exception as e:
+                failed.append(f'{label}: {type(e).__name__}: {str(e)[:120]}')
+                print(f"  ⚠️  {sym} daily bars: {failed[-1]} — "
+                      + ('trying yfinance' if src == 'yahoo' else 'no source left'))
+                continue
+            _write_single(_US_PREFIX, {'symbol': sym, 'src': src}, df,
+                          {'fetched_at': now.strftime(_META_TS_FMT)})
+        df.attrs['source'] = label
+        logging.info('%s daily bars served by %s', sym, label)
+        return df
+    raise UsStockUnavailable(f"{sym}: no US daily bars this time — {'; '.join(failed)}")
+
+
+def fetch_usstock_price(symbol, start, end, headers=None):
+    """US stock / ETF daily bars, split- and dividend-adjusted. Returns Open/High/Low/Close/Volume
+    on naive New York trading dates (bar_tz='America/New_York' for align_feed).
+
+    `symbol` is the ticker as Yahoo spells it ('AAPL', 'SPY', 'BRK-B'; 'BRK.B' is accepted).
+    Prices: Open/High/Low × adjclose/close, Close = adjclose — yfinance's auto_adjust=True — so
+    returns across splits and dividends are real; the level of old bars is NOT what was quoted
+    then. Volume is Yahoo's (split-adjusted, never dividend-scaled).
+
+    Desktop app only (BLAVE_AGENT_LOCAL=1): fetched on the user's own computer from Yahoo
+    Finance's public chart endpoint, then the yfinance package; elsewhere raises
+    UsStockUnavailable with a sentence to relay. `headers` is accepted for a uniform fetch_data
+    signature and never sent. A day's bar appears from 17:00 New York time
+    (FEED_TIMING['usstock_price']). df.attrs['source'] = 'Yahoo' or 'yfinance'; a report or
+    reply that shows these numbers carries _US_SOURCE_ZH (personal use only, may be wrong).
+    Raises UsStockNotFound for a ticker Yahoo does not have."""
+    sym = _us_symbol(symbol)
+    datetime.strptime(start, '%Y-%m-%d')
+    if end:
+        datetime.strptime(end, '%Y-%m-%d')
+    raw = _usstock_daily(sym, end)
+    df = _us_adjust(raw)
+    keep = df.index >= pd.Timestamp(start)
+    if end:
+        keep &= df.index < pd.Timestamp(end) + pd.Timedelta(days=1)
+    df = _sanity_check_ohlc(df[keep], f'{sym} usstock price')
+    df.attrs['source'] = raw.attrs['source']
+    return df
+
+
 # ── Publication-time alignment for non-price feeds ────────────────────────────
 # A feed row is stamped with the period it DESCRIBES (三大法人 for trading day D is stamped
 # D 00:00; a Blave alpha row is stamped with its bucket's open). What a bar may use is what
@@ -4733,6 +5660,15 @@ FEED_TIMING = {
                             "UTC, and the row stamped that day was the one it had just published. "
                             "How long the API takes to actually serve the new row after 00:00 is "
                             "unconfirmed — +1 h kept; the live gate waits for it"},
+    'usstock_price': {'tz': _US_TZ, 'period': pd.Timedelta(days=1), 'available': _same_day_at(17),
+                      'calendar': 'us_trading_days', 'fresh': 'raise',
+                      'basis': "NYSE / Nasdaq regular session ends 16:00 New York time (13:00 on "
+                               "early-close days); Yahoo publishes no time for its final daily bar "
+                               "and its consolidated volume keeps settling after the close — "
+                               "unconfirmed, 17:00 New York kept. The zone carries daylight saving "
+                               "(05:00 Taipei in summer, 06:00 in winter). fetch_usstock_price drops "
+                               "a day's bar before this time, so a session still running never "
+                               "reaches the cache or a backtest"},
     'economic_calendar': {'tz': 'Asia/Taipei', 'period': None, 'available': 'econ',
                           'calendar': 'self', 'fresh': 'raise', 'columns': ['real'],
                           'basis': "`real` at the release time + api cache 5 min (market/anue/"
@@ -4770,6 +5706,7 @@ class FeedNotPublished(RuntimeError):
 
 
 _live_feeds = 0   # >0 while a LIVE tick's fetch_data runs (runner / wait_for_bar)
+_feed_trims = None   # a list while lib.runner's look-ahead replay listens: the bars align_feed cut
 
 
 class live_feeds:
@@ -4853,7 +5790,8 @@ def align_feed(bars, feed, source, interval, bar_tz=None, columns=None):
     interval: the bars' interval ('1h', '60m', '1d', …); a bar may use a row only if the row
               was available by label + interval.
     bar_tz:   required when the bars' index is naive: 'UTC' for fetch_kline / intraday
-              fetch_twfutures_ohlcv, 'Asia/Taipei' for fetch_twstock_price* daily bars.
+              fetch_twfutures_ohlcv, 'Asia/Taipei' for fetch_twstock_price* daily bars,
+              'America/New_York' for fetch_usstock_price.
 
     A bar whose due row is missing while an older one exists (a late source, a hole) gets
     NaN, not the older value. Live (live_feeds()) the LAST bar being in that state raises
@@ -4868,7 +5806,8 @@ def align_feed(bars, feed, source, interval, bar_tz=None, columns=None):
         if not bar_tz:
             raise ValueError("align_feed: the bars' index is naive — pass bar_tz ('UTC' for "
                              "fetch_kline and intraday fetch_twfutures_ohlcv, 'Asia/Taipei' for "
-                             "fetch_twstock_price* daily bars)")
+                             "fetch_twstock_price* daily bars, 'America/New_York' for "
+                             "fetch_usstock_price)")
         index = index.tz_localize(bar_tz)
     bar_close = index + pd.Timedelta(interval)
 
@@ -4906,6 +5845,11 @@ def align_feed(bars, feed, source, interval, bar_tz=None, columns=None):
                 local = local[(local.hour >= 8) & (local.hour < 14)]
             days = pd.DatetimeIndex(local.floor('D').unique())
             cand = days[days.dayofweek < 5]
+        elif spec['calendar'] == 'us_trading_days':
+            # New York weekdays the bars span; an exchange holiday is not known here, so on one
+            # a live tick waits for a row that never comes (as a TW holiday does for the TW feeds)
+            days = pd.DatetimeIndex(local.floor('D').unique())
+            cand = days[days.dayofweek < 5]
         else:
             cand = pd.DatetimeIndex(local.floor(period).unique())
         if spec['available'] == 'after_period':
@@ -4916,10 +5860,21 @@ def align_feed(bars, feed, source, interval, bar_tz=None, columns=None):
             c_avail = spec['available'](cand)
         c_s = _utc_ns(cand)
         req = _latest_by(_utc_ns(c_avail), c_s, close_ns)
-        need_ns = np.where(req >= 0, c_s[np.maximum(req, 0)], -1)
+        if len(c_s):   # bars that span no trading day (a weekend) have no row to wait for
+            need_ns = np.where(req >= 0, c_s[np.maximum(req, 0)], -1)
         used_ns = np.where(row >= 0, s_ns[np.maximum(row, 0)], -1)
         stale = (need_ns >= 0) & (used_ns < need_ns)
         out.loc[stale] = np.nan
+        if spec['calendar'] == 'us_trading_days':
+            mid = stale.copy()
+            if len(mid) and mid[-1]:       # the trailing run is reported (and cut) below
+                mid[np.flatnonzero(~mid)[-1] + 1 if (~mid).any() else 0:] = False
+            if mid.any():
+                days = pd.DatetimeIndex(np.unique(need_ns[mid])).tz_localize('UTC').tz_convert(stamps.tz)
+                names = ', '.join(str(d.date()) for d in days[:5]) + ('' if len(days) <= 5 else f' (+{len(days) - 5} more)')
+                print(f"  ⚠️  {source}: {int(mid.sum())} bar(s) set to NaN, {index[mid][0]} → "
+                      f"{index[mid][-1]} — no US row for weekday(s) {names}: most likely a US market "
+                      f"holiday (the lib has no holiday table), else a day missing from the data")
         if len(stale) and stale[-1]:
             k = int(np.flatnonzero(c_s == need_ns[-1])[0])
             need, due = cand[k], c_avail[k]
@@ -4928,6 +5883,8 @@ def align_feed(bars, feed, source, interval, bar_tz=None, columns=None):
             tail = len(stale) - (np.flatnonzero(~stale)[-1] + 1 if (~stale).any() else 0)
             print(f"  ⚠️  {source}: the last {tail} bar(s) are cut — the row for {need} was due by "
                   f"{due} and is not in the data yet (live refuses these bars until it lands)")
+            if _feed_trims is not None:
+                _feed_trims.extend(out.index[len(out) - tail:])
             out = out.iloc[:len(out) - tail]
     elif spec['fresh'] == 'warn' and len(stamps) and present.any():
         last = stamps[present].max()

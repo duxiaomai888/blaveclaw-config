@@ -48,7 +48,10 @@ import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+import atomic_file
 import events
+import kline_cache_heal
+import sdk_sync
 
 BASE = os.environ.get("BLAVE_AGENT_BASE") or (
     r"C:\blave-agent" if os.name == "nt" else "/opt/blave-agent"
@@ -899,11 +902,9 @@ def _notice_daily(key, msg):
             if isinstance(v, (int, float)) and now - v < _NOTICE_KEEP_S}
     try:
         os.makedirs(os.path.dirname(_NOTICE_STATE), exist_ok=True)
-        # unique: the timer, web_bridge and telegram_bridge can all build a report at once
-        tmp = f"{_NOTICE_STATE}.{os.getpid()}.{time.monotonic_ns()}.tmp"
-        with open(tmp, "w") as f:
+        # random temp name: the timer, web_bridge and telegram_bridge can all build a report at once
+        with atomic_file.replacing(_NOTICE_STATE) as f:
             json.dump(seen, f)
-        os.replace(tmp, _NOTICE_STATE)
     except OSError:
         pass
 
@@ -1642,6 +1643,13 @@ def main():
         print("[portfolio_reporter] BLAVE_PROXY_TOKEN not set; exiting", file=sys.stderr)
         sys.exit(1)
     payload = build_report()
+    heal_rec = kline_cache_heal.read_record()
+    if heal_rec:
+        payload["kline2_heal"] = heal_rec
+    try:
+        payload["sdk"] = sdk_sync.report()
+    except Exception as e:
+        print(f"[portfolio_reporter] sdk status failed: {e}", file=sys.stderr)
     try:
         resp = report(payload)
         print(f"[portfolio_reporter] reported: {resp}", file=sys.stderr)
@@ -1650,6 +1658,11 @@ def main():
         sys.exit(1)
     # 回報成功之後才動水位線:回報失敗=平台沒收到,事件必須留著下一輪重送
     _handle_ack(resp)
+    # 排在回報之後:這支是缺席偵測的心跳,一次性的快取修補不准拖慢或打掛它
+    try:
+        kline_cache_heal.run()
+    except Exception as e:
+        print(f"[portfolio_reporter] kline cache heal failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

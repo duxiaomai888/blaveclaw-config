@@ -30,11 +30,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import claude_agent_sdk as sdk
-import model_prefs
-import session_store as ss
-import strategy_reporter
-import turn_stop
+import sdk_pin
+
+# before any other import: the pin's directory carries its own anyio/pydantic/mcp
+sdk = sdk_pin.load()
+
+import atomic_file  # noqa: E402
+import model_prefs  # noqa: E402
+import session_store as ss  # noqa: E402
+import strategy_reporter  # noqa: E402
+import turn_stop  # noqa: E402
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -62,6 +67,24 @@ PROXY_ENV = {
     "ANTHROPIC_API_KEY": f"proxy-{os.environ.get('BLAVE_PROXY_TOKEN', '')}",
 }
 
+
+# 引擎的 small/fast 模型(標題、WebFetch 摘要等旁支請求)。主模型是 DeepSeek 時設成這個不在型錄裡的 id,
+# proxy 與電腦版轉送口認得它是幕後、改走 flash 關思考;不設的話引擎沿用主模型 id,跟主回合分不出來。
+# 不能用 deepseek-v4-flash:用戶可以選 flash 當主模型。兩個變數都設:CLI 先看 SMALL_FAST,沒有才看 DEFAULT_HAIKU
+BACKGROUND_MODEL = "deepseek/deepseek-background"
+
+
+def background_model_env(model):
+    if not model or "deepseek" not in str(model).lower():
+        return {}
+    return {"ANTHROPIC_SMALL_FAST_MODEL": BACKGROUND_MODEL, "ANTHROPIC_DEFAULT_HAIKU_MODEL": BACKGROUND_MODEL}
+
+
+def _relay_mode():
+    """電腦版自帶 API 金鑰:外殼只在這個模式帶這兩個變數(shell/main.js llmEnv)。"""
+    return bool(os.environ.get("BLAVE_LLM_RELAY_URL") and os.environ.get("BLAVE_LLM_RELAY_TOKEN"))
+
+
 # Restrict to what a headless trading agent actually needs — the SDK's full
 # default toolset burned 22k+ tokens on a single trivial turn in testing.
 ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
@@ -77,7 +100,9 @@ ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 # Engine tools that deliver after the turn: the CLI is closed when the turn ends, so a Monitor
 # event or a session cron reaches no one. e2e 0.1.8 #127 — the agent armed a Monitor on
 # stats.json, wrote 「等它完成後我會回報」 and ended the turn; nothing ever reported.
-NO_LATER_TOOLS = ["Monitor", "CronCreate"]
+# 2026-10-03 the same promise again through ScheduleWakeup (not refused then); PushNotification
+# and RemoteTrigger are the same kind of later delivery. Names verified inside claude 2.1.239 and 2.1.281.
+NO_LATER_TOOLS = ["Monitor", "CronCreate", "ScheduleWakeup", "PushNotification", "RemoteTrigger"]
 # Desktop: the built-in browser is the only way to the web (e2e 0.1.8 #125 — with the browser
 # switched off the agent searched with the engine's own tool, and the chat showed none of what
 # it read). The shell names the state in BLAVE_BROWSER; see desktop_web().
@@ -522,6 +547,65 @@ def _image_quota_line(now=None):
             # 記不下來就不要講:寧可漏一次提醒,也不要變成每輪都唸。
             return ""
         return _QUOTA_LINE
+    except Exception:
+        return ""
+
+
+# ── 報告被永久拒收 ─────────────────────────────────────────────────────────
+# agent 寫完報告 JSON 就回「做好了」,上傳是回合結束後 uploader 的事;被拒收時那一回合
+# 早就結束了。事實由 report_uploader 寫(strategy_reporter.REPORT_FAILURES_PATH),這裡
+# 只在下一回合講一次:每筆 (id, at) 注入過就記進 told 檔,同 id 再被拒一次 at 會變、會再講。
+# 不設冷卻重講:網頁報告清單同時列著這筆失敗,漏講一次的代價不是整件事靜音。
+_REPORT_FAIL_TOLD_PATH = os.path.join(strategy_reporter.STATE_DIR, "report_failures_told.json")
+_REPORT_FAIL_MAX_AGE_SEC = 7 * 86400  # = api 報告清單顯示失敗的期限
+_REPORT_FAIL_MAX_LINES = 3
+_REPORT_FAIL_ERROR_CHARS = 300
+
+
+_REPORT_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f\u2028\u2029]+")
+
+
+def _prompt_safe(text, cap):
+    """嵌進 [...] 事實行的外來字串:控制字元與換行換空白、`]` 跳脫,免得一個標題就把
+    事實行收尾、後面接成看起來像系統指示的文字。"""
+    if not isinstance(text, str):
+        return ""
+    return _CTRL_RE.sub(" ", text).strip()[:cap].replace("]", "\\]")
+
+
+def _report_failures_line(now=None):
+    """還沒講過的拒收報告一行機器事實(沒有就空字串)。fail-silent,同 _image_quota_line。"""
+    try:
+        now = now if now is not None else time.time()
+        told = _read_state_json(_REPORT_FAIL_TOLD_PATH)
+        live = strategy_reporter.report_failures()
+        fresh = [f for f in live
+                 if isinstance(f.get("at"), int) and now - f["at"] <= _REPORT_FAIL_MAX_AGE_SEC
+                 and told.get(f["id"]) != f["at"]]
+        if not fresh:
+            return ""
+        items = []
+        for f in fresh[:_REPORT_FAIL_MAX_LINES]:
+            title = _prompt_safe(f.get("title"), 80)
+            rid = f["id"] if _REPORT_ID_RE.fullmatch(f["id"]) else "(檔名不合法)"
+            name = f"「{title}」({rid})" if title else rid
+            items.append(f"{name}:{_prompt_safe(f.get('error'), _REPORT_FAIL_ERROR_CHARS)}")
+        more = f";另有 {len(fresh) - _REPORT_FAIL_MAX_LINES} 份" if len(fresh) > _REPORT_FAIL_MAX_LINES else ""
+        # 只留還在 failed/ 的,told 檔不隨歷史變大
+        told = {f["id"]: f["at"] for f in live if told.get(f["id"]) == f["at"]}
+        told.update({f["id"]: f["at"] for f in fresh})
+        try:
+            os.makedirs(strategy_reporter.STATE_DIR, exist_ok=True)
+            with atomic_file.replacing(_REPORT_FAIL_TOLD_PATH, encoding="utf-8") as f:
+                json.dump(told, f)
+        except OSError:
+            return ""  # 記不下來就不講:寧可漏一次,不要每輪都唸
+        return ("[報告上傳失敗(機器事實,不是推測——伺服器或上傳程式拒收,這些報告沒有進報告清單):"
+                + ";".join(items) + more
+                + "。本回合主動告訴使用者哪份報告沒有上架、原因用白話一句,不貼原文;"
+                "照原因修好後用同一個 id 重寫,上傳成功會自動清掉 reports/failed/ 裡的舊檔。"
+                "修好之前不要再說那份報告已經在清單裡。]")
     except Exception:
         return ""
 
@@ -1140,13 +1224,91 @@ def _sched_bash_guard_hooks(options):
     return _add_hook(options, "PreToolUse", "Bash", guard)
 
 
+# 回合結束時引擎追蹤的程序(前景、逾時被轉背景、run_in_background)全部被殺,沒有東西會再叫醒 agent。
+# 2026-10-03 事故:run_in_background 拿到「You will be notified」、agent 回「跑完後我會立即回報」就結束回合;
+# 09-28:回測給了 10 分鐘 timeout,CLI 到點轉背景,回合結束連回測一起死。所以 run_in_background 一律拒絕,
+# 會跑回測/掃參的前景呼叫 timeout 不到「這一輪還剩的時間」也拒絕(上限 = 自動轉背景的門檻,見 turn_env;
+# 剩餘 = 續跑判斷同一條式子 _BRIDGE_KILL_SEC − _RESUME_TAIL_MARGIN_SEC − 已用)。
+# 等待寫法只給 python time.sleep 輪詢(references/deployment.md 3b 那一行):單一指令、不串 `;`(AGENTS.md 的規矩),
+# 實測 claude 2.1.281 可用;開頭的 `sleep N`(N≥25)CLI 會擋。
+# 放行的脫離寫法只有 nohup / setsid 開頭、結尾單一 `&`(3b:這一輪自己輪詢到完成);`& wait`、引號裡的 & 都不算。
+# 只認直接寫在指令裡的啟動;agent 自己寫的包裝腳本、cd 進策略目錄再跑 strategy.py 擋不到。
+_BACKTEST_LAUNCH_RE = re.compile(
+    r"\bpython[\w.]*(?:\.exe)?\s+(?:-[XW]\s*\S+\s+|-(?!c\b)[A-Za-z]+\s+)*[^\s;&|<>]*\bstrategies[/\\][^\s;&|<>]+\.py\b"
+    r"|-m\s+lib\.(?:runner|param_scan|walk_forward|validation)\b"
+    r"|\bfrom\s+lib\.(?:runner|param_scan|walk_forward|validation)\s+import\b"
+    r"|\bimport\s+lib\.(?:runner|param_scan|walk_forward|validation)\b"
+    r"|\bfrom\s+lib\s+import\s[\w\s,()]*?\b(?:runner|param_scan|walk_forward|validation)\b"
+)
+_DETACHED_RE = re.compile(r"^\s*(?:\w+=\S*\s+)*(?:nohup|setsid)\b[^\n]*(?<![&>|])&\s*$")
+
+_POLL_HINT = (
+    "To wait for something already running, poll in the foreground with ONE command that waits and exits by "
+    "itself: `python3 -c \"import time; time.sleep(150); print(''.join(open('tmp/<job>.log', encoding='utf-8', "
+    "errors='replace').readlines()[-3:]))\"` with the Bash tool's `timeout` 180000, repeated until the final line "
+    "appears. A leading `sleep N` of 25 s or more is refused by the engine; Monitor, ScheduleWakeup, cron tools and "
+    "run_in_background are refused here. Steps: references/deployment.md › Long jobs."
+)
+
+
+def bg_guard_reason(tool_input, need_ms):
+    """Bash 呼叫該不該拒絕:回給模型的理由,或 None。need_ms = min(這一輪的 Bash 上限, 這一輪還剩的時間)。"""
+    tool_input = tool_input or {}
+    if tool_input.get("run_in_background") in (True, "true", "True", 1):
+        return ("Refused by the Blave runtime — run_in_background is not available here. When this turn ends the "
+                "engine closes and kills every process it is tracking, a backgrounded one included, and nothing "
+                "calls you again: its completion notice reaches no one and no later report from you is possible. "
+                "Run the command in the foreground with the Bash tool's `timeout` (up to " + str(need_ms) + "; the "
+                "call returns as soon as the command ends). " + _POLL_HINT)
+    cmd = tool_input.get("command")
+    if not isinstance(cmd, str) or not _BACKTEST_LAUNCH_RE.search(cmd) or _DETACHED_RE.search(cmd):
+        return None
+    try:
+        timeout = int(tool_input.get("timeout"))
+    except (TypeError, ValueError):
+        timeout = 0
+    if timeout >= need_ms:
+        return None
+    return ("Refused by the Blave runtime — this starts a backtest / scan, and with `timeout` "
+            + (str(timeout) if timeout else "unset (default 120000)") + " the engine moves it to the background "
+            "when that runs out; the background run is killed when this turn ends and its result is lost. Issue the "
+            "same command again in the foreground with the Bash tool's `timeout` set to " + str(need_ms) + " (what "
+            "this turn has left — the call returns as soon as the run ends, so a short run costs nothing extra). If "
+            "the run is not going to finish within that, do not start it this way: follow references/deployment.md "
+            "› When the job does not finish in the turn. " + _POLL_HINT)
+
+
+def _bg_guard_hooks(options):
+    """PreToolUse:Bash,任何回合:run_in_background 與 timeout 不足的回測啟動拒絕,理由回給模型。"""
+    t0 = time.monotonic()   # 掛載在回合開頭(run_turn 的 t_start 前幾行)
+
+    async def guard(input_data, _tool_use_id, _context):
+        # 續跑時 options.env 整個換成新 dict、上限變小——每次呼叫當下讀
+        try:
+            cap_ms = int((getattr(options, "env", None) or {}).get("BASH_MAX_TIMEOUT_MS") or 1800000)
+        except (TypeError, ValueError):
+            cap_ms = 1800000
+        left_ms = int((_BRIDGE_KILL_SEC - _RESUME_TAIL_MARGIN_SEC - (time.monotonic() - t0)) * 1000)
+        reason = bg_guard_reason((input_data or {}).get("tool_input"), max(0, min(cap_ms, left_ms)))
+        if not reason:
+            return {}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": reason}}
+
+    return _add_hook(options, "PreToolUse", "Bash", guard)
+
+
 def _mount_turn_hooks(options, sink, scheduled, lang_msg=None, reply_lang=None):
+    # 不分 sink:雲端 blave-agent-web.service 是 KillMode=process,脫離的程序同樣活得過回合,
+    # 承諾回報同樣沒人兌現。機隊的 hook 通道以排程回合那道為先例,發版前在 29026 跑一個真實回合確認(runtime/CHANGELOG)。
+    # SDK 沒有 hooks 時 _add_hook 不掛(fail-open)。
+    _bg_guard_hooks(options)
     if isinstance(sink, LocalSink):
-        # 電腦版才掛(實測過 SDK 0.2.144 + 本機 CLI);機隊等 29026 驗過 hook 通道再開
+        # 語言與排程器兩道只在電腦版(實測過本機 CLI);機隊另外驗過再開
         _lang_hooks(options, lang_reminder(lang_msg, reply_lang))
         _sched_guard_hooks(options)
     if scheduled:
-        # 不分 sink:雲端排程回合正是要擋的那一種。機隊的 hook 通道還沒實測,SDK 沒有 hooks 時 _add_hook 不掛(fail-open)
+        # 不分 sink:雲端排程回合正是要擋的那一種。SDK 沒有 hooks 時 _add_hook 不掛(fail-open)
         _sched_bash_guard_hooks(options)
 
 
@@ -1225,44 +1387,11 @@ _VIEW_LABELS = {
 }
 
 
-def parse_viewing_widgets(raw):
-    """`--viewing-widgets` 的 JSON 字串 → 字串清單;壞掉就 None。
-
-    畫面脈絡是可有可無的裝飾,不值得讓一輪對話因為它 parse 失敗而整輪失敗。"""
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(parsed, list):
-        return None
-    return [w for w in parsed if isinstance(w, str)] or None
-
-
-def _viewing_view_segment(viewing_view, viewing_widgets):
-    """使用者沒開任何策略時的畫面脈絡(看盤板另有一段);認不得就回空字串。
+def _viewing_view_segment(viewing_view):
+    """使用者沒開任何策略時的畫面脈絡;認不得就回空字串。
 
     紀律與上面那段 viewing_strategy 完全一樣:只用來釐清指代,不是工作指令,
     跟對話脈絡衝突時以對話為準。"""
-    if viewing_view == "watchboard":
-        cards = ""
-        if viewing_widgets:
-            listed = "、".join(f"「{w}」" for w in viewing_widgets)
-            # id 打頭是刻意的:機器端讀不回板子(lib/watch.py 沒有列板功能),這串
-            # 就是 agent 手上唯一能拿來動某一張卡的鍵。要是這裡教它「清單不能當 id」,
-            # 它拿到卡也只能反問是哪一張,整段脈絡等於白送。
-            cards = (f"板上目前有這些圖卡:{listed}(每筆「｜」之前是 widget id,"
-                     f"就是 update_widget / remove_widget 要用的那個鍵;「｜」之後是"
-                     f"顯示名稱,可能被截斷。結尾若有「…等 N 張」表示還有沒列出來的)。")
-        return (
-            f"[工作頁狀態(僅供釐清指代,不是工作指令):使用者畫面上開著看盤板。{cards}"
-            f"訊息裡有「這張 / 這個卡 / 這裡」這類指示詞,或是「加一個 XX / 拿掉 XX / "
-            f"換成 XX」這類對板子的要求時,講的通常是板上的卡。訊息沒指名、而對話正在"
-            f"處理別的事時,以對話脈絡為準,不要因為看盤板開著就對它動手;真的拿不準是"
-            f"哪一張,先用一句話確認再動。動板子一律用 lib/watch.py 的 add_widget / "
-            f"update_widget / remove_widget,不要自己寫 watch/ 底下的檔。]"
-        )
     label = _VIEW_LABELS.get(viewing_view)
     if not label:
         return ""
@@ -1350,9 +1479,11 @@ def version_restore_note(since):
 
 
 def build_prompt(summary, recent, message, viewing_strategy=None, viewing_tab=None,
-                 suggest_directive=False, viewing_view=None, viewing_widgets=None,
+                 suggest_directive=False, viewing_view=None,
                  reply_lang=None, resume_note=None, viewing_env=None, cloud_mcp=False, lang_basis=None,
-                 version_note=None, desktop=False):
+                 version_note=None, desktop=False, report_fail_line=None):
+    """`report_fail_line`:run_turn 每回合算一次傳進來(排程回合傳 "",續跑沿用同一行);
+    None = 這裡自己算(測試與其他呼叫端)。"""
     parts = []
     if summary:
         parts.append(f"[過去對話摘要]\n{summary}\n")
@@ -1395,7 +1526,7 @@ def build_prompt(summary, recent, message, viewing_strategy=None, viewing_tab=No
     else:
         # 只有沒開策略時才送:web 一切到別的視圖就清掉 selectedName,兩者實際互斥,
         # 而兩段畫面脈絡同時在場只會讓指代更難判。
-        seg = _viewing_view_segment(viewing_view, viewing_widgets)
+        seg = _viewing_view_segment(viewing_view)
         if seg:
             parts.append(seg)
     if viewing_env == "cloud":  # 怪值當沒送(同 --viewing-view)
@@ -1465,6 +1596,10 @@ def build_prompt(summary, recent, message, viewing_strategy=None, viewing_tab=No
     quota_line = _image_quota_line()
     if quota_line:
         parts.append(quota_line)
+    if report_fail_line is None:
+        report_fail_line = _report_failures_line()
+    if report_fail_line:
+        parts.append(report_fail_line)
     # 語言錨放**真正的最尾端**(recency 權重最大)且由 code 偵測、給「針對性」指令:
     # 系統規則是中文寫的+歷史多為中文,籠統的「跟著使用者語言」擋不住英文訊息被
     # 回成中文/中英混雜(實測兩輪)。必須排在上面所有中文逐輪指令(紅線句、建議句
@@ -1497,9 +1632,11 @@ def model_catalog_rule(session_id):
         f'curl -s {PROXY_BASE_URL}/v1/models -H "x-api-key: $ANTHROPIC_API_KEY"\n'
         "```\n"
         "`$ANTHROPIC_API_KEY` 已經在你的環境變數裡（本 runtime 的 proxy token），\n"
-        "不需要另外要金鑰，直接呼叫就有正確、即時的清單跟計價。\n\n"
+        "不需要另外要金鑰，直接呼叫就有正確、即時的清單跟計價。\n"
+        "清單裡帶 `\"legacy\": true` 的是舊世代型號，只為了讓舊設定不斷線而保留：\n"
+        "不要選、不要推薦、不要切到它；使用者講家族名（Opus、Sonnet）就用同家族非 legacy 的 id。\n\n"
         "如果使用者要求切換模型：先用上面的指令確認完整 model id"
-        "（例如 `anthropic/claude-sonnet-5`），然後執行：\n"
+        "（例如 `anthropic/claude-sonnet-5-5`），然後執行：\n"
         "```\n"
         f"python3 {_THIS_DIR}/set_model.py {session_id} <model_id>\n"
         "```\n"
@@ -2355,7 +2492,6 @@ _KIND_SCAN = (
     ("report", re.compile(r"report_templates|\bpublish\(|research_pack\(|report_bricks|lib\.report\b.*write_report")),
     ("scan", re.compile(r"scan_grid\(|find_plateau\(")),
     ("validate", re.compile(r"run_walk_forward\(|\bmcpt\(")),
-    ("watch", re.compile(r"lib\.watch\b|lib/watch\.py")),
     ("schedule", re.compile(r"register_schedule\(|remove_schedule\(|\bcrontab\b|\bschtasks\b")),
     ("data", re.compile(r"\bfetch_\w+\(|from lib\.data import")),
     ("account", re.compile(r"lib\.order_|lib/order_|lib\.account_")),
@@ -3324,7 +3460,6 @@ _STOP_STEP_TEXT = {
     "validate": ("驗證策略", "验证策略", "validating the strategy"),
     "check": ("檢查策略碼", "检查策略代码", "checking the strategy code"),
     "report": ("組報告", "组报告", "building the report"),
-    "watch": ("更新看盤板", "更新看盘板", "updating the watchboard"),
     "schedule": ("設定排程", "设定排程", "setting up a schedule"),
     # 這一種涵蓋下單、撤單、TWAP、平倉、改槓桿、對帳:寫「下單」會把撤單講成下了單(跟狀態列 act.order 同一套字)
     "order": ("執行下單指令", "执行下单指令", "running an order command"),
@@ -3657,33 +3792,42 @@ def data_access_rule():
             "FACTS AND CONSTRAINTS FOR YOU — not wording for the user. Every sentence the user "
             "reads you write yourself, in the language the per-turn language directive names. "
             "Do not copy, translate or adapt any phrasing from this block into the reply.\n"
-            "Facts: this desktop has no Blave data access this turn"
+            "Facts: on this desktop this turn, any `lib/data.py` call that needs Blave data stops "
+            "with `DataAccessError` before sending anything"
             + (f" — {why}" if why else "")
             + ". Access comes with signing in "
             "to Blave (whichever AI the user runs — Blave's, their own Claude Code or Codex): free "
             "while the card trial is active or when the account owns a Blave Agent cloud machine or "
             "an API plan, and otherwise charged per clock hour of use, which needs a balance that "
-            "covers that hour. The Blave-only datasets, none of which are reachable now: holder "
-            "concentration, whale hunter, taker intensity, liquidation, Taiwan stock / futures data "
-            "and the rest of the Blave indicators. Public crypto klines still work (`fetch_kline`, "
-            "Binance public endpoints). Access can change between turns in the same conversation — "
-            "data that worked earlier may be unavailable now; a failed call in this state is final, "
-            "do not investigate.\n"
-            "When the user asks for one of those datasets, your reply must: name which data is "
+            "covers that hour. The Blave-only datasets, which stop that way: holder concentration, "
+            "whale hunter, taker intensity, liquidation, Taiwan chip / institutional / futures data "
+            "and the rest of the Blave indicators. Public data still works: crypto klines "
+            "(`fetch_kline`, Binance public endpoints) and the key-free public fetchers; single-ticker "
+            "Taiwan daily prices (`fetch_twstock_price` / `fetch_twstock_price_adj`) try the exchanges "
+            "and FinMind first and need Blave only when those fail. Access can change between turns "
+            "in the same conversation — data that worked earlier may stop now; a `DataAccessError` "
+            "in this state is final, do not investigate.\n"
+            "Do not decide from these facts alone that something is unavailable: when the user asks "
+            "for a dataset, make the call — it stops at once if it needs Blave data.\n"
+            "Only when a `lib/data.py` call in this turn actually stopped with `DataAccessError`, "
+            "your reply must: name which data is "
             "missing; give the conditions under which it becomes available (signed in, with a "
             "balance that covers the hourly data fee, or the card trial, or a cloud machine); carry "
             "no directions, next steps or prices; not push; and then answer "
-            "whatever part public klines do allow. Say it once per conversation — if asked again "
+            "whatever part public data does allow. Say it once per conversation — if asked again "
             "later, do not repeat the unavailability, just answer what you can.\n"
+            "A turn in which no call stopped with `DataAccessError` — e.g. installing and "
+            "backtesting a library strategy that ran on public data only — does not bring up data "
+            "access and carries no marker.\n"
             + ("State the actual reason above; do not say the user must sign in unless the reason "
                "is signed_out.\n" if why else "")
-            + f"In that same reply put this marker, verbatim, on its own line at the very end of the "
+            + f"In the reply that names the missing data, put this marker, verbatim, on its own line at the very end of the "
             f"reply text (before the `<suggest>` block if the reply has one): `{DATA_ACCESS_CARD}`. "
             "The marker is consumed by the runtime and never shown to the user. Never mention the "
             "marker, or any button, card or anything the app will display. Do not explain it, do not "
             "put it in a code block, use it at most once per conversation (if asked again later, "
-            "answer in text only), and never output it in a reply that is not about Blave data being "
-            "unavailable.\n"
+            "answer in text only), and never output it in a turn where no call stopped with "
+            "`DataAccessError`.\n"
             "Never fabricate the missing data. Never look for credentials elsewhere: no SSH, no "
             "other machines, no other directories.\n"
         )
@@ -3726,7 +3870,7 @@ def _remove_cloud_handoff_dir(workspace=None):
 
 
 async def run_turn(session_id, message, model, sink, viewing_strategy=None, viewing_tab=None,
-                   viewing_view=None, viewing_widgets=None, ui_lang=None,
+                   viewing_view=None, ui_lang=None,
                    engine="claude", codex_bin=None, effort=None, mcp_config=None,
                    viewing_env=None, mcp_servers=None):
     # engine="codex" 是電腦版專屬(用戶自己的 Codex 訂閱),只換掉「呼叫模型並消化它的
@@ -3761,13 +3905,16 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
     except Exception as e:
         print(f"[agent_turn] version note skipped: {type(e).__name__}", file=sys.stderr)
         version_note = None
+    # 排程回合沒人在場:講了沒人聽,還會把「講過了」記掉,用戶在對話裡就再也聽不到。
+    # 只算一次:_report_failures_line 會寫 told 標記,續跑重建 prompt 時再算就是空的
+    report_fail_line = "" if isinstance(sink, ReportSink) else _report_failures_line()
     prompt = build_prompt(summary, recent, message,
                           viewing_strategy=viewing_strategy, viewing_tab=viewing_tab,
                           suggest_directive=isinstance(sink, WebSink),
-                          viewing_view=viewing_view, viewing_widgets=viewing_widgets,
+                          viewing_view=viewing_view,
                           reply_lang=reply_lang, viewing_env=viewing_env, cloud_mcp=cloud_mcp,
                           lang_basis=lang_msg, version_note=version_note,
-                          desktop=_desktop_surface(sink))
+                          report_fail_line=report_fail_line, desktop=_desktop_surface(sink))
     agents_md = load_agents_md()
 
     # Persist the user's message BEFORE calling the SDK — if the turn later
@@ -3809,7 +3956,13 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
     # MUST stay strictly below the bridges' turn timeouts (telegram_bridge 2000s,
     # web_bridge TURN_TIMEOUT 2100s) or a rule-abiding long backtest gets the
     # whole turn killed instead. Names verified inside claude 2.1.239.
-    if not os.environ.get("BLAVE_PROXY_TOKEN"):
+    if _relay_mode():
+        # 電腦版自帶 API 金鑰:CLI 打外殼的本機轉送口,手上只有這一輪的轉送 token,真金鑰在外殼那邊
+        # (shell/llmrelay.js)。轉送 token 走 AUTH_TOKEN(Bearer);ANTHROPIC_API_KEY 必須不存在,CLI 讓它優先
+        turn_env["ANTHROPIC_BASE_URL"] = os.environ["BLAVE_LLM_RELAY_URL"]
+        turn_env["ANTHROPIC_AUTH_TOKEN"] = os.environ["BLAVE_LLM_RELAY_TOKEN"]
+        turn_env.pop("ANTHROPIC_API_KEY", None)
+    elif not os.environ.get("BLAVE_PROXY_TOKEN"):
         # 本機模式(電腦版):沒有 proxy token = 用戶自己的訂閱。這兩個必須
         # 「不存在」而不是留空——CLI 明講 API key 優先於 claude.ai 登入,
         # 留著就是 401(2026-09-18 實測)。
@@ -3818,6 +3971,8 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
         # Keychain 認的是 USER,外殼 spawn 這支時要帶齊(見 shell/main.js)。
         turn_env.pop("ANTHROPIC_BASE_URL", None)
         turn_env.pop("ANTHROPIC_API_KEY", None)
+    if _relay_mode() or os.environ.get("BLAVE_PROXY_TOKEN"):
+        turn_env.update(background_model_env(model))
     turn_env.update({
         "CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS": "1800000",
         "BASH_MAX_TIMEOUT_MS": "1800000",
@@ -3848,7 +4003,7 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
         turn_env["BLAVE_WEB_SESSION"] = sink.session_id
 
     sysprompt_path = _write_system_prompt_file(
-        agents_md + model_catalog_rule(session_id) + python_rule() + data_access_rule()
+        agents_md + ('' if _relay_mode() else model_catalog_rule(session_id)) + python_rule() + data_access_rule()
         + mcp_rule(cloud_mcp) + browser_rule(browser_mounted, web) + turn_note_rule(sink)
         + preferences_rule()
         + reply_lang_rule(lang_msg, reply_lang)
@@ -4141,10 +4296,11 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
             prompt = build_prompt(summary, recent, message,
                                   viewing_strategy=viewing_strategy, viewing_tab=viewing_tab,
                                   suggest_directive=is_web,
-                                  viewing_view=viewing_view, viewing_widgets=viewing_widgets,
+                                  viewing_view=viewing_view,
                                   reply_lang=reply_lang, resume_note=_resume_note(tool_steps),
                                   viewing_env=viewing_env, cloud_mcp=cloud_mcp, lang_basis=lang_msg,
                                   version_note=version_note,
+                                  report_fail_line=report_fail_line,
                                   desktop=_desktop_surface(sink))
             options.max_budget_usd = budget if options.max_budget_usd is not None else None
             options.max_turns = max(TURN_MAX_TURNS - spent_turns, _RESUME_MIN_TURNS)
@@ -4255,7 +4411,9 @@ def main():
     # 視圖代號不設 choices:值域是前端的,加新頁不該要 runtime 先發版才不會炸——
     # 認不認得由 build_prompt 決定(認不得就當沒送)。
     parser.add_argument("--viewing-view", default=None)
-    parser.add_argument("--viewing-widgets", default=None)  # JSON 字串陣列
+    # 看盤板已移除,值不讀。旗標留著:換版那一刻舊 bridge 還可能帶它起新的 agent_turn,
+    # 拿掉會變成未知選項、整輪 exit 2
+    parser.add_argument("--viewing-widgets", default=None)
     # 不設 choices(同 --viewing-view):怪值只當沒送,不能 exit 2 整輪死;白名單在 _resolve_reply_lang
     parser.add_argument("--ui-lang", default=None)
     # 電腦版 A′:只在雲端視角送 "cloud";不設 choices(同 --viewing-view),怪值在 build_prompt 當沒送
@@ -4275,7 +4433,6 @@ def main():
         args.message = raw.decode("utf-8", errors="replace")
     if args.message is None:
         parser.error("message is required (positional, or --message-stdin)")
-    viewing_widgets = parse_viewing_widgets(args.viewing_widgets)
 
     # Secrets come from env, never argv — argv is world-visible in `ps`. The web
     # report token IS the machine's proxy token; the Telegram bot token is passed
@@ -4302,7 +4459,7 @@ def main():
     reply = asyncio.run(run_turn(
         args.session_id, args.message, model, sink,
         viewing_strategy=args.viewing_strategy, viewing_tab=args.viewing_tab,
-        viewing_view=args.viewing_view, viewing_widgets=viewing_widgets,
+        viewing_view=args.viewing_view,
         ui_lang=args.ui_lang, engine=args.engine, codex_bin=args.codex_bin,
         effort=args.effort, mcp_config=args.mcp_config, viewing_env=args.viewing_env,
         mcp_servers=args.mcp_servers,
@@ -4318,9 +4475,8 @@ def _write_sched_outcome():
         return
     path = os.path.join(WORKSPACE, "report_jobs", job, ".sched_result.json")
     try:
-        with open(path + ".tmp", "w", encoding="utf-8") as f:
+        with atomic_file.replacing(path, encoding="utf-8") as f:
             json.dump({k: v for k, v in SCHED_OUTCOME.items() if isinstance(v, (str, int, float, type(None)))}, f)
-        os.replace(path + ".tmp", path)
     except OSError as e:
         print(f"[agent_turn] sched outcome not written: {e}", file=sys.stderr)
 

@@ -8,7 +8,7 @@ Grátis e de código aberto. Conecte seu Claude Code ou Codex. Você descreve a 
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Español](README.es.md) | **Português** | [Tiếng Việt](README.vi.md)
 
-> Esta tradução foi feita a partir do README em inglês no commit [`d2c342a`](https://github.com/Blave-TW/blave-agent/blob/d2c342a/README.md) e cobre só as seções que mudam pouco. Novidades, exchanges e dados, nuvem, estrutura do repositório, como contribuir e as notas para mantenedores estão na [versão em inglês](README.md). Se algo divergir, vale o original em inglês.
+> Esta tradução foi feita a partir do README em inglês no commit [`6944ddd`](https://github.com/Blave-TW/blave-agent/blob/6944ddd/README.md) e cobre só as seções que mudam pouco. Novidades, exchanges e dados, nuvem, estrutura do repositório, como contribuir e as notas para mantenedores estão na [versão em inglês](README.md). Se algo divergir, vale o original em inglês.
 
 ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey) ![Platform: macOS | Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
@@ -20,12 +20,14 @@ Se for útil, dê uma estrela ao repositório, e ative Watch › Releases para s
 
 ## O que o torna diferente
 
-### Backtests que verificam se foi sorte
+### Backtests que verificam overfitting e usam taxas reais
+
+Overfitting: parâmetros que só por acaso se encaixam nos dados passados.
 
 - Todo backtest de Tipo A roda por padrão um teste de permutação de Monte Carlo (MCPT, `lib/validation.py`) e registra um valor p: dados embaralhados poderiam ter se saído tão bem?
 - Uma varredura de parâmetros (`lib/param_scan.py`) procura um platô de parâmetros que funcionam todos, não a melhor célula isolada.
 - Um walk-forward móvel (`lib/walk_forward.py`) mede o desempenho fora da amostra.
-- A taxa tem que corresponder à do mercado real. Uma taxa 0 é sinalizada por `lib/quality_check.py` e tratada como bug.
+- A taxa deve corresponder à do mercado real. Com taxa 0, `lib/quality_check.py` emite um aviso, mas não obriga a mudá-la.
 - Por padrão, uma ideia recebe um único backtest. Um resultado ruim é relatado como está; o agente não reajusta os parâmetros às escondidas até os números ficarem bonitos (veja *Iteration Brakes* em [`AGENTS.md`](AGENTS.md)).
 
 ### Veja se ao vivo roda o código que passou pelo backtest
@@ -53,8 +55,8 @@ Você precisa de:
 - macOS 13 ou superior. O app empacotado é um build universal: Apple Silicon e Intel, um único download.
 - Ou Windows 10 ou 11, x64 (as versões que o Electron 44 suporta; ARM não testado). O instalador ainda não tem assinatura de código, então o Windows avisa na primeira instalação: clique no link abaixo do texto e depois no botão novo que aparece embaixo.
 - Node.js 22.12 ou superior, com npm (`shell/package.json` › `engines`)
-- `python3` no seu `PATH`. O app empacotado traz o próprio Python 3.12; rodando a partir do código-fonte, o `python3` do seu sistema é usado para criar o venv.
-- Claude Code ou Codex instalado e com login feito, ou uma conta Blave
+- `python3` no seu `PATH` (`python` no Windows). O app empacotado traz o próprio Python 3.12; rodando a partir do código-fonte, o Python do seu sistema é usado para criar o venv.
+- Claude Code ou Codex instalado e com login feito, uma chave de API da DeepSeek com pagamento por uso, ou uma conta Blave
 
 ```
 git clone https://github.com/Blave-TW/blave-agent.git
@@ -63,9 +65,19 @@ npm install
 npm start
 ```
 
+No Windows, no PowerShell (`npm.cmd` funciona mesmo quando a política de execução do PowerShell bloqueia o script `npm`):
+
+```powershell
+git clone https://github.com/Blave-TW/blave-agent.git
+cd blave-agent\shell
+npm.cmd install
+npm.cmd start
+```
+
 Na primeira abertura, você escolhe o que move o agente:
 
 - **Seu próprio Claude Code ou Codex.** Não precisa de conta Blave, e a Blave não cobra nada pela IA. O app só inicia o CLI; suas credenciais do Claude Code ou do Codex ficam com ele.
+- **Sua própria chave de API (DeepSeek).** Cole uma chave de pagamento por uso; a DeepSeek cobra você diretamente e a Blave não cobra nada pela IA. A chave fica no chaveiro deste computador (criptografada no Windows) e nunca chega ao agente: o app repassa as requisições localmente.
 - **Blave AI.** Entre com uma conta Blave; cobrada por uso.
 
 Depois, descreva uma ideia. Por exemplo:
@@ -82,7 +94,7 @@ Antes de escrever código, o agente classifica cada ideia em um de três tipos:
 | C | Um portfólio: N símbolos e um vetor de pesos que soma no máximo 1, rebalanceado conforme um calendário | Obrigatório |
 | B | Todo o resto: screeners, grids, arbitragem, alertas, execução pontual | Nenhum |
 
-A interface segue o idioma do sistema (inglês ou chinês tradicional). Para forçar: `BLAVE_LANG=en npm start`.
+A interface segue o idioma do sistema (inglês ou chinês tradicional). Para forçar: `BLAVE_LANG=en npm start` (PowerShell: `$env:BLAVE_LANG="en"; npm.cmd start`).
 
 ## Novidades
 
@@ -94,7 +106,7 @@ As novidades estão na versão em inglês: [README.md › News](README.md#news)
 - Os valores a investir e a retomada do trading ficam por sua conta: na página Trading automático do app para desktop, ou no espaço de trabalho web para um servidor na nuvem. O agente se recusa a fazer isso por você, mesmo que você peça. A única coisa que ele sempre pode fazer sozinho é acionar o kill switch.
 - No app para desktop, as ordens só saem enquanto o Blave está aberto; depois de fechar e abrir de novo, o trading continua pausado até você clicar em Iniciar trading.
 - O agente verifica antes de relatar: relê um arquivo depois de editá-lo e consulta a ordem na exchange antes de dizer que ela foi enviada. Cada tentativa de ordem fica registrada em `state/audit.jsonl`.
-- Um backtest descreve o passado. Ele não prevê nem garante resultados futuros. MCPT e varreduras de parâmetros diminuem a chance de você estar olhando para sorte; não a eliminam.
+- Um backtest descreve o passado. Ele não prevê nem garante resultados futuros. MCPT verifica se um resultado é estatisticamente significativo, e as varreduras de parâmetros verificam se há overfitting; ambos só diminuem a chance de o backtest te enganar, e nenhum a elimina.
 - Nada aqui constitui recomendação de investimento. Operar pode dar prejuízo, inclusive perder tudo.
 
 ## Política de assinatura de código

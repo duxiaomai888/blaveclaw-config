@@ -46,15 +46,8 @@ No Telegram here. The summary push happens platform-side after the report is
 stored (`api/openclaw/agent_reports._notify_stored`), which reaches the user
 even when this machine is off; sending from here too would double every alert.
 
-The watchboard (`.claude/docs/watchboard.md` §4) rides the same process with
-the same file discipline under `workspace/watch/`: `ops/<epoch_ms>-<op>.json`
-is POSTed in file-name order (200 → `ops/sent/`, 4xx → `ops/failed/`, else
-backoff), and `data/<widget_id>.json` is PUT with overwrite semantics — the
-file STAYS in place (the scheduled script rewrites it, and report_runner judges
-a watch job by that file's mtime), this process remembers the mtime+size it
-last shipped and only re-sends when they move. `data/<widget_id>.files/` is
-the image sidecar, same rules as a report's. Errors go to
-`watch/upload_errors.log`.
+`workspace/watch/` (the removed watchboard's drop dirs) is not this process's
+any more: never scanned, never uploaded, never cleaned. Files left there stay.
 
 VM auth = proxy-{ttyd_password} (BLAVE_PROXY_TOKEN), same trust model as
 strategy_reporter / portfolio_reporter: the token resolves to this user only.
@@ -62,7 +55,7 @@ strategy_reporter / portfolio_reporter: the token resolves to this user only.
 import json
 import os
 import re
-import shutil
+import stat
 import sys
 import time
 import unicodedata
@@ -71,6 +64,7 @@ import urllib.request
 
 # 圖片走既有的 strategy_image 通道：副檔名白名單、大小上限、PUT 與 507 語意都在
 # 那裡實作過一次，這裡不重寫第二份(會漂開的那種)。
+import atomic_file
 import strategy_reporter
 
 WORKSPACE = os.environ.get("BLAVE_AGENT_WORKSPACE", "/opt/blave-agent/workspace")
@@ -84,19 +78,6 @@ STATE_DIR = os.environ.get("BLAVE_AGENT_STATE", "/opt/blave-agent/state")
 _STATE_PATH = os.path.join(STATE_DIR, "report_uploads.json")
 API_URL = os.environ.get("BLAVE_REPORT_URL", "https://api.blave.org/openclaw/agent/report")
 PROXY_TOKEN = os.environ.get("BLAVE_PROXY_TOKEN", "")
-
-# 看盤板(.claude/docs/watchboard.md §4):ops 依檔名時序 POST,data 覆蓋語意 PUT
-WATCH_DIR = os.path.join(WORKSPACE, "watch")
-WATCH_OPS_DIR = os.path.join(WATCH_DIR, "ops")
-WATCH_OPS_SENT_DIR = os.path.join(WATCH_OPS_DIR, "sent")
-WATCH_OPS_FAILED_DIR = os.path.join(WATCH_OPS_DIR, "failed")
-WATCH_DATA_DIR = os.path.join(WATCH_DIR, "data")
-WATCH_DATA_FAILED_DIR = os.path.join(WATCH_DATA_DIR, "failed")
-WATCH_ERROR_LOG = os.path.join(WATCH_DIR, "upload_errors.log")
-WATCH_API_URL = os.environ.get("BLAVE_WATCH_URL", "https://api.blave.org/openclaw/agent/watch")
-_WATCH_STATE_PATH = os.path.join(STATE_DIR, "watch_uploads.json")
-WATCH_DATA_MAX_BYTES = 64 * 1024  # mirrored from openclaw/agent_watch.DATA_MAX_BYTES
-_WIDGET_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _FNREF_RE = re.compile(r"\[\^([A-Za-z0-9_-]{1,32})\]")
@@ -136,20 +117,6 @@ _ERROR_LOG_KEEP_LINES = 200
 # 判死；一天的 api 中斷同理不該讓報告消失。累積量由產出速率自然設限。
 _PERMANENT_STATUS = (400, 413)
 
-
-# 401 / 403 在機器剛起來的 30 秒內是 proxy 的 negative cache,不是這個檔的錯:退避重送,
-# 但有上限——token 真的失效時不能無限重試
-_WATCH_AUTH_STATUS = (401, 403)
-_WATCH_AUTH_MAX_ATTEMPTS = 10
-
-
-def _watch_permanent(code):
-    """看盤板通道的永久失敗(契約 §4.1:200 / 4xx 各自搬 sent/ failed/;§4.2 的 404 =
-    widget 不在了)。408 / 429 是「再送就會好」的 4xx,401 / 403 見上,照暫時性退避。
-    跟報告那條的 (400, 413) 刻意不同:報告的 404 是 api 還沒部署,看盤板的出貨順序是
-    api 先上。"""
-    return 400 <= code < 500 and code not in (408, 429) + _WATCH_AUTH_STATUS
-
 # json 的 loads/dumps 在夠深的巢狀上丟的是 RecursionError,而它是 RuntimeError 的
 # 子類、**不是** ValueError。只接 ValueError 的話這個例外會一路穿透 upload_one →
 # run_once,main() 當場死掉而且 _save_state 沒跑;pending() 又是 mtime 最舊優先，
@@ -175,10 +142,8 @@ def _read_json(path, default=None):
 def _write_json(path, obj):
     """原子寫：同一份檔可能正被別的 process 讀。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    with atomic_file.replacing(path, encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, allow_nan=False)
-    os.replace(tmp, path)
 
 
 def drop(doc):
@@ -204,15 +169,13 @@ def log_error(report_id, message, log_path=ERROR_LOG):
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {report_id}: {message}\n"
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(line)
-        if os.path.getsize(log_path) > _ERROR_LOG_MAX_BYTES:
+        # the agent can write this directory: neither the append nor the trim may follow a symlink out of it
+        atomic_file.append_line(log_path, line)
+        if os.lstat(log_path).st_size > _ERROR_LOG_MAX_BYTES:
             with open(log_path, encoding="utf-8", errors="replace") as f:
                 tail = f.readlines()[-_ERROR_LOG_KEEP_LINES:]
-            tmp = log_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
+            with atomic_file.replacing(log_path, encoding="utf-8") as f:
                 f.writelines(tail)
-            os.replace(tmp, log_path)
     except OSError as e:
         print(f"[report_uploader] error log write failed: {e}", file=sys.stderr)
 
@@ -339,15 +302,15 @@ def unique_footnotes(blocks):
     return out, sorted(set(fixed))
 
 
-def _check_image_files(blocks, path="blocks"):
+def _check_image_files(blocks):
     """image.file 是 drop-dir 契約自己的欄位,api 沒有它(收到就是未知 prop → 400),
     所以驗它不違反 check_report「不比 api 嚴」那條——這一段是本地唯一的驗證實作。只在
     `file` 出現時才說話:image block 少了 sha256 又沒有 file 留給 api 去判,
-    免得將來多一種合法的圖片參照被舊 runtime 擋死。看盤板的單一 block 也走這裡。"""
+    免得將來多一種合法的圖片參照被舊 runtime 擋死。"""
     for i, b in enumerate(blocks):
         if not isinstance(b, dict) or b.get("type") != "image" or "file" not in b:
             continue
-        p = f"{path}[{i}]" if path == "blocks" else path
+        p = f"blocks[{i}]"
         if not isinstance(b["file"], str) or not _FILE_RE.fullmatch(b["file"]):
             return (f"{p}.file: must be a plain file name in <id>{FILES_SUFFIX}/ "
                     f"([A-Za-z0-9][A-Za-z0-9._-]{{0,79}}), not a path")
@@ -370,7 +333,7 @@ def _serialize(doc):
     return body, None
 
 
-def _resolve_images(doc, report_id, started, token, sidecar=None, log_path=ERROR_LOG):
+def _resolve_images(doc, report_id, started, token):
     """把 image block 的 `file` 參照換成 `sha256`——圖檔本體 PUT 進既有的
     strategy_image 通道。回傳 (`ok` / `permanent` / `retry`, 訊息)。
 
@@ -401,7 +364,7 @@ def _resolve_images(doc, report_id, started, token, sidecar=None, log_path=ERROR
                and isinstance(b.get("file"), str)]
     if not targets:
         return "ok", None  # 一張圖都沒試 = 對配額狀態不表態，marker 原封不動
-    d = sidecar or files_dir(report_id)
+    d = files_dir(report_id)
     resolved, dropped = {}, {}
     refused = uploaded = False
     # 這一輪有沒有走完整份清單。任何中途 return 都算沒走完——不管是預算用完、
@@ -459,42 +422,36 @@ def _resolve_images(doc, report_id, started, token, sidecar=None, log_path=ERROR
         doc["blocks"] = [b for b in blocks
                          if not (b.get("type") == "image" and b.get("file") in dropped)]
         for name, why in sorted(dropped.items()):
-            log_error(report_id, f"image {name} left out of the report: {why}", log_path)
+            log_error(report_id, f"image {name} left out of the report: {why}")
     return "ok", None
 
 
-def _request(url, body, method, token):
+def _put(body, report_id, token):
     req = urllib.request.Request(
-        url, data=body, method=method,
+        f"{API_URL}/{report_id}", data=body, method="PUT",
         headers={"Content-Type": "application/json", "x-api-key": f"proxy-{token}"},
     )
     with urllib.request.urlopen(req, timeout=UPLOAD_TIMEOUT) as resp:
         return resp.read().decode()
 
 
-def _put(body, report_id, token):
-    return _request(f"{API_URL}/{report_id}", body, "PUT", token)
-
-
-def _api_error(e, permanent=None):
-    """HTTPError → (訊息， 是否永久)。api 的 JSON error 欄位就是要給 agent 讀的。
-    `permanent`:狀態碼 → bool;預設是報告通道的 (400, 413)。"""
+def _api_error(e):
+    """HTTPError → (訊息， 是否永久)。api 的 JSON error 欄位就是要給 agent 讀的。"""
     try:
         detail = json.loads(e.read() or b"{}").get("error") or ""
     except Exception:  # noqa: BLE001 — 讀不出 body 不能蓋掉真正的狀態碼
         detail = ""
-    is_permanent = permanent(e.code) if permanent else e.code in _PERMANENT_STATUS
-    return (f"HTTP {e.code} {detail}".strip(), is_permanent)
+    return (f"HTTP {e.code} {detail}".strip(), e.code in _PERMANENT_STATUS)
 
 
-def _load_state(path=_STATE_PATH):
-    state = _read_json(path, {})
+def _load_state():
+    state = _read_json(_STATE_PATH, {})
     return state if isinstance(state, dict) else {}
 
 
-def _save_state(state, path=_STATE_PATH):
+def _save_state(state):
     try:
-        _write_json(path, state)
+        _write_json(_STATE_PATH, state)
     except OSError as e:
         # 退避狀態掉了最多就是下一輪立刻重試，不值得讓整輪失敗
         print(f"[report_uploader] state write failed: {e}", file=sys.stderr)
@@ -518,75 +475,128 @@ def pending():
     return out
 
 
+def _safe_dir(path, create=False):
+    """reports/ 底下的目錄,一路不跟 symlink(atomic_file.SafeDir)。agent 寫得到這棵樹:
+    sent/ 或 reports/ 被換成指向外面的 symlink 時,下面的搬檔與「只留最近 20 份」不能變成刪別人的檔。
+    根 = 那棵樹的上一層(正式環境就是 WORKSPACE;測試會把 REPORTS_DIR 換到別處)"""
+    tree = os.path.abspath(REPORTS_DIR)
+    if os.path.commonpath([os.path.abspath(path), tree]) == tree:
+        return atomic_file.SafeDir(os.path.dirname(REPORTS_DIR), path, create=create)
+    return atomic_file.SafeDir(WORKSPACE, path, create=create)
+
+
 def _retire(path, target_dir):
     """報告連同它的圖片 sidecar 一起搬走——drop dir 不留孤兒目錄。"""
-    os.makedirs(target_dir, exist_ok=True)
-    os.replace(path, os.path.join(target_dir, os.path.basename(path)))
-    src = os.path.splitext(path)[0] + FILES_SUFFIX
-    if not os.path.isdir(src):
-        return
-    dst = os.path.join(target_dir, os.path.basename(src))
-    shutil.rmtree(dst, ignore_errors=True)  # os.replace 換不掉非空目錄
-    try:
-        os.replace(src, dst)
-    except OSError as e:
-        # 報告已經搬走了，這個目錄現在是孤兒——_sweep_orphan_files 一天後收掉它
-        print(f"[report_uploader] {os.path.basename(src)} not retired: {e}",
-              file=sys.stderr)
+    with _safe_dir(target_dir, create=True) as dst:
+        dst.move_in(path, os.path.basename(path))
+        src = os.path.splitext(path)[0] + FILES_SUFFIX
+        if not os.path.isdir(src) or os.path.islink(src):
+            return
+        name = os.path.basename(src)
+        try:
+            dst.rmtree(name)  # os.replace 換不掉非空目錄
+            dst.move_in(src, name)
+        except OSError as e:
+            # 報告已經搬走了，這個目錄現在是孤兒——_sweep_orphan_files 一天後收掉它
+            print(f"[report_uploader] {name} not retired: {e}", file=sys.stderr)
 
 
 def _prune_sent(sent_dir=SENT_DIR):
     """sent/ 只留最近幾份給機器端 agent 回頭看；本體在平台上，這裡不是歸檔。"""
     try:
-        files = [os.path.join(sent_dir, n) for n in os.listdir(sent_dir)]
+        d = _safe_dir(sent_dir)
     except OSError:
         return
-    files = [p for p in files if os.path.isfile(p)]
-    if len(files) <= SENT_KEEP:
-        return
-    files.sort(key=os.path.getmtime, reverse=True)
-    for path in files[SENT_KEEP:]:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        shutil.rmtree(os.path.splitext(path)[0] + FILES_SUFFIX, ignore_errors=True)
+    with d:
+        files = []
+        for n in d.listdir():
+            try:
+                st = d.lstat(n)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                files.append((st.st_mtime, n))
+        if len(files) <= SENT_KEEP:
+            return
+        files.sort(reverse=True)
+        for _, n in files[SENT_KEEP:]:
+            try:
+                d.remove(n)
+            except OSError:
+                pass
+            try:
+                d.rmtree(os.path.splitext(n)[0] + FILES_SUFFIX)
+            except OSError:
+                pass
 
 
 def _sweep_orphan_files():
-    """清掉沒有報告 / data 檔的 sidecar 目錄。兩個來源:產出端寫完圖就掛掉、以及 _retire
+    """清掉沒有報告的 sidecar 目錄。兩個來源:產出端寫完圖就掛掉、以及 _retire
     搬走報告後目錄自己搬不動。給滿一天寬限——契約是圖先落、報告後落,剛出現的孤兒
     可能只是那份報告還在寫。"""
     cutoff = time.time() - _ORPHAN_FILES_MAX_AGE_S
-    for base in (REPORTS_DIR, WATCH_DATA_DIR):
+    try:
+        d = _safe_dir(REPORTS_DIR)
+    except OSError:
+        return
+    with d:
         try:
-            names = os.listdir(base)
+            names = d.listdir()
         except OSError:
-            continue
+            return
         for name in names:
             if not name.endswith(FILES_SUFFIX):
                 continue
-            d = os.path.join(base, name)
-            if not os.path.isdir(d) or os.path.exists(d[:-len(FILES_SUFFIX)] + ".json"):
-                continue
             try:
-                if os.path.getmtime(d) > cutoff:
+                st = d.lstat(name)
+                if not stat.S_ISDIR(st.st_mode) or st.st_mtime > cutoff:
                     continue
+                d.lstat(name[:-len(FILES_SUFFIX)] + ".json")
+                continue  # 報告還在
+            except FileNotFoundError:
+                pass
             except OSError:
                 continue
-            shutil.rmtree(d, ignore_errors=True)
+            try:
+                d.rmtree(name)
+            except OSError:
+                pass
 
 
-def _fail_permanently(report_id, path, message, state, failed_dir=FAILED_DIR,
-                      log_path=ERROR_LOG):
-    log_error(report_id, message, log_path)
+def _fail_permanently(report_id, path, message, state):
+    log_error(report_id, message)
     print(f"[report_uploader] {report_id} refused: {message}", file=sys.stderr)
     try:
-        _retire(path, failed_dir)
+        _retire(path, FAILED_DIR)
     except OSError as e:
         print(f"[report_uploader] {report_id} could not be moved to failed/: {e}",
               file=sys.stderr)
     state.pop(report_id, None)
+
+
+def _refuse_report(report_id, path, message, state, doc=None, origin="machine"):
+    """永久失敗:照 _fail_permanently 歸檔,再記一筆拒收事實(給報告清單與 agent 用)。
+    origin="api" = api 回 400/413(平台在拒收那一刻已發過 report_rejected);
+    "machine" = 沒打到 api 就失敗,平台只能從這筆事實得知。"""
+    _fail_permanently(report_id, path, message, state)
+    title = doc.get("title") if isinstance(doc, dict) else None
+    _record_failure(report_id, message, title if isinstance(title, str) else None, origin)
+
+
+def _record_failure(report_id, message, title, origin):
+    facts = _read_json(strategy_reporter.REPORT_FAILURES_PATH, {})
+    if not isinstance(facts, dict):
+        facts = {}
+    facts[report_id] = {"at": int(time.time()), "title": title, "error": message,
+                        "origin": origin}
+    # failed/ 從不自己清,這份也就不會自己縮:只留最近的,平台與 agent 都只看這麼多
+    if len(facts) > 2 * strategy_reporter.REPORT_FAILURES_MAX:
+        keep = sorted(facts, key=lambda k: (facts[k] or {}).get("at") or 0, reverse=True)
+        facts = {k: facts[k] for k in keep[:2 * strategy_reporter.REPORT_FAILURES_MAX]}
+    try:
+        _write_json(strategy_reporter.REPORT_FAILURES_PATH, facts)
+    except OSError as e:
+        print(f"[report_uploader] {report_id}: failure fact not recorded: {e}", file=sys.stderr)
 
 
 def _defer(report_id, message, state):
@@ -600,13 +610,13 @@ def _defer(report_id, message, state):
           f"{message}", file=sys.stderr)
 
 
-def _newest_mtime(report_id, path, sidecar=None):
+def _newest_mtime(report_id, path):
     """報告與它 sidecar 裡每張圖之中最新的 mtime。
 
     契約要求圖先落、報告最後才 os.replace,所以報告靜置了圖通常也靜置了;這條是
     給沒照順序寫的產出端的網子，同 QUIET_S 對報告本身的角色。"""
     newest = os.path.getmtime(path)
-    d = sidecar or files_dir(report_id)
+    d = files_dir(report_id)
     try:
         for name in os.listdir(d):
             p = os.path.join(d, name)
@@ -617,13 +627,13 @@ def _newest_mtime(report_id, path, sidecar=None):
     return newest
 
 
-def _quiet_left(report_id, path, now, sidecar=None):
+def _quiet_left(report_id, path, now):
     """離靜默期滿還有幾秒(<= 0 = 這一輪可以動它)。
 
     半寫檔防線的**唯一**實作:upload_one 用它擋、pending_status 用它算還要等多久，
     兩邊講的才會是同一件事。讀不到 mtime 當成還沒靜置(同 upload_one 原本的處置)。"""
     try:
-        return QUIET_S - (now - _newest_mtime(report_id, path, sidecar))
+        return QUIET_S - (now - _newest_mtime(report_id, path))
     except OSError:
         return QUIET_S
 
@@ -637,30 +647,24 @@ def pending_status(state=None, now=None):
     因此一秒都不多付。其餘三項只用來在 journal 上交代這一輪看到了什麼。"""
     now = time.time() if now is None else now
     state = _load_state() if state is None else state
-    watch_state = _load_state(_WATCH_STATE_PATH)
     out = {"quiet_wait": 0.0, "quiet": 0, "deferring": 0, "tmp": 0}
-    # 看盤板的檔跟報告走同一道靜默期防線(path unit 看的是同一棵 watch/ 樹)
-    queue = [(rid, path, state, None) for rid, path in pending()]
-    queue += [(f"ops:{name}", path, watch_state, None) for name, path in pending_ops()]
-    queue += [(f"data:{wid}", path, watch_state, watch_files_dir(wid))
-              for wid, path in pending_data(watch_state)]
-    for key, path, st, sidecar in queue:
-        entry = st.get(key)
+    for report_id, path in pending():
+        entry = state.get(report_id)
         if isinstance(entry, dict) and now < (entry.get("next_at") or 0):
             out["deferring"] += 1
             continue
-        left = _quiet_left(key, path, now, sidecar)
+        left = _quiet_left(report_id, path, now)
         if left > 0:
             out["quiet"] += 1
             out["quiet_wait"] = max(out["quiet_wait"], left)
     if out["quiet_wait"]:
         # +0.05 = mtime 粒度的餘裕，免得睡醒還差幾微秒又被自己的防線擋下
         out["quiet_wait"] = min(out["quiet_wait"] + 0.05, QUIET_WAIT_MAX_S)
-    for d in (REPORTS_DIR, WATCH_OPS_DIR, WATCH_DATA_DIR):
-        try:
-            out["tmp"] += sum(1 for n in os.listdir(d) if n.endswith(".tmp"))
-        except OSError:
-            pass
+    try:
+        # a producer's half-written <id>.json.tmp; the runtime's own replacing() temps are not reports
+        out["tmp"] = sum(1 for n in os.listdir(REPORTS_DIR) if n.endswith(".tmp") and not atomic_file.is_own_temp(n))
+    except OSError:
+        pass
     return out
 
 
@@ -670,9 +674,8 @@ def upload_one(report_id, path, state, token, started=None):
     `started` = 這一輪掃描的起點,圖片上傳跟報告 PUT 共用 TICK_BUDGET_S。"""
     started = time.time() if started is None else started
     if not _ID_RE.fullmatch(report_id):
-        _fail_permanently(report_id, path,
-                          "file name is not a valid report id ([A-Za-z0-9_-]{1,64})",
-                          state)
+        _refuse_report(report_id, path,
+                       "file name is not a valid report id ([A-Za-z0-9_-]{1,64})", state)
         return "failed"
     if _quiet_left(report_id, path, time.time()) > 0:
         return "skipped"  # 可能還在寫，留給下一輪（main() 會等滿再掃一次）
@@ -686,10 +689,9 @@ def upload_one(report_id, path, state, token, started=None):
         print(f"[report_uploader] {report_id} not sizeable this tick: {e}", file=sys.stderr)
         return "skipped"
     if size > _READ_MAX_BYTES:
-        _fail_permanently(report_id, path,
-                          f"file is {size} bytes; anything past {_READ_MAX_BYTES} cannot "
-                          f"serialize under the {REPORT_MAX_BYTES} byte ceiling",
-                          state)
+        _refuse_report(report_id, path,
+                       f"file is {size} bytes; anything past {_READ_MAX_BYTES} cannot "
+                       f"serialize under the {REPORT_MAX_BYTES} byte ceiling", state)
         return "failed"
 
     try:
@@ -701,18 +703,18 @@ def upload_one(report_id, path, state, token, started=None):
         print(f"[report_uploader] {report_id} not readable this tick: {e}", file=sys.stderr)
         return "skipped"
     except ValueError as e:  # UnicodeDecodeError：內容不是 UTF-8，重試也不會變
-        _fail_permanently(report_id, path, f"file is not valid UTF-8 ({e})", state)
+        _refuse_report(report_id, path, f"file is not valid UTF-8 ({e})", state)
         return "failed"
     try:
         doc = json.loads(raw)
     except _JSON_ERRORS as e:
-        _fail_permanently(report_id, path, f"file is not valid JSON ({e})", state)
+        _refuse_report(report_id, path, f"file is not valid JSON ({e})", state)
         return "failed"
     if isinstance(doc, dict):
         doc.setdefault("id", report_id)  # 檔名即 id；不一致才拒收，見 check_report
     err = check_report(doc, report_id)
     if err:
-        _fail_permanently(report_id, path, err, state)
+        _refuse_report(report_id, path, err, state, doc)
         return "failed"
     try:
         doc["blocks"], _ = unique_footnotes(doc["blocks"])
@@ -721,14 +723,14 @@ def upload_one(report_id, path, state, token, started=None):
               file=sys.stderr)
     outcome, message = _resolve_images(doc, report_id, started, token)
     if outcome == "permanent":
-        _fail_permanently(report_id, path, message, state)
+        _refuse_report(report_id, path, message, state, doc)
         return "failed"
     if outcome == "retry":
         _defer(report_id, message, state)
         return "deferred"
     body, err = _serialize(doc)
     if err:
-        _fail_permanently(report_id, path, err, state)
+        _refuse_report(report_id, path, err, state, doc)
         return "failed"
 
     try:
@@ -736,7 +738,7 @@ def upload_one(report_id, path, state, token, started=None):
     except urllib.error.HTTPError as e:
         message, permanent = _api_error(e)
         if permanent:
-            _fail_permanently(report_id, path, message, state)
+            _refuse_report(report_id, path, message, state, doc, origin="api")
             return "failed"
         _defer(report_id, message, state)
         return "deferred"
@@ -764,13 +766,25 @@ def _clear_failed(report_id, failed_dir=FAILED_DIR):
     還有一份失敗的報告(uid=1 T7b 一開場就被它帶偏)。sidecar 一起清:_sweep_orphan_files
     不掃 failed/,留下就是永久孤兒。"""
     try:
-        os.remove(os.path.join(failed_dir, report_id + ".json"))
+        with _safe_dir(failed_dir) as d:  # failed/ 被換成 symlink 時不能變成刪外面同名的檔
+            try:
+                d.remove(report_id + ".json")
+            except FileNotFoundError:
+                pass
+            d.rmtree(report_id + FILES_SUFFIX)
     except FileNotFoundError:
         pass
     except OSError as e:
         print(f"[report_uploader] {report_id}: stale failed/ copy not removed: {e}",
               file=sys.stderr)
-    shutil.rmtree(os.path.join(failed_dir, report_id + FILES_SUFFIX), ignore_errors=True)
+    facts = _read_json(strategy_reporter.REPORT_FAILURES_PATH, {})
+    if isinstance(facts, dict) and report_id in facts:
+        del facts[report_id]
+        try:
+            _write_json(strategy_reporter.REPORT_FAILURES_PATH, facts)
+        except OSError as e:
+            print(f"[report_uploader] {report_id}: failure fact not cleared: {e}",
+                  file=sys.stderr)
 
 
 def run_once(token=None, started=None):
@@ -803,247 +817,6 @@ def run_once(token=None, started=None):
     return counts
 
 
-# ── 看盤板(.claude/docs/watchboard.md §4)──────────────────────────────────────
-
-
-def watch_files_dir(widget_id):
-    """machine widget 內容的圖片 sidecar:watch/data/<widget_id>.files/,規則同報告。"""
-    return os.path.join(WATCH_DATA_DIR, widget_id + FILES_SUFFIX)
-
-
-def pending_ops():
-    """[(檔名, 路徑)] 依檔名排序——檔名以 epoch_ms 開頭,排序就是 agent 下手的順序,
-    而 add → update → remove 的先後是有意義的(順序倒了 update 會撞 404)。"""
-    try:
-        names = sorted(os.listdir(WATCH_OPS_DIR))
-    except OSError:
-        return []
-    return [(n, os.path.join(WATCH_OPS_DIR, n)) for n in names
-            if n.endswith(".json") and os.path.isfile(os.path.join(WATCH_OPS_DIR, n))]
-
-
-def _data_stamp(path):
-    st = os.stat(path)
-    return [st.st_mtime, st.st_size]
-
-
-def pending_data(state):
-    """[(widget_id, 路徑)]:data/ 裡 mtime 或大小跟上次送成功時不同的檔。檔案留在
-    原地(排程腳本覆寫它、runner 靠它的 mtime 判斷有沒有產出),所以「送過了」記在
-    state 裡而不是靠搬檔。"""
-    try:
-        names = sorted(os.listdir(WATCH_DATA_DIR))
-    except OSError:
-        return []
-    out = []
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        path = os.path.join(WATCH_DATA_DIR, name)
-        if not os.path.isfile(path):
-            continue
-        wid = name[:-5]
-        entry = state.get(f"data:{wid}")
-        try:
-            if isinstance(entry, dict) and entry.get("sent") == _data_stamp(path):
-                continue
-        except OSError:
-            continue
-        out.append((wid, path))
-    return out
-
-
-def _read_watch_file(key, path, max_bytes, state, failed_dir):
-    """讀一個 ops / data 檔成 dict。回傳 (doc, outcome):doc 為 None 時 outcome 是
-    'skipped'(這輪讀不到)或 'failed'(已搬進 failed/)。同 upload_one 對報告的三道門。"""
-    try:
-        size = os.path.getsize(path)
-    except OSError as e:
-        print(f"[report_uploader] {key} not sizeable this tick: {e}", file=sys.stderr)
-        return None, "skipped"
-    if size > max_bytes:
-        _fail_permanently(key, path, f"file is {size} bytes; the ceiling is {max_bytes}",
-                          state, failed_dir, WATCH_ERROR_LOG)
-        return None, "failed"
-    try:
-        with open(path, encoding="utf-8") as f:
-            raw = f.read()
-    except OSError as e:
-        print(f"[report_uploader] {key} not readable this tick: {e}", file=sys.stderr)
-        return None, "skipped"
-    except ValueError as e:
-        _fail_permanently(key, path, f"file is not valid UTF-8 ({e})", state, failed_dir,
-                          WATCH_ERROR_LOG)
-        return None, "failed"
-    try:
-        doc = json.loads(raw)
-    except _JSON_ERRORS as e:
-        _fail_permanently(key, path, f"file is not valid JSON ({e})", state, failed_dir,
-                          WATCH_ERROR_LOG)
-        return None, "failed"
-    if not isinstance(doc, dict):
-        _fail_permanently(key, path, "must be a JSON object", state, failed_dir,
-                          WATCH_ERROR_LOG)
-        return None, "failed"
-    return doc, "ok"
-
-
-def _send_watch(key, path, body, url, method, state, token, failed_dir):
-    """一個 ops / data 請求的收尾:200 → 'sent'、永久 4xx → failed/、其餘退避。"""
-    try:
-        resp = _request(url, body, method, token)
-    except urllib.error.HTTPError as e:
-        message, permanent = _api_error(e, _watch_permanent)
-        entry = state.get(key) if isinstance(state.get(key), dict) else {}
-        if e.code in _WATCH_AUTH_STATUS \
-                and int(entry.get("attempts") or 0) + 1 >= _WATCH_AUTH_MAX_ATTEMPTS:
-            permanent = True
-            message += f" (after {_WATCH_AUTH_MAX_ATTEMPTS} attempts)"
-        if permanent:
-            _fail_permanently(key, path, message, state, failed_dir, WATCH_ERROR_LOG)
-            return "failed"
-        _defer(key, message, state)
-        return "deferred"
-    except Exception as e:  # noqa: BLE001 — 連線層什麼都可能丟，一律當暫時性
-        _defer(key, f"{type(e).__name__}: {e}", state)
-        return "deferred"
-    print(f"[report_uploader] {key} ({len(body)} bytes): {resp}", file=sys.stderr)
-    return "sent"
-
-
-def upload_op(name, path, state, token):
-    """一個 ops 檔走完一輪:POST /ops。回傳 'sent' / 'failed' / 'deferred' / 'skipped'。"""
-    key = f"ops:{name}"
-    if _quiet_left(key, path, time.time()) > 0:
-        return "skipped"
-    entry = state.get(key)
-    if isinstance(entry, dict) and time.time() < (entry.get("next_at") or 0):
-        return "skipped"
-    doc, outcome = _read_watch_file(key, path, WATCH_DATA_MAX_BYTES, state,
-                                    WATCH_OPS_FAILED_DIR)
-    if doc is None:
-        return outcome
-    body, err = _serialize(doc)
-    if err:
-        _fail_permanently(key, path, err, state, WATCH_OPS_FAILED_DIR, WATCH_ERROR_LOG)
-        return "failed"
-    outcome = _send_watch(key, path, body, f"{WATCH_API_URL}/ops", "POST", state, token,
-                          WATCH_OPS_FAILED_DIR)
-    if outcome != "sent":
-        return outcome
-    state.pop(key, None)
-    try:
-        _retire(path, WATCH_OPS_SENT_DIR)
-        _prune_sent(WATCH_OPS_SENT_DIR)
-    except OSError as e:
-        print(f"[report_uploader] {key} applied but not retired: {e}", file=sys.stderr)
-    return "sent"
-
-
-def upload_data(widget_id, path, state, token, started):
-    """一個 data 檔走完一輪:PUT /data/<widget_id>,覆蓋語意。成功後檔案留在原地,
-    state 記下送出時的 mtime+大小;失敗語意同報告(圖片三分法、永久 4xx 進 failed/)。"""
-    key = f"data:{widget_id}"
-    if not _WIDGET_ID_RE.fullmatch(widget_id):
-        _fail_permanently(key, path, "file name is not a valid widget id ([A-Za-z0-9_-]{1,32})",
-                          state, WATCH_DATA_FAILED_DIR, WATCH_ERROR_LOG)
-        return "failed"
-    sidecar = watch_files_dir(widget_id)
-    if _quiet_left(key, path, time.time(), sidecar) > 0:
-        return "skipped"
-    entry = state.get(key)
-    if isinstance(entry, dict) and time.time() < (entry.get("next_at") or 0):
-        return "skipped"
-    try:
-        stamp = _data_stamp(path)  # 讀之前取:讀完才改的檔下一輪會再送一次,不會漏
-    except OSError as e:
-        print(f"[report_uploader] {key} not sizeable this tick: {e}", file=sys.stderr)
-        return "skipped"
-    doc, outcome = _read_watch_file(key, path, WATCH_DATA_MAX_BYTES, state,
-                                    WATCH_DATA_FAILED_DIR)
-    if doc is None:
-        return outcome
-    doc.setdefault("widget_id", widget_id)
-    if doc["widget_id"] != widget_id:
-        _fail_permanently(key, path, f"widget_id does not match the file name ({widget_id})",
-                          state, WATCH_DATA_FAILED_DIR, WATCH_ERROR_LOG)
-        return "failed"
-    block = doc.get("block")
-    if not isinstance(block, dict) or not isinstance(block.get("type"), str):
-        _fail_permanently(key, path, "block: must be an object with a type", state,
-                          WATCH_DATA_FAILED_DIR, WATCH_ERROR_LOG)
-        return "failed"
-    err = _check_image_files([block], "block")
-    if err:
-        _fail_permanently(key, path, err, state, WATCH_DATA_FAILED_DIR, WATCH_ERROR_LOG)
-        return "failed"
-    holder = {"blocks": [block]}
-    outcome, message = _resolve_images(holder, widget_id, started, token, sidecar,
-                                       WATCH_ERROR_LOG)
-    if outcome == "permanent":
-        _fail_permanently(key, path, message, state, WATCH_DATA_FAILED_DIR, WATCH_ERROR_LOG)
-        return "failed"
-    if outcome == "retry":
-        _defer(key, message, state)
-        return "deferred"
-    if not holder["blocks"]:
-        # 507 拿掉的是唯一的那個 block——報告還有別的內容可送,widget 沒有
-        _fail_permanently(key, path, "the only block is an image and the image storage "
-                          "quota is full (HTTP 507)", state, WATCH_DATA_FAILED_DIR,
-                          WATCH_ERROR_LOG)
-        return "failed"
-    doc["block"] = holder["blocks"][0]
-    body, err = _serialize(doc)
-    if err:
-        _fail_permanently(key, path, err, state, WATCH_DATA_FAILED_DIR, WATCH_ERROR_LOG)
-        return "failed"
-    if len(body) > WATCH_DATA_MAX_BYTES:
-        _fail_permanently(key, path, f"{len(body)} bytes exceeds the {WATCH_DATA_MAX_BYTES} "
-                          "byte ceiling", state, WATCH_DATA_FAILED_DIR, WATCH_ERROR_LOG)
-        return "failed"
-    outcome = _send_watch(key, path, body, f"{WATCH_API_URL}/data/{widget_id}", "PUT", state,
-                          token, WATCH_DATA_FAILED_DIR)
-    if outcome == "sent":
-        state[key] = {"sent": stamp}
-    return outcome
-
-
-def run_watch_once(token=None, started=None):
-    """掃一次 watch/ 樹:ops 先(依檔名)、data 後。回傳 {結果: 數量},預算同報告那輪。"""
-    token = token or PROXY_TOKEN
-    counts = {"sent": 0, "failed": 0, "deferred": 0, "skipped": 0}
-    state = _load_state(_WATCH_STATE_PATH)
-    ops, data = pending_ops(), pending_data(state)
-    if not ops and not data:
-        return counts
-    started = time.time() if started is None else started
-    for i, (name, path) in enumerate(ops):
-        if time.time() - started > TICK_BUDGET_S:
-            counts["skipped"] += 1
-            continue
-        outcome = upload_op(name, path, state, token)
-        counts[outcome] += 1
-        if outcome in ("deferred", "skipped"):
-            # 後面的 op 不能越過還沒送出去的這個(add → update → remove 的先後有意義);
-            # 剩下的留給下一輪。data 那條獨立,照送
-            counts["skipped"] += len(ops) - i - 1
-            break
-    for wid, path in data:
-        if time.time() - started > TICK_BUDGET_S:
-            counts["skipped"] += 1
-            continue
-        counts[upload_data(wid, path, state, token, started)] += 1
-    live = {f"ops:{n}" for n, _ in ops}
-    try:
-        live |= {f"data:{n[:-5]}" for n in os.listdir(WATCH_DATA_DIR) if n.endswith(".json")}
-    except OSError:
-        pass
-    for gone in [k for k in state if k not in live]:
-        state.pop(gone)  # 檔案沒了,退避紀錄與「送過了」的戳記跟著走
-    _save_state(state, _WATCH_STATE_PATH)
-    return counts
-
-
 def _idle_note():
     """一輪什麼都沒送出去時，說一句掃到了什麼。
 
@@ -1062,11 +835,6 @@ def _idle_note():
         print("[report_uploader] nothing shipped: " + ", ".join(bits), file=sys.stderr)
 
 
-def _run_all(started):
-    counts = run_once(started=started)
-    return {k: counts[k] + v for k, v in run_watch_once(started=started).items()}
-
-
 def main():
     if not PROXY_TOKEN:
         print("[report_uploader] BLAVE_PROXY_TOKEN not set; exiting", file=sys.stderr)
@@ -1074,14 +842,12 @@ def main():
     try:
         # 空目錄本身就是文件（用戶的 agent 看得到有這個地方可以放報告），而且
         # blave-agent-reports.path 監看的目標存在，inotify 才不必靠父目錄轉接
-        # (watch/ops、watch/data 同理,同一個 path unit 看)
-        for d in (REPORTS_DIR, WATCH_OPS_DIR, WATCH_DATA_DIR):
-            os.makedirs(d, exist_ok=True)
+        os.makedirs(REPORTS_DIR, exist_ok=True)
     except OSError as e:
         print(f"[report_uploader] cannot create {REPORTS_DIR}: {e}", file=sys.stderr)
         sys.exit(1)
     started = time.time()
-    counts = _run_all(started)
+    counts = run_once(started=started)
     # blave-agent-reports.path 是寫檔後**毫秒內**觸發的，所以它叫醒的這一輪看到的
     # 報告必定還在 QUIET_S 靜默期裡；而 systemd 不會為執行期間發生的事件重新觸發，
     # 這一輪空手而回就等於 path 觸發失效，每份報告都要等滿下一次 2 分鐘 timer
@@ -1092,7 +858,7 @@ def main():
     wait = pending_status()["quiet_wait"]
     if wait and time.time() - started + wait < TICK_BUDGET_S:
         time.sleep(wait)
-        counts = {k: counts[k] + v for k, v in _run_all(started).items()}
+        counts = {k: counts[k] + v for k, v in run_once(started=started).items()}
     if counts["sent"] or counts["failed"] or counts["deferred"]:
         print(f"[report_uploader] {counts}", file=sys.stderr)
     else:

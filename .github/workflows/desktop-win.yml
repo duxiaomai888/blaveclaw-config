@@ -1,9 +1,12 @@
-# Blave 電腦版 Windows x64(NSIS)建置與發佈。mac 版走 shell/tools/release.js(本機打包機);Windows 沒有 release.js 那條,
-# 整條在這裡:閘門測試 → 打包(未簽章)→ 產物驗證 → artifact → S3。S3 的 key 佈局照 release.js:
-#   desktop/<track>/Blave-Setup-<ver>.exe(帶版號,immutable,已存在就拒絕)、.exe.blockmap(差量更新用)、
-#   desktop/<track>/latest.yml(最後傳,傳上去那一刻對外)、desktop/<track>/Blave-Setup.exe(固定檔名,給下載頁)。
-# 軌道:win-test(dispatch 預設)/ win(正式;tag desktop-v* 推上來一律正式)。包裡的更新網址 = https://download.blave.org/desktop/<track>。
-# 簽章(SignPath)那一步先留骨架,審核過再開;現在的包是未簽章的(BLAVE_WIN_UNSIGNED=1),SmartScreen 會擋一次。
+# Blave 電腦版 Windows x64(NSIS)建置與發佈。mac 版走 shell/tools/release.js(本機打包機)。
+# 這裡:閘門測試 → 打包(未簽章,沒有任何金鑰)→ 產物驗證 → artifact → stage(環境審核 + OIDC)→ 停。
+# **這個 workflow 不會讓新版對外**:更新只收離線私鑰簽過的 latest.yml(shell/updatesig.js,稽核 2026-10-02 P1-1),
+# 私鑰只在 Wei 的 Mac 上,由 shell/tools/sign-update.js 簽好、傳成 latest.yml 才算發版。S3 的 key 佈局:
+#   desktop/<track>/Blave-Setup-<ver>.exe(帶版號,immutable,已存在就拒絕)、.exe.blockmap(差量更新用)  ← stage job
+#   desktop/<track>/staging/<ver>/latest.yml(還沒簽,app 不讀這裡)                                        ← stage job
+#   desktop/<track>/latest.yml(簽好的,傳上去那一刻對外)、desktop/<track>/Blave-Setup.exe(下載頁固定檔名) ← sign-update.js
+# 軌道:win-test(dispatch 預設)/ win(正式)。包裡的更新網址 = https://download.blave.org/desktop/<track>。
+# Authenticode(SignPath)那一步先留骨架,審核過再開;現在的包是未簽章的(BLAVE_WIN_UNSIGNED=1),SmartScreen 會擋一次。
 name: desktop-win
 
 on:
@@ -38,7 +41,7 @@ defaults:
     shell: bash
 
 jobs:
-  # 閘門測試跟 release.js 的「閘門測試」一模一樣(全部 check_shell_*.js + check_version_matrix_shell.js,除了 check_shell_paths.js),
+  # 閘門測試跟 release.js 的「閘門測試」一模一樣(全部 check_shell_*.js + check_version_matrix_shell.js + check_tests_window_guard.js,除了 check_shell_paths.js;Electron 段落照跑),
   # 加上兩支 Windows 語意的 Python 測試。放 mac runner 不放 Windows:這些測試在 POSIX 上假造 win32(check_local_daemon_windows.py
   # 還會 import 真的 fcntl 來比 POSIX 分支;check_shell_daemon.js 靠 symlink + chmod 000;Electron 測試經 node_modules/.bin/electron
   # 這個 sh shim 起 Electron),搬到 Windows 上跑等於半套 SKIP,不是更嚴。
@@ -65,26 +68,46 @@ jobs:
         run: |
           npm ci
           node node_modules/electron/install.js
+      # 捲軸跟發版機一樣用浮動式:版面測試(報告 KPI、樣本外每輪明細的捲動框)量的是 macOS 浮動捲軸,不佔版面寬。
+      # runner 沒有觸控板,「自動」會解成常駐 15px 捲軸,捲動框與文件本身各少 15px → 寬度斷言誤紅(run 37110239513)。
+      # 這是讓環境跟本機一致,不是放寬斷言;本機用 -AppleShowScrollBars Always 跑同兩支測試,紅的項目與數字跟 runner 一模一樣
+      - name: Overlay scroll bars (same as the release Mac)
+        run: |
+          defaults write -g AppleShowScrollBars -string WhenScrolling
+          test "$(defaults read -g AppleShowScrollBars)" = WhenScrolling
+      # 同 release.js:Electron 那段要真的跑(BLAVE_TEST_WINDOW=1),印出守門那行 SKIP = 有一段沒跑到,記紅(稽核 2026-10-02 P2-5／B1)
       - name: Gate tests
         env:
           BLAVE_TEST_PYTHON: ${{ steps.py.outputs.python-path }}
+          BLAVE_TEST_WINDOW: "1"
         run: |
           red=0
-          for t in tests/check_shell_*.js tests/check_version_matrix_shell.js; do
+          for t in tests/check_shell_*.js tests/check_version_matrix_shell.js tests/check_tests_window_guard.js; do
             [ "$t" = tests/check_shell_paths.js ] && continue
             echo "::group::$t"
-            if node "$t"; then echo "::endgroup::"; else echo "::endgroup::"; echo "::error::$t 沒過"; red=1; fi
+            if out=$(node "$t" 2>&1); then rc=0; else rc=$?; fi
+            printf '%s\n' "$out"
+            echo "::endgroup::"
+            if [ "$rc" -ne 0 ]; then echo "::error::$t 沒過"; red=1
+            elif grep -qF "SKIP (set BLAVE_TEST_WINDOW=1" <<<"$out"; then echo "::error::$t 的 Electron 那段沒跑到"; red=1; fi
           done
-          for t in tests/check_local_daemon_windows.py tests/check_local_env_windows.py; do
+          for t in tests/check_local_daemon_windows.py tests/check_local_env_windows.py tests/check_parent_watch_peek.py tests/check_runtime_atomic_file.py; do
             echo "::group::$t"
             if "$BLAVE_TEST_PYTHON" "$t"; then echo "::endgroup::"; else echo "::endgroup::"; echo "::error::$t 沒過"; red=1; fi
           done
           exit $red
 
+  # 這個 job 沒有任何金鑰(npm ci 的相依在這裡跑,postinstall 寫 $GITHUB_ENV 也偷不到東西),產物只交給 artifact
   build:
     needs: test
     runs-on: windows-latest
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      url: ${{ steps.meta.outputs.url }}
+      prefix: ${{ steps.meta.outputs.prefix }}
+      sha512: ${{ steps.stage.outputs.sha512 }}
+      artifact: blave-desktop-win-${{ steps.meta.outputs.version }}-${{ env.TRACK }}
     steps:
       # Windows runner 的 git 預設 autocrlf=true:checkout 會把隨包的 lib/ runtime/ 全轉成 CRLF(runtime CHANGELOG 記過這個坑),
       # 也會讓下面 sed 的 $ 錨點對不上。要在 checkout 之前關
@@ -111,8 +134,19 @@ jobs:
           fi
           [[ "$TRACK" =~ ^win(-test)?$ ]] || { echo "::error::track 只能是 win-test 或 win(現在是 $TRACK)"; exit 1; }
           url="https://download.blave.org/desktop/$TRACK"
-          # 線上版號:正式軌與測試軌都查——同版或更舊的 yml 傳上去,已裝的 app 不會更新、還會把人搞混。讀不到 = 這條軌第一次發
-          live="$(curl -fsSL "$url/latest.yml?t=$(date +%s)" 2>/dev/null | sed -n 's/^version: *//p' | tr -d '\r' || true)"
+          # 線上版號:正式軌與測試軌都查——同版或更舊的 yml 傳上去,已裝的 app 不會更新、還會把人搞混。
+          # 只有 404 算「這條軌第一次發」;403(CDN 背後的 S3 對不存在的 key 也回 403)、5xx、連不上一律停,不猜
+          live_version() {
+            local f code; f="$(mktemp)"
+            code="$(curl -sS --retry 3 -o "$f" -w '%{http_code}' "$1/latest.yml?t=$(date +%s)")" || code="${code:-000}"
+            case "$code" in
+              200) LIVE="$(sed -n 's/^version: *//p' "$f" | tr -d '\r')"; rm -f "$f"
+                   [ -n "$LIVE" ] || { echo "::error::$1/latest.yml 讀得到但沒有版號"; exit 1; } ;;
+              404) LIVE=""; rm -f "$f" ;;
+              *)   rm -f "$f"; echo "::error::讀 $1/latest.yml 拿到 HTTP $code(不是 200 也不是 404):不確定線上版號就不發"; exit 1 ;;
+            esac
+          }
+          live_version "$url"; live="$LIVE"
           if [ -n "$live" ]; then
             node -e 'const [a,b]=process.argv.slice(1).map(v=>v.split(".").map(Number));for(let i=0;i<3;i++){if(a[i]!==b[i])process.exit(a[i]>b[i]?0:1)}process.exit(1)' "$ver" "$live" \
               || { echo "::error::$url 上已經是 $live,$ver 沒有比它大"; exit 1; }
@@ -237,40 +271,61 @@ jobs:
       # ────────────────────────────────────────────────────────────────────────────────────────────────────
 
       # 正式軌原本只收 SignPath 簽過的包(稽核 09-26 M3③、S-1:未簽章的 app.asar / Blave.exe 在 per-user 安裝目錄裡誰都換得掉)。
-      # 不等 SignPath 審核,未簽章包也發正式軌;風險已接受。SignPath 接上後,照上面那段把簽章步驟打開即可。
+      # 不等 SignPath 審核,未簽章包也發正式軌;本機竄改的風險已接受。更新來源被換掉另由離線簽章擋(shell/updatesig.js)。
 
-      # 只有這裡以後看得到 AWS 憑證(action 會把它們 export 到之後的 step 環境,所以上傳放最後、後面不再有 step)
-      - name: Configure AWS credentials
+  # 只有這個 job 拿得到 AWS:環境 desktop-release 要 Wei 按核准才會開始;OIDC 短效憑證,role 只能寫 desktop/win*/ 底下
+  # 帶版號的檔與 staging/(寫不到 latest.yml、Blave-Setup.exe)。不 checkout、不跑 npm:只有 artifact + aws CLI。
+  stage:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: desktop-release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: upload
+
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.BLAVE_RELEASE_AWS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.BLAVE_RELEASE_AWS_SECRET }}
+          role-to-assume: ${{ vars.BLAVE_RELEASE_ROLE_ARN }}
           aws-region: ${{ secrets.BLAVE_RELEASE_AWS_REGION }}
 
-      # 順序就是安全性(同 release.js 的 uploadPlan / publish):帶版號的檔先傳(已存在就拒絕——immutable 快取一年,覆寫後 CDN 邊緣還是舊檔),
-      # 從正式網址整個抓回來比 sha512,才傳 latest.yml(這一刻起對外);之後的固定檔名失敗只警告,不能報成發版失敗。
-      - name: Upload to S3
+      # 順序就是安全性:帶版號的檔先查(已存在就拒絕——immutable 快取一年,覆寫後 CDN 邊緣還是舊檔)再傳,
+      # 從正式網址整個抓回來比 sha512,沒簽的 yml 最後放進 staging/。對外的 latest.yml 這裡碰不到
+      - name: Upload versioned files and unsigned manifest
         env:
           BUCKET: ${{ secrets.BLAVE_RELEASE_BUCKET }}
-          PREFIX: ${{ steps.meta.outputs.prefix }}
-          URL: ${{ steps.meta.outputs.url }}
-          VER: ${{ steps.meta.outputs.version }}
-          SHA: ${{ steps.stage.outputs.sha512 }}
+          PREFIX: ${{ needs.build.outputs.prefix }}
+          URL: ${{ needs.build.outputs.url }}
+          VER: ${{ needs.build.outputs.version }}
+          SHA: ${{ needs.build.outputs.sha512 }}
         run: |
-          up=shell/dist/upload; exe="Blave-Setup-$VER.exe"
+          up=upload; exe="Blave-Setup-$VER.exe"
+          sha512() { openssl dgst -sha512 -binary "$1" | base64 -w0; }
+          [ "$(sha512 "$up/$exe")" = "$SHA" ] || { echo "::error::artifact 裡的 $exe 跟 build job 算的 sha512 不一樣"; exit 1; }
+          grep -qF "$SHA" "$up/latest.yml" || { echo "::error::artifact 裡的 latest.yml 跟 $exe 對不上"; exit 1; }
+          if grep -q '^blaveSignature:' "$up/latest.yml"; then echo "::error::CI 產的 latest.yml 不該帶簽章"; exit 1; fi
           IMM="public, max-age=31536000, immutable"
+          # 只有 404 算「不存在」:403(role 少了 GetObject / ListBucket)、throttle、連不上都當成查不到,直接停——
+          # 當成不存在的話,下一步就會覆寫線上簽好的 latest.yml 正指著的安裝檔
+          absent() {
+            local err
+            if err="$(aws s3api head-object --bucket "$BUCKET" --key "$1" 2>&1 >/dev/null)"; then return 1; fi
+            if grep -qE '\(404\)|Not Found' <<<"$err"; then return 0; fi
+            echo "::error::查 s3://$BUCKET/$1 失敗,而且不是 404(權限或網路?):$err"; exit 1
+          }
           for k in "$exe" "$exe.blockmap"; do
-            if aws s3api head-object --bucket "$BUCKET" --key "$PREFIX/$k" >/dev/null 2>&1; then
-              echo "::error::s3://$BUCKET/$PREFIX/$k 已經在 bucket 裡。帶版號的檔不能覆寫,這個版號作廢,請發下一個版號"; exit 1
-            fi
+            absent "$PREFIX/$k" || { echo "::error::s3://$BUCKET/$PREFIX/$k 已經在 bucket 裡。帶版號的檔不能覆寫,這個版號作廢,請發下一個版號"; exit 1; }
           done
           aws s3 cp "$up/$exe" "s3://$BUCKET/$PREFIX/$exe" --cache-control "$IMM" --only-show-errors
           aws s3 cp "$up/$exe.blockmap" "s3://$BUCKET/$PREFIX/$exe.blockmap" --cache-control "$IMM" --only-show-errors
           curl -fsSL --retry 3 -o "$up/.roundtrip.exe" "$URL/$exe"
-          got="$(node -e 'console.log(require("crypto").createHash("sha512").update(require("fs").readFileSync(process.argv[1])).digest("base64"))' "$up/.roundtrip.exe")"
-          [ "$got" = "$SHA" ] || { echo "::error::正式網址上的 $exe 跟本機的不一樣(sha512 不符)。latest.yml 還沒換,線上不受影響"; exit 1; }
-          aws s3 cp "$up/latest.yml" "s3://$BUCKET/$PREFIX/latest.yml" --cache-control no-cache --only-show-errors --content-type text/yaml
-          echo "✓ $PREFIX/latest.yml 已換——$VER 從這一刻起對外生效($URL/)"
-          aws s3 cp "$up/$exe" "s3://$BUCKET/$PREFIX/Blave-Setup.exe" --cache-control no-cache --only-show-errors \
-            || echo "::warning::固定檔名 $PREFIX/Blave-Setup.exe 沒傳成(新版已對外,不要還原版號;手動補傳這一個檔即可)"
-          echo "::notice::$VER 已放上 $PREFIX/(更新網址 $URL);接下來不自動做:commit / tag / GitHub Release"
+          [ "$(sha512 "$up/.roundtrip.exe")" = "$SHA" ] || { echo "::error::正式網址上的 $exe 跟 artifact 的不一樣(sha512 不符)"; exit 1; }
+          aws s3 cp "$up/latest.yml" "s3://$BUCKET/$PREFIX/staging/$VER/latest.yml" --cache-control no-cache --only-show-errors --content-type text/yaml
+          track="${PREFIX#desktop/}"
+          echo "::notice::$VER 已放上 $PREFIX/,**還沒對外**。在 Mac 上跑:cd shell && node tools/sign-update.js $VER --track $track(先 --dry-run 看一次)"

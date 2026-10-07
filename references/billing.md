@@ -81,7 +81,7 @@ Japanese, Vietnamese, Spanish and Portuguese site faces display USD at 30 TWD/US
   it does.
 - **Blave data is bundled.** An account that owns a machine (running or stopped) is never charged
   `usage_blave` (`deduct_blave_api_credit` short-circuits on `has_machine`). Every `lib/data.py`
-  fetch, backtest, param scan, cron-scheduled strategy, watchboard script and scheduled report is
+  fetch, backtest, param scan, cron-scheduled strategy and scheduled report is
   covered by the hour already paid.
 - Free trial (card-bound, 14 days, Linux Starter only): the server hour is not charged and no
   transaction row is written for it.
@@ -112,20 +112,24 @@ write, cache read, output). Prices are TWD per 1M tokens (`LLM_PRICING`):
 
 | Model | input | cache write | cache read | output |
 |---|---|---|---|---|
-| Haiku | 40 | 50 | 4 | 200 |
-| Sonnet (default) | 120 | 150 | 12 | 600 |
-| Opus | 200 | 250 | 20 | 1000 |
-| Fable | 400 | 500 | 40 | 2000 |
-| deepseek-v4-flash | 8.25 | 8.25 | 0.275 | 24.75 |
+| Haiku 4.5 | 40 | 50 | 4 | 200 |
+| Sonnet 5.5 / Sonnet 5 (default Claude) | 80 | 100 | 8 | 400 |
+| Opus 5.5 | 160 | 200 | 8 | 800 |
+| Fable 5.1 | 400 | 500 | 10 | 2000 |
+| Opus 4.8 (legacy) | 200 | 250 | 20 | 1000 |
+| Fable 5 (legacy) | 400 | 500 | 40 | 2000 |
+| deepseek-v4-flash | 5.5 | 5.5 | 0.11 | 22 |
 | deepseek-v4-pro | 24.75 | 24.75 | 0.825 | 74.25 |
 
 - Claude prices = list price USD × 1.25 × 32 TWD/USD; DeepSeek = list price RMB × 4.4 × 1.25.
-- **DeepSeek peak surcharge: ×2 during Beijing 09:00–12:00 and 14:00–18:00** (the proxy doubles
-  the token counts before deducting). No surcharge on Claude models.
+- **DeepSeek peak surcharge: ×2 on weekdays (Mon–Fri) during Beijing 09:00–12:00 and 14:00–18:00**
+  (the proxy doubles the token counts before deducting). Weekends and Chinese public holidays have no surcharge. No surcharge on
+  Claude models.
 - **Web search: 0.4 TWD per search, Claude models only** (Anthropic server-side tool). DeepSeek
   paths never bill it.
 - Model match order (`_get_llm_pricing`): `deepseek-v4-pro` → any other `deepseek` (flash) →
-  `haiku` → `opus` → `fable` → otherwise Sonnet. Switching is per session and applies from the
+  `haiku` → `opus-5-5` → any other `opus` (legacy price) → `fable-5-1` → any other `fable`
+  (legacy price) → otherwise Sonnet. Legacy ids still work at their own (older) price. Switching is per session and applies from the
   next message (`references/models.md`).
 - Free trial: LLM usage draws from a separate 100 TWD allowance instead of the balance; when the
   allowance is used up the proxy refuses further model calls until the trial ends.
@@ -139,8 +143,7 @@ None of these add anything beyond the server hour already paid:
 - A backtest, param scan or MCPT run — CPU on the machine. (The chat turn that launches it and
   reads its output is billed as LLM tokens like any other turn.)
 - A deployed strategy on the system cron / Scheduled Task (`wait_for_bar.py`, `run_strategy.sh`).
-- A watchboard widget script (`lib/watch.py`; deterministic code by contract).
-- A scheduled report's data-only fallback (`report_jobs/<id>/run.py`). On a cloud machine, a job the user agreed to (`agent_consent`) also runs a scheduled **agent turn** that narrates it, billed as LLM tokens like a chat turn on whatever model they use at the time — about 18–25 TWD per run on Claude (web search included), about 1 on DeepSeek, capped at 1.0 USD (~40 TWD) per run (`lib.report.scheduled_cost()`). Not on the desktop in this version.
+- A scheduled report's data-only fallback (`report_jobs/<id>/run.py`). On a cloud machine, a job the user agreed to (`agent_consent`) also runs a scheduled **agent turn** that narrates it, billed as LLM tokens like a chat turn on whatever model they use at the time — about 12–18 TWD per run on Claude (web search included), about 1 on DeepSeek, capped at 1.0 USD (~40 TWD) per run (`lib.report.scheduled_cost()`). Not on the desktop in this version.
 - Any `lib/data.py` fetch, cached or not — data is bundled.
 - Telegram / web notifications sent by scripts.
 
@@ -159,11 +162,11 @@ every wake-up — that is why `references/deployment.md` forbids per-tick agent 
   fee at all; data is inside the server hour. Spacing or bunching crons changes nothing on the
   bill. (Even under the old per-hour data fee, bunching only mattered because the fee was
   per-active-hour, never per call.) Schedule crons on what the strategy needs, not on billing.
-- 「聊天用 Flash、寫 code 才換 Pro 省錢嗎？」— Yes, that is a real saving: flash is roughly a third
-  of pro per token, and the switch is per session with no restart. Mention the DeepSeek peak-hour
+- 「聊天用 Flash、寫 code 才換 Pro 省錢嗎？」— Yes, that is a real saving: flash costs about a quarter
+  of pro on input and under a third on output (5.5 vs 24.75 and 22 vs 74.25 TWD per million tokens), and the switch is per session with no restart. Mention the DeepSeek weekday peak-hour
   ×2 and that Claude models cost more but have no surcharge.
 - 「停機會不會扣錢？」— Yes, a stopped machine is still billed the server hour; only deleting it
   stops the meter.
-- 「回測／掃參數／看盤板／定期報告會扣錢嗎？」— Nothing beyond the server hour; the only extra is
+- 「回測／掃參數／定期報告會扣錢嗎？」— Nothing beyond the server hour; the only extra is
   the LLM tokens of the chat turn you are in.
 - 「Web search 會扣錢嗎？」— 0.4 TWD per search on Claude models; not billed on DeepSeek.

@@ -2,12 +2,16 @@
 Static security analysis for marketplace strategies.
 
 Usage:
-    python3 lib/security_check.py strategies/xyz.py
+    python3 lib/security_check.py [--context install|fork] strategies/xyz.py
 
-Exit codes:
+First output line (the verdict to act on): RESULT: clean | ask-user | do-not-run
+With --context, the second line is `NEXT: <what to do now>` for a library / shared
+download installed as is (install) or a fork's download (fork).
+--context goes before the file: an older checker then reads it as the path and says do-not-run.
+Exit codes (fallback only — PowerShell on Windows folds 1 and 2 into 1):
     0 — clean
     1 — warnings only (review before running)
-    2 — critical issues (do NOT run)
+    2 — critical issues, file unreadable, no file argument, or the scan itself failed (do NOT run)
 """
 
 import ast
@@ -41,12 +45,15 @@ _EXEC_RE = re.compile(r"\b(eval|exec|compile)\s*\(")
 
 def check(filepath: str) -> list[dict]:
     """Return list of findings: {level: 'CRITICAL'|'WARNING', line: int, msg: str}"""
-    source = Path(filepath).read_text(encoding="utf-8")
+    try:
+        source = Path(filepath).read_text(encoding="utf-8-sig")   # a Windows editor's BOM is not a syntax error
+    except (OSError, UnicodeDecodeError) as e:
+        return [{"level": "CRITICAL", "line": 0, "msg": f"Cannot read file: {e}"}]
     findings = []
 
     try:
         tree = ast.parse(source)
-    except SyntaxError as e:
+    except (SyntaxError, ValueError) as e:
         return [{"level": "CRITICAL", "line": 0, "msg": f"Cannot parse file: {e}"}]
 
     findings += _ast_checks(tree)
@@ -170,31 +177,104 @@ def _w(line: int, msg: str) -> dict:
     return {"level": "WARNING", "line": line, "msg": msg}
 
 
+# ── NEXT line ─────────────────────────────────────────────────────────────────
+
+CONTEXTS = ("install", "fork")   # only downloads are scanned (references/marketplace.md)
+
+
+def next_line(context: str, verdict: str) -> str:
+    stop = ("delete this file and create no fork" if context == "fork"
+            else "delete this file (in a bundle, only this file) and do not run it")
+    return {"clean": "NEXT: Go on with the next step of the flow.",
+            "ask-user": ("NEXT: Show these findings to the user and wait — go on only after a yes; "
+                         f"a no ends it: {stop}."),
+            "do-not-run": f"NEXT: Stop — show the findings, {stop}."}[verdict]
+
+
+def parse_args(argv: list):
+    """(file or None, context or None); ValueError on a bad, missing or repeated --context and on
+    more than one file — a second file would otherwise go unscanned behind the first one's verdict."""
+    path, context, i = None, None, 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--context" or a.startswith("--context="):
+            if context is not None:
+                raise ValueError("--context given more than once")
+            if a == "--context":
+                i += 1
+                value = argv[i] if i < len(argv) else ""
+            else:
+                value = a.split("=", 1)[1]
+            if value not in CONTEXTS:
+                raise ValueError(f"--context must be one of {', '.join(CONTEXTS)} (got {value!r})")
+            context = value
+        elif path is None:
+            path = a
+        else:
+            raise ValueError("scan one file at a time")
+        i += 1
+    return path, context
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 lib/security_check.py <strategy_file.py>")
-        sys.exit(0)
+    # The verdict line comes first. On Windows a run wrapped in `powershell -Command` (Codex)
+    # comes back as exit 1 for both 1 and 2, so the exit code is only a fallback — and a crash
+    # must never surface as a bare exit 1 (read as "ask-user"): any unexpected error is do-not-run.
+    _verdict_out = False
+    _context = None
 
-    results = check(sys.argv[1])
+    def _verdict(v):
+        global _verdict_out
+        print("RESULT: " + v + ("\n" + next_line(_context, v) if _context else ""), flush=True)
+        _verdict_out = True
 
-    if not results:
-        print("✅ No issues found.")
-        sys.exit(0)
+    def _main() -> int:
+        global _context
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+        try:
+            path, ctx = parse_args(sys.argv[1:])
+        except ValueError as e:
+            _verdict("do-not-run")
+            print(f"Error: {e}")
+            return 2
+        if path is None:
+            _verdict("do-not-run")
+            print("Usage: python3 lib/security_check.py <strategy_file.py>")
+            return 2
+        _context = ctx
 
-    criticals = [r for r in results if r["level"] == "CRITICAL"]
-    warnings  = [r for r in results if r["level"] == "WARNING"]
+        results = check(path)
+        criticals = [r for r in results if r["level"] == "CRITICAL"]
+        _verdict("do-not-run" if criticals else "ask-user" if results else "clean")
 
-    print(f"{'❌' if criticals else '⚠️ '} {len(results)} issue(s) found in {sys.argv[1]}:\n")
-    for r in results:
-        icon = "❌" if r["level"] == "CRITICAL" else "⚠️ "
-        print(f"  {icon} Line {r['line']}: {r['msg']}")
+        if not results:
+            print("✅ No issues found.")
+            return 0
 
-    print()
-    if criticals:
-        print("❌ CRITICAL issues — do NOT run this strategy without manual review.")
-        sys.exit(2)
-    else:
+        print(f"{'❌' if criticals else '⚠️ '} {len(results)} issue(s) found in {path}:\n")
+        for r in results:
+            icon = "❌" if r["level"] == "CRITICAL" else "⚠️ "
+            print(f"  {icon} Line {r['line']}: {r['msg']}")
+
+        if _context:   # the NEXT line already said what to do
+            return 2 if criticals else 1
+        print()
+        if criticals:
+            print("❌ CRITICAL issues — do NOT run this strategy without manual review.")
+            return 2
         print("⚠️  Warnings only — confirm with user before running.")
-        sys.exit(1)
+        return 1
+
+    try:
+        _code = _main()
+    except Exception as e:
+        if not _verdict_out:
+            _verdict("do-not-run")
+        print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
+        _code = 2
+    sys.exit(_code)
