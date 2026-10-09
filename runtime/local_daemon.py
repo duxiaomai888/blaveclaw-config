@@ -73,6 +73,7 @@ check): nothing runs until main().
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import select
@@ -106,12 +107,18 @@ ALLOWED = frozenset({
     "report_edit_pending", "preferences_set", "tz_set", "reply_lang_set",
     "book_account_confirm", "version_restore",
 })
-# In the api's list, refused here: the Capital (群益) connect steps install
-# SKCOM and an NSSM worker on a cloud Windows host — nothing of that on a
-# user's own computer.
+# In the api's list, refused here: the Capital (群益) and 統一期貨 connect steps
+# install broker components and an NSSM worker on a cloud Windows host —
+# nothing of that on a user's own computer.
 CLOUD_ONLY = frozenset({
     "capital_setup", "capital_pfx_key", "capital_pfx", "capital_probe", "capital_finish",
+    "president_setup", "president_pfx_key", "president_pfx", "president_pfx_local", "president_probe",
+    "president_host", "president_test_order", "president_finish",
 })
+# Not in the api's list at all: the desktop's own 統一期貨 connect flow
+# (runtime/president_connect.local_dispatch). Only the app's main process sends
+# it (shell/daemon.js MAIN_ONLY_COMMANDS); its secrets arrive sealed.
+LOCAL_ONLY = frozenset({"president_local"})
 UNSIGNED_OK = frozenset({"halt"})
 
 MAX_BYTES = 16 * 1024      # = the api's MAX_BYTES on the way in
@@ -262,6 +269,43 @@ def _stamp():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _workspace_first(ws):
+    """`python local_daemon.py` puts runtime/ at sys.path[0] and nothing puts the
+    workspace there — so a `from lib import …` made outside
+    command_listener._in_workspace takes whatever `lib` sys.path finds first.
+    On Windows that is pywin32's site-packages/win32/lib (pywin32.pth adds it;
+    no __init__.py, so a namespace package), and the binding sticks: a namespace
+    package never re-points to a regular package found later, so after that
+    `lib.guard` is ModuleNotFoundError for the rest of the process — halt /
+    resume / close_all dead (0.1.18, the first such import being
+    president_connect's vault read). The workspace goes first, before any
+    sibling module is imported; a `lib` already bound somewhere else is dropped
+    so the next import resolves here. Returns where `lib` resolves."""
+    import importlib.util
+
+    if ws not in sys.path:
+        sys.path.insert(0, ws)
+    want = os.path.join(ws, "lib") + os.sep
+
+    def _where():
+        try:
+            spec = importlib.util.find_spec("lib")
+        except (ImportError, ValueError):
+            return ""
+        return os.path.abspath(spec.origin) if spec and spec.origin else ""
+
+    origin = _where()
+    if origin.startswith(want):
+        return origin
+    _log(f"lib resolved outside the workspace ({origin or 'namespace package'}) — re-resolving")
+    for name in [n for n in sys.modules if n == "lib" or n.startswith("lib.")]:
+        del sys.modules[name]
+    origin = _where()
+    if not origin.startswith(want):
+        _log(f"lib still does not resolve to the workspace ({origin or 'nothing'})")
+    return origin
+
+
 def _wait_parent_gone(ppid):
     """Blocks until whoever started us is gone; returns why. stdin EOF alone is
     not enough — any other process holding the pipe's write end keeps it open
@@ -313,6 +357,105 @@ def _write_json_atomic(path, doc):
         json.dump(doc, f, ensure_ascii=False)
 
 
+def _funded_names(cfg):
+    """Strategy names the portfolio config actually puts money on — the cloud's `deployed`
+    signal, mirrored from api openclaw/agent_overview._funded: `amounts` (else the legacy
+    `weights`), finite and > 0; 0 is "paused, converge to flat", not deployed."""
+    if not isinstance(cfg, dict):
+        return set()
+    alloc = cfg.get("amounts")
+    if not isinstance(alloc, dict):
+        alloc = cfg.get("weights")
+    if not isinstance(alloc, dict):
+        return set()
+    out = set()
+    for name, v in alloc.items():
+        if not isinstance(name, str) or not name or isinstance(v, bool):
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f) and f > 0:
+            out.add(name)
+    return out
+
+
+def strategy_kinds(strat_dir, cfg, cache):
+    """{folder: {type, market, bt, funded}} for the app's strategy telemetry (shell/telemetry.js
+    strat_*). type / market come from strategy_reporter — the rule the cloud report uses — and
+    are None when undecidable; bt = stats.json exists (same test as shell anyBacktest);
+    funded = the folder or its STRATEGY_NAME is in _funded_names.
+
+    None (not {}) whenever the answer is not known — strategies dir unreadable, config
+    unreadable (`cfg` None, portfolio_reporter's "file there but unreadable"): the app seeds
+    its "already seen" set from the first answer it gets, and a wrong {} would make every
+    existing strategy look new on the next one. `cache` (folder → entry) keeps this to a stat
+    per file per round; stats.json (up to ~1.7MB) is only parsed for a strategy with no
+    `# Type:` header, where a Type C backtest is what decides, and only until one written after
+    the current strategy.py has been read. A strategy that fails to classify is listed with
+    type / market None instead of failing the round."""
+    if cfg is None:
+        return None
+    import strategy_reporter as sr
+    try:
+        names = sorted(os.listdir(strat_dir))
+    except FileNotFoundError:
+        cache.clear()
+        return {}
+    except OSError:
+        return None
+    funded = _funded_names(cfg)
+    out = {}
+    for name in names:
+        if name.startswith((".", "_")):   # shell main.js stratNames skips the same
+            continue
+        src_path = os.path.join(strat_dir, name, "strategy.py")
+        try:
+            st = os.stat(src_path)
+        except (OSError, ValueError):
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        try:
+            bst = os.stat(os.path.join(strat_dir, name, "stats.json"))
+            bsig = (bst.st_mtime_ns, bst.st_size)
+        except (OSError, ValueError):
+            bsig = None
+        sig = (st.st_mtime_ns, st.st_size)
+        hit = cache.get(name)
+        if hit is None or hit["sig"] != sig or (not hit["settled"] and hit["bsig"] != bsig):
+            try:
+                with open(src_path, encoding="utf-8", errors="replace") as f:
+                    src = f.read()
+            except OSError:
+                continue
+            try:
+                needs_stats = sr.strategy_type(src) is None
+                portfolio = False
+                if needs_stats and bsig is not None:
+                    try:
+                        with open(os.path.join(strat_dir, name, "stats.json"), encoding="utf-8") as f:
+                            portfolio = sr.is_portfolio_stats(json.load(f))
+                    except (OSError, ValueError):
+                        portfolio = False
+                attrs = sr._type_market({"name": name, "code": src, "is_portfolio": portfolio})
+                sname = sr.strategy_consts(src).get("STRATEGY_NAME") or name
+            except Exception:   # one pathological file (RecursionError in ast…) must not blank every strategy
+                needs_stats, attrs, sname = False, {}, name
+            # A live tick rewrites stats.json every bar, but the Type C verdict only follows the code:
+            # once a stats.json written after this strategy.py has been read, later bars change nothing.
+            settled = not needs_stats or (bsig is not None and bsig[0] >= sig[0])
+            hit = {"sig": sig, "bsig": bsig, "settled": settled, "sname": sname,
+                   "type": attrs.get("type"), "market": attrs.get("market")}
+            cache[name] = hit
+        out[name] = {"type": hit["type"], "market": hit["market"], "bt": bsig is not None,
+                     "funded": name in funded or hit["sname"] in funded}
+    for gone in set(cache) - set(out):
+        del cache[gone]
+    return out
+
+
 class Rejected(Exception):
     """A command file that never reaches dispatch(). The message is a shape,
     never a value from the file."""
@@ -336,7 +479,7 @@ def parse_command(raw, stem, secret, now, seen, not_before=0):
     cid, cmd = entry.get("id"), entry.get("cmd")
     if not isinstance(cid, str) or not _ID_RE.fullmatch(cid) or cid != stem:
         raise Rejected("bad id")
-    if cmd not in ALLOWED:
+    if cmd not in ALLOWED and cmd not in LOCAL_ONLY:
         raise Rejected("unknown command")  # never echoes the value, like the api
     if cmd not in UNSIGNED_OK:
         mac = doc.get("mac")
@@ -374,7 +517,19 @@ def _pid_cwd(pid):
     return ""
 
 
-def run_reconciler(script):
+def _take_president_line():
+    """`--president-stdin`: the daemon's first line on our stdin → lib.president_vault,
+    before the parent watch starts draining that pipe."""
+    line = _read_line_fd0()
+    try:
+        d = json.loads(line) if line else {}
+        from lib import president_vault
+        president_vault.use_local_secrets(d if isinstance(d, dict) else {})
+    except Exception as e:  # an older lib, a garbled line: 統一 orders fail closed, others go on
+        _log(f"president credentials not taken ({type(e).__name__})")
+
+
+def run_reconciler(script, president_stdin=False):
     """`--run-reconciler`: manager/reconciler.py, unmodified, in this process —
     plus the two things it lacks for a machine whose supervisor can vanish.
 
@@ -390,8 +545,9 @@ def run_reconciler(script):
     import runpy
 
     ws = os.getcwd()
-    if ws not in sys.path:
-        sys.path.insert(0, ws)
+    _workspace_first(ws)
+    if president_stdin:
+        _take_president_line()
 
     def _sweep():
         try:
@@ -498,9 +654,13 @@ class ReconcilerSupervisor:
     an orphan left by a SIGKILLed daemon. A new reconciler is never started
     while the lock is held."""
 
-    def __init__(self, workspace, child_env, pid_cmdline, child_kw):
+    def __init__(self, workspace, child_env, pid_cmdline, child_kw, secret_line=None):
         self.ws = os.path.realpath(workspace)
         self._child_env, self._pid_cmdline, self._child_kw = child_env, pid_cmdline, child_kw
+        # 統一期貨: the order lib logs in from the reconciler, and its passwords
+        # exist only in this process — they go down the stdin pipe as the first line
+        self._secret_line = secret_line
+        self._idle_lock = threading.Lock()
         self._lock = threading.RLock()
         self._proc = None
         self._wanted = False
@@ -537,6 +697,51 @@ class ReconcilerSupervisor:
             self._wanted = False
             self._respawn_at = None
             return self._stop_locked(why or f"stop (last command: {self.asked_by})")
+
+    # manager/reconciler.py ROUND_MARKER_PATH / UPDATE_HOLD_PATH: the round marker is up
+    # while a round's synchronous order legs (and their reply wait) run; the hold keeps a
+    # new round from starting meanwhile — the same pair manager/update_workspace.py uses
+    ROUND_MARKER = os.path.join("state", "execution", "round")
+    UPDATE_HOLD = os.path.join("state", "execution", "hold")
+    IDLE_WAIT_S = 600
+
+    def respawn_when_idle(self, why, wait_s=None, poll_s=0.5):
+        """respawn_if_running, but never between an order leg and its reply (a 統一
+        market order waits up to 15 s for it, and the fill would go unrecorded):
+        hold new rounds, wait for the round marker to clear, then respawn. Runs on
+        its own thread — the caller (a command handler) must not block the queue."""
+        def _run():
+            with self._idle_lock:
+                hold = os.path.join(self.ws, self.UPDATE_HOLD)
+                marker = os.path.join(self.ws, self.ROUND_MARKER)
+                try:
+                    os.makedirs(os.path.dirname(hold), exist_ok=True)
+                    with open(hold, "w") as f:
+                        f.write(str(os.getpid()))
+                except OSError:
+                    hold = None
+                try:
+                    deadline = time.time() + (self.IDLE_WAIT_S if wait_s is None else wait_s)
+                    while os.path.exists(marker) and time.time() < deadline:
+                        time.sleep(poll_s)
+                    self.respawn_if_running(why)
+                finally:
+                    if hold:
+                        try:
+                            os.remove(hold)
+                        except OSError:
+                            pass
+        t = threading.Thread(target=_run, daemon=True, name="reconciler-respawn")
+        t.start()
+        return t
+
+    def respawn_if_running(self, why):
+        """A running reconciler got its stdin line at spawn: new credentials need a new one."""
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                return
+            if self._stop_locked(why):
+                self._spawn_locked()
 
     def reap_orphan(self):
         """Daemon start: a reconciler nobody supervises must not keep trading.
@@ -691,12 +896,21 @@ class ReconcilerSupervisor:
                 # Through run_reconciler below, holding a pipe we never write
                 # to: its EOF is how the reconciler learns this daemon is gone,
                 # SIGKILL included.
+                line = self._secret_line() if self._secret_line else None
                 self._proc = subprocess.Popen(
                     [sys.executable, os.path.abspath(__file__), "--run-reconciler",
-                     os.path.join("manager", "reconciler.py")],
-                    cwd=self.ws, env=self._child_env(), stdout=logf, stderr=logf,
+                     os.path.join("manager", "reconciler.py")]
+                    + (["--president-stdin"] if line is not None else []),
+                    cwd=self.ws, env=self._child_env(**({"BLAVE_PRESIDENT_LOCAL": "1"} if line is not None else {})),
+                    stdout=logf, stderr=logf,
                     **self._child_kw(stdin=subprocess.PIPE,
                                      **({} if _nt() else {"pass_fds": (fd,)})))
+            if line is not None:
+                try:  # one line, then the pipe stays open — its EOF still means "daemon gone"
+                    self._proc.stdin.write(((line or "{}") + "\n").encode("utf-8"))
+                    self._proc.stdin.flush()
+                except OSError:
+                    pass
         finally:
             _release_fd(fd)  # POSIX: the child's copy keeps the lock; Windows: the child takes it now
         if _nt():
@@ -739,6 +953,7 @@ class Daemon:
         self.dirty = threading.Event()
         self.account_kick = threading.Event()
         self._status_lock = threading.Lock()
+        self._kinds_cache = {}   # strategy_kinds(): folder -> classified entry
         self._seen = {}     # id -> taken at; the replay memory (see parse_command)
         self._ignored = set()  # non-regular entries in in/ we could not remove
 
@@ -746,8 +961,10 @@ class Daemon:
         import events
         import portfolio_reporter
         self.cl, self.events, self.reporter = cl, events, portfolio_reporter
+        import president_connect
+        self.pc = president_connect
         self.sup = ReconcilerSupervisor(workspace, cl._local_child_env, cl._pid_cmdline,
-                                        cl._child_kw)
+                                        cl._child_kw, secret_line=president_connect.secret_line)
         try:
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")) as f:
                 self.version = f.read().strip()
@@ -888,11 +1105,18 @@ class Daemon:
             except Exception as e:
                 _log(f"status build failed: {type(e).__name__}: {e}")
                 doc = {"error": f"{type(e).__name__}"}
+            try:
+                doc["strategy_kinds"] = strategy_kinds(
+                    os.path.join(self.ws, "strategies"), doc.get("config"), self._kinds_cache)
+            except Exception as e:   # telemetry input only: never costs the status file
+                _log(f"strategy kinds failed: {type(e).__name__}: {e}")
+                doc["strategy_kinds"] = None
             doc["daemon"] = {
                 "pid": os.getpid(), "started_at": self.started_at,
                 "heartbeat_at": int(time.time()), "version": self.version,
                 "signed": bool(self.secret), "reconciler": self.sup.info(),
             }
+            doc["president_local"] = self.pc.local_info()
             try:
                 _write_json_atomic(self.status_path, doc)
             except (OSError, TypeError, ValueError) as e:
@@ -944,6 +1168,10 @@ class Daemon:
     def _supervise_loop(self):
         while not self.stop.is_set():
             self.sup.tick()
+            try:
+                self.pc.local_tick()
+            except Exception as e:
+                _log(f"president tick failed: {type(e).__name__}")
             self.stop.wait(1)
 
     def _watch_parent(self):
@@ -988,8 +1216,13 @@ class Daemon:
         # OKX / BingX / Gate.io / Bybit: command_listener._local_real_key_gate
         # (the venue's own signed account read, plus the key's withdrawal
         # permission where the venue exposes it) decides, before any write.
+        # 統一期貨: only through president_local's cert step
+        # (president_connect.local_bind_gate) — the chat bind still cannot.
         cl.LOCAL_OPEN_VENUES = frozenset(cl.LOCAL_OPEN_VENUES
-                                         | {"BINANCE", "OKX", "BINGX", "GATEIO", "BYBIT"})
+                                         | {"BINANCE", "OKX", "BINGX", "GATEIO", "BYBIT", "PRESIDENT"})
+        self.pc.set_seal_key(self.secret)
+        self.pc._LOCAL["on_secrets"] = lambda: self.sup.respawn_when_idle("統一期貨 credentials handed over")
+        self.pc._LOCAL["worker"].reap_orphan(cl._pid_cmdline)
         cl._send_ack = self.write_ack  # the transport swap, ack side
         cl._ON_APPLIED = cl._ON_PROGRESS = self.dirty.set
         cl._resume_mgmt_watch()
@@ -1015,6 +1248,10 @@ class Daemon:
                 self.handle_file(path)
             self.stop.wait(POLL_S)
         _log("stopping")
+        try:
+            self.pc.local_shutdown()
+        except Exception as e:
+            _log(f"president worker not stopped ({type(e).__name__})")
         if not self.sup.stop_reconciler(
                 f"the daemon is shutting down ({self.stop_why or 'SIGTERM / SIGINT'})"):
             _log("reconciler not confirmed stopped")
@@ -1079,8 +1316,9 @@ def main(argv=None):
     if fcntl is None and msvcrt is None:
         _log("needs fcntl (POSIX) or msvcrt (Windows) for the workspace lock")
         return 2
-    if argv[:1] == ["--run-reconciler"] and len(argv) == 2:
-        run_reconciler(argv[1])
+    if argv[:1] == ["--run-reconciler"] and len(argv) in (2, 3) \
+            and (len(argv) == 2 or argv[2] == "--president-stdin"):
+        run_reconciler(argv[1], president_stdin=len(argv) == 3)
         return 0
     # The app sets the switch; this file never does. Started by hand or by a
     # cloud unit without it, the daemon must not re-point <base>/current or
@@ -1109,6 +1347,7 @@ def main(argv=None):
         _log("another local daemon already owns this workspace — exiting")
         return 3
     os.chdir(ws)
+    _workspace_first(ws)  # before Daemon() imports command_listener / president_connect
     atomic_file.sweep_runtime_temps(ws, os.environ.get("BLAVE_AGENT_STATE") or os.path.join(base, "state"))
     _link_current(base)
     daemon = Daemon(ws, secret)

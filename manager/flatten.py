@@ -61,6 +61,7 @@ Semantics — panic button, not portfolio management:
     (zero_ledger_symbols) so the closes are never re-summed as bot trades.
 """
 import importlib
+import inspect
 import logging
 import os
 import re
@@ -71,7 +72,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import guard
+from lib import guard, venue_traits
 from lib.portfolio import (_append_reconciler_log, _load_ledger_seed, _record_order_error,
                            ledger_positions, load_portfolio_config,
                            zero_ledger_symbols)
@@ -85,6 +86,26 @@ LOCK_PATH = "state/flatten.lock"  # relative — this module chdir'd to the work
 ALREADY_RUNNING = "already_running"  # flatten()'s return when another one holds the lock
 EXIT_ALREADY_RUNNING = 3  # ...and the exit code for it, distinct from 1 = ran with errors
 _LOCK = None  # the open lock file, pinned for the life of the process (see _singleflight)
+
+
+def _takes(fn, name):
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _book_months(vid, ledger):
+    """{key: contract months | None} the bot's book holds on a TW futures venue,
+    or None (no book, not such a venue, a lib.portfolio without months)."""
+    if ledger is None or not venue_traits.has(vid, "hand_wired"):
+        return None
+    try:
+        from lib.portfolio import book_months_of
+    except ImportError:
+        return None
+    return book_months_of(ledger)
 
 
 def _singleflight(path=None):
@@ -176,7 +197,7 @@ _CAPITAL_FUT_RE = re.compile(r"^(MTX|TX|TM)(\d{2})(0[1-9]|1[0-2])$")
 
 def _book_key(vid, sym):
     """The self-ledger / orders.jsonl key for a venue position row."""
-    if vid == "capital":
+    if venue_traits.has(vid, "resolved_contracts"):
         m = _CAPITAL_FUT_RE.match(sym)
         if m:
             return _CAPITAL_BOOK_KEY[m.group(1)]
@@ -201,6 +222,11 @@ def _read_env(path=".env"):
 def _venues(env):
     out = []
     for k in env:
+        own = venue_traits.cred_env(k)  # 統一 is bound by president_account, not *_API_KEY
+        if own:
+            if own[1] == "API_KEY":
+                out.append(own[0].lower())
+            continue
         m = _ENV_KEY_RE.match(k + "=")
         # DATA_<SOURCE>_* = data-source keys, never a venue — same rule as
         # runtime/account_reader._venues (a venue literally named DATA stays)
@@ -560,7 +586,13 @@ def flatten():
             continue
         try:
             acct = importlib.import_module(f"lib.account_{vid}")
-            positions = acct.get_positions(env)
+            months_by_key = _book_months(vid, ledger)
+            if months_by_key is not None and _takes(acct.get_positions, "book_months"):
+                # TW futures: only the contract months the book holds are the bot's
+                positions = acct.get_positions(env, book_months=months_by_key)
+            else:
+                months_by_key = None
+                positions = acct.get_positions(env)
         except Exception as e:
             logging.error(f"[{vid}] get_positions failed: {e}")
             _record_order_error("*", vid, f"close-all: get_positions failed: {e}")
@@ -579,7 +611,7 @@ def flatten():
             errors += 1
             sweep_ok = False
             continue
-        if vid == "capital" and positions and not _capital_order_identity_ok():
+        if venue_traits.has(vid, "windows_identity") and positions and not _capital_order_identity_ok():
             # never "try and see" under the wrong identity (HALT above still holds).
             # ONE merged row naming every skipped key: order_errors keeps only 5, so
             # a row per position would push real crypto failures out
@@ -667,7 +699,7 @@ def flatten():
                 # Known, accepted (Wei): a non-near-month row is still sent — the
                 # close goes out as the near-month alias, so during a roll it can
                 # open the near month instead of closing the far one.
-                if vid == "capital" and not _CAPITAL_FUT_RE.match(sym):
+                if venue_traits.has(vid, "resolved_contracts") and not _CAPITAL_FUT_RE.match(sym):
                     logging.error(f"[{vid}] {sym}: not a TX/MTX/TM futures contract — not sent")
                     _record_order_error(key, vid, f"close-all: 群益非期貨部位({sym}),"
                                                   "請在群益下單軟體手動平倉")
@@ -677,7 +709,7 @@ def flatten():
                 # a lots position (futures_contracts / shares — paper reports it
                 # with unit "contracts") is closed by its lot count: a notional
                 # close would be refused, or sized wrong
-                lots_row = p.get("unit") == "contracts" and vid != "capital"
+                lots_row = p.get("unit") == "contracts" and not venue_traits.has(vid, "lots_close_partial")
                 cid = f"flat{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
                 if lots_row:
                     if not hasattr(order, "place_contract_market_order"):
@@ -704,7 +736,10 @@ def flatten():
                         logging.info(f"[{vid}] {sym} {side} {size} below minimum — dust left")
                         closed_symbols.add(key)  # dust is still "as flat as it gets"
                         continue
-                    result = order.close_position_partial(env, sym, side, size, client_order_id=cid)
+                    kw = {}
+                    if months_by_key is not None and _takes(order.close_position_partial, "book_months"):
+                        kw["book_months"] = months_by_key.get(key, set())
+                    result = order.close_position_partial(env, sym, side, size, client_order_id=cid, **kw)
             except Exception as e:
                 logging.error(f"[{vid}] close {p.get('symbol')} failed: {e}")
                 _record_order_error(_book_key(vid, sym) if sym else "?", vid, f"close-all: {e}")
@@ -732,6 +767,8 @@ def flatten():
                     # the quantity half of the book: a partial close reduces it by
                     # exactly what filled (the zeroing below then skips this key)
                     leg["signed_qty"] = -got if side == "long" else got
+                if result.get("resolved_symbol") and result.get("executed_qty"):
+                    leg["resolved_symbol"] = result["resolved_symbol"]  # the month that closed
             _append_reconciler_log({
                 "action": "SELL" if side == "long" else "BUY",
                 "symbol": key,
@@ -741,14 +778,16 @@ def flatten():
                 "contributors": [],
                 "legs": [leg],
             })
-            if vid == "capital" and (not isinstance(result, dict) or result.get("status") != "filled"
-                                     or float(result.get("executed_qty") or 0) + 1e-9 < size):
+            if venue_traits.has(vid, "close_needs_fill") and (
+                    not isinstance(result, dict) or result.get("status") != "filled"
+                    or float(result.get("executed_qty") or 0) + 1e-9 < size):
                 # 'sent' = accepted, no fill seen within the timeout — may or
                 # may not have filled; never book an unconfirmed close as flat
                 got = result.get("executed_qty") if isinstance(result, dict) else None
                 logging.error(f"[{vid}] {sym}: close not confirmed filled ({got}/{size})")
-                _record_order_error(key, vid, f"close-all: 群益平倉未確認成交({got or 0}/{size:g} 口),"
-                                              "請到群益下單軟體確認部位")
+                label = venue_traits.get(vid, "label") or vid
+                _record_order_error(key, vid, f"close-all: {label}平倉未確認成交({got or 0}/{size:g} 口),"
+                                              f"請到{label}下單軟體確認部位")
                 errors += 1
                 unclosed.add(key)
                 continue

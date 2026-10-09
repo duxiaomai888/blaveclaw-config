@@ -177,7 +177,8 @@ A report is not a fixed form: it is built around what actually happened today. F
 report — the market briefs, 台股收盤報告, 單標的晨報, a custom recipe, a research report, and the
 unattended turn of a scheduled report — work in this order. The one exception is a backtest report
 (its content is the backtest; no news search, no market extras — say an obvious anomaly in the
-narrative instead).
+narrative instead). A research question runs its data check before step 1 (§1b › *Research
+questions*): that probe decides whether there is a report at all.
 
 1. **Search first** (fast, ~15 s): the news and events in the report's window (§1b › News).
 2. **Pick 1–3 things that are special today** from what you found — a hacked exchange, a listing
@@ -422,6 +423,87 @@ publish(pack, narrative={
   A research report or a report the user describes in their own words (their own 週報) has
   no template by design — build it from bricks (§1b › Custom recipes), do not ask.
 
+### Research questions — straight to a report, after a data check
+
+**What goes straight to a report** — decide before you start, from the question alone:
+- The answer needs an analysis script over multi-period history: an event study, 「X 發生後 Y 怎樣」
+  (「外資淨空單創新高後台指期一個月漲跌」), conditional returns (「資金費率轉負時 BTC 之後 7 天」),
+  a comparison of two or more periods or groups (「2022 空頭和 2024 多頭時誰的回撤大」).
+- Or the user asks for a new research report outright (「做一份…的研究報告」, 「…做成報告」, the
+  desktop app's 新增報告 box). 研究 or 分析 on its own is not a trigger — judge the question by
+  what its answer needs. A template brief (台股收盤報告 …), a backtest report or a change to an
+  existing report is not this rule (AGENTS.md › Reports).
+
+**What stays in chat:** one number (「台積電今天收盤多少」), a current reading (「BTC 資金費率現在多少」, 「幫我分析現在 BTC 的資金費率」 — 分析, but a reading),
+a follow-up on an answer or report you already gave (「那 ETH 呢」, 「第二段是哪幾天」).
+
+**Order:**
+1. **Data check** — a probe, before the web search and before the analysis script: fetch the
+   series with `lib/data.py` and print three things — the first and last date it holds against
+   the period asked, how many times the condition occurs in it, and how many independent segments
+   those occurrences form (B9). Nothing is said to the user yet.
+2. **It passes** (the question as asked, enough segments to compare) → one line, then build:
+   「這題會直接做成報告，約 N 分鐘」 / "This one goes straight into a report — about N minutes." —
+   about 8–12 minutes in practice. No confirmation round: the user asked the question, the report is
+   the answer. Then the report flow above (search first), the analysis script in `tmp/research/`
+   (below, kept), and a `research` report (§7b B).
+3. **It fails** → answer in chat, no report — also when the user asked for a report outright
+   (the 新增報告 box included): never publish the original question as asked when the data cannot
+   answer it, and never publish the changed one before the user accepts it.
+   - The question has to change to be answerable — another threshold, another period, a proxy
+     series. Say in the first sentence what was asked and what you answered instead
+     (「三天都高於 0.05% 在資料裡沒有發生過，改用前 10% 的費率當門檻」), then the answer.
+   - Or the condition holds in only a few segments — say how many, give the figures, and say what
+     that many cannot show.
+   - Offer the report **on the changed question**, naming the change: 「用前 10% 門檻做成報告」
+     (a few segments, nothing changed: 「做成報告」). Web / desktop: a `<suggest>` line, never a
+     question at the end of the reply. Telegram has no `<suggest>`: one plain sentence —
+     「要的話回覆『用前 10% 門檻做成報告』」. The script stays in `tmp/research/`, so taking the
+     offer reruns it (*Research scripts*, below).
+   - **Taking the offer is the user's consent to the change:** the changed question is now theirs,
+     and the report's title, lead and every block answer it — not the original.
+   - **Never publish a report on a substitution the user did not accept.** A report is read later,
+     out of this conversation; its title would answer a question nobody asked.
+
+*Example that stays in chat:* an event study of BTC after funding above 0.05% for three days in a
+row — the condition never occurs in the data, so the agent swapped in a top-10% threshold and
+answered in chat. That is the right call: the question changed.
+
+### Research scripts — kept in `tmp/research/`, rerun for the report
+
+A research question that passed the data check is already a report (above); this flow is for an
+answer that stayed in chat. When the user turns an earlier chat answer into a report (「做成報告」, 「把剛才的分析整理成報告」),
+the new turn sees only the text of your earlier replies — not the scripts, tool calls or their
+output. The research is already done; the script that did it is the way back to its figures.
+This is the one exception to AGENTS.md's "delete your `tmp/` scripts before you reply".
+
+**Keep the script behind every research answer.**
+- One question, one script: `tmp/research/<what_it_computes>.py` (`foreign_net_short_event_study.py`,
+  never `test2.py`). A revised analysis is saved over the same file — no `_v2` / `_verify` / `_final` trail.
+- First line: `# <the question it answers> | <data and window, e.g. TXF 外資淨空單 2015-01-05..2026-10-07> | <written YYYY-MM-DD>`.
+  It prints every figure the answer quotes.
+- No API key, secret, token or password is ever written into the file — it stays on the
+  machine. Blave data: `from lib.report_templates import headers_from_env`; an exchange key: read
+  from the workspace `.env` the way `lib/` already does (`dotenv_values()` handed to the lib
+  function, `references/lib.md`), never pasted in.
+- Run it from the workspace root as `python3 -m tmp.research.<name>` (no `.py`; the folder needs
+  no `__init__.py`) — it imports `lib` whether or not the machine sets `PYTHONPATH`.
+- Probes and one-off prints around it are still deleted before you reply.
+- **Cap:** at the start of a research or report turn, keep the newest 20 files in `tmp/research/` and delete
+  the rest — nothing else ages them, on the desktop app or in the cloud. Run exactly this, from the
+  workspace root (only `tmp/research/*.py`, never `__pycache__` or anything outside):
+  `python3 -c "import glob,os; fs=sorted(glob.glob('tmp/research/*.py'), key=os.path.getmtime, reverse=True); [os.remove(f) for f in fs[20:]]"`
+
+**Making an earlier answer into a report:**
+1. `ls -t tmp/research/` (ignore the `__pycache__` folder it lists) and read the first lines; pick
+   the script whose question is the one the user means.
+2. **Rerun it, do not copy it.** Add what the report needs on top — the baseline series a chart
+   draws, the KPI figures — in that same file. If it no longer runs because `lib/` changed, write
+   it again from `references/lib.md` (same name, same first line) instead of patching the old code.
+3. Build the blocks from that output and publish once. Nothing in `tmp/research/` matches (an older
+   machine, or the answer came from `python3 -c` calls) → do the research once, in one script saved
+   there, and say nothing about it.
+
 ### News — every report you write in chat looks for it first
 
 **A report the user asks for in chat is researched on the web before you write it**: the two
@@ -573,7 +655,8 @@ publish(pack, narrative={
   current model has no web tool at all (neither search nor fetch), say once
   「這台目前的模型不含上網查新聞,這個排程會出數據＋判讀版」 — never a suggestion to switch model,
   never a price comparison; the run still happens and the report still goes out.
-- **R9 Readable and shareable**:
+- **R9 Readable and shareable** (a research report adds the stricter §7b form of S1 / N3 in
+  A2, of W1 in A9 and of W3 in A11; a template brief keeps these as written here):
   - S1 the lead's first sentence (up to the first 「。」) stands alone: ≤40 characters, at most
     one comparison (≤2 numbers), never only figures — it is the list summary, the notification
     and the share card's description. The rest of the figures go in sentence two.
@@ -713,10 +796,10 @@ caption.
 | Block | Required props | Limits / notes |
 |---|---|---|
 | `meta` | `title`, `report_type`, `generated_at` | **Exactly one, always first.** Optional: `period` `{from, to}` display strings ≤32 (`"08/25"`), `account` `{aum: number, currency}`, `benchmark`, `origin` (`scheduled`/`chat`), `machine`, `extra` (≤3 `{label, value}`), `shareable` (boolean, `research` only — §7b B7); `involves_futures` is still accepted but read by nothing, so leave it out. `period` + `account` + `benchmark` + `extra` ≤4 header cells in total. |
-| `kpi_row` | `items[{label, value, tone}]` | 1–6 items; **the first is the focus** and renders largest. `label` ≤40, `value` a formatted string, `tone` = `pos`/`neg`/`neutral` (unsigned numbers such as Sharpe or win-rate are `neutral` — a wall of green means nothing). Optional `unit` ≤16, `delta`. |
-| `line_chart` | `series[{name, role, points}]` | 1–4 series; `role` = `primary` (solid, **at most one**) or `benchmark` (dashed); `points` = 1–5000 `[t, v]`, `t` unix seconds int, `v` finite number. Optional `y_unit` (≤8, see *Axis units* below), `bands` (≤2 `{from, to, label}`, unix seconds, label ≤32) and `reflines` (≤4 `{y, label, emphasis}`, `emphasis: true` = red loss level). |
+| `kpi_row` | `items[{label, value, tone}]` | 1–6 items; **the first is the focus** and renders largest. `label` ≤40, `value` a formatted string, `tone` = `pos`/`neg`/`neutral` (unsigned numbers such as Sharpe or win-rate are `neutral` — a wall of green means nothing). Optional `unit` ≤16, `delta`. When there is a `delta` the tone colours the delta, not the value, so a cell whose `delta` is a baseline (「平常 +4.3%」) is `neutral` (§7b A4). |
+| `line_chart` | `series[{name, role, points}]` | 1–4 series; `role` = `primary` (solid, **at most one**) or `benchmark` (dashed); `points` = 1–5000 `[t, v]`, `t` unix seconds int — the **real date** of that observation, never a stand-in (below) — `v` finite number. Optional `y_unit` (≤8, see *Axis units* below), `bands` (≤2 `{from, to, label}`, unix seconds, label ≤32) and `reflines` (≤4 `{y, label, emphasis}`, `emphasis: true` = red loss level). |
 | `candlestick` | `candles` | 2–120 bars `[t, open, high, low, close]`; `t` unix seconds int, **strictly increasing**; the four prices finite numbers with `low ≤ min(open, close)` and `max(open, close) ≤ high` on every bar. Optional `y_unit` and `reflines` (≤4 horizontal price levels such as the prior 20-day high/low), both exactly as on `line_chart`. No `bands`, no volume pane, no moving-average overlay. The x-axis is one slot per bar, not real time (no weekend or overnight gaps), so it does **not** line up date-for-date with a neighbouring `line_chart` / `drawdown` — expected, not a bug. Needs `schema_version` `"1.2"` or later. `lib/report_templates.candlestick(title, df, y_unit=…, reflines=…)` builds one from an OHLC DataFrame. |
-| `drawdown` | `points` | 1–5000 `[t, v]`, `v` a **negative percent** (−9.84 = −9.84%). Optional `maxdd` `{value, from, to}` (unix seconds). No unit field — the contract pins this chart to negative percent. |
+| `drawdown` | `points` | 1–5000 `[t, v]`, `t` the real date as on `line_chart`, `v` a **negative percent** (−9.84 = −9.84%). Optional `maxdd` `{value, from, to}` (unix seconds). No unit field — the contract pins this chart to negative percent. |
 | `heatmap` | `variant`, `values` (+ `rows`,`cols` or `labels`) | `variant` = `calendar` (needs `rows` ≤40 years, `cols` ≤20 months — an annual / total column goes in `cols` too) or `matrix` (needs `labels` ≤40, values −1…1). `values` is 2-D, shaped rows×cols / labels×labels; `null` renders as an em-dash (future months, the diagonal). Optional **`emphasis_cols`** (**calendar only**): unique integer indices into `cols` marking the columns to render with added weight — that annual / total column. The web cannot tell which column is the total (`cols` is plain strings and not every calendar has one), so say it here. On a `matrix` heatmap `emphasis_cols` is an unknown prop → refused. |
 | `bar_chart` | `variant` + `items` or `segments` | `variant` = `bars` (`items` ≤60 `{label, value}`, signed, zero axis) or `stacked` (`segments` **2–4** `{label, value}`, value ≥0, normalised into widths). Only four category colours exist, so a 5th segment would repeat one. **Merging the tail into an "Other" segment is your decision, not the web's** — it cannot know which segments to fold or how to say so; fold them here and explain the fold in `caption`. No unit field on either variant. |
 | `histogram` | `bins[{x0, x1, count}]` | 1–200 bins, `x0 < x1`, `count` a non-negative int. Optional `x_unit` / `y_unit` (≤8, see *Axis units*) and `reflines` ≤4 `{x, label, emphasis}` (vertical). |
@@ -743,6 +826,15 @@ same table): a per-period flow (liquidation USD, net buying, volume — one bar 
 that period) is a `bar_chart`; a level or an indicator (open interest, margin balance, net
 positions, funding, long/short ratio, any z-score, equity) stays `line_chart`. The web dashboard
 draws the same data the same way (`chart_type` history vs line) — a report must not disagree with it.
+
+**An x-axis that is not calendar time is never a `line_chart` / `drawdown`.** "Day N after the
+event", "trading days held", a rank or a bucket has no date, and encoding it as one (day 0 =
+2020-01-01, day 5 = 2020-01-06, …) prints invented dates such as 01/05 and 02/09 on the page
+and the share card, with overlapping ticks. Draw it in a block whose axis is labels:
+a `bar_chart` (`bars`) with one bar per window (`第 5 日`, `第 20 日`, …) of the **excess** return —
+event minus baseline, so the zero axis is the baseline and the caption says so — plus a `table`
+with event / baseline / difference columns per window; or the `table` alone. `bars` holds one
+series, so event and baseline side by side are two `bar_chart`s, never one.
 
 **Numbers vs display strings — the mistake to check for first.** Chart data
 (`line_chart` / `candlestick` / `drawdown` / `heatmap` / `bar_chart` / `histogram` / `box` / `scatter`
@@ -1094,8 +1186,8 @@ rules:
 
 | Rules | Apply to |
 |---|---|
-| **A. Presentation** (A1–A8) | Every hand-written report **except `performance`**, which is a state snapshot whose title names its period, not a thesis (§7 scope table). A template brief (§1b) is only **half** out of scope: its envelope title is fixed by the template (a topic name by design — the list row carries the date, §1b — so A1 is not in play), the template implements A3, A4, A5 and A8 in the blocks it builds, and the narrative you write into it still follows A2, A6 and A7 — §1b says what that looks like in `read` / `watch`. |
-| **B. Research rules** (B1–B8) | `type: "research"` only. A hand-written `morning` report keeps §1b's rules instead: levels are statistics, never calls, and its conditions section takes the 觀察重點 (`watch`) form. |
+| **A. Presentation** (A1–A11) | Every hand-written report **except `performance`**, which is a state snapshot whose title names its period, not a thesis (§7 scope table). A template brief (§1b) is only **half** out of scope: its envelope title is fixed by the template (a topic name by design — the list row carries the date, §1b — so A1 is not in play), the template implements A3, A4, A5 and A8 in the blocks it builds, and the narrative you write into it still follows A2, A6 and A7 — §1b says what that looks like in `read` / `watch`. |
+| **B. Research rules** (B1–B9) | `type: "research"` only. A hand-written `morning` report keeps §1b's rules instead: levels are statistics, never calls, and its conditions section takes the 觀察重點 (`watch`) form. |
 
 Blocks are flat (§3). A section is a `text` block that opens with its `## ` heading,
 followed by the chart / table blocks that back it. Nothing nests inside markdown. Write the
@@ -1104,14 +1196,18 @@ section headings in the report's language.
 ### A. Presentation — what makes a report worth opening
 
 - **A1. Title = the finding, not the topic**: 「日圓干預只延後了貶值，沒有扭轉它」, not
-  「日圓干預分析」. Keep it to **≤ 40 CJK characters / ≤ 80 Latin characters**. For research
+  「日圓干預分析」. Keep it to **≤ 40 CJK characters / ≤ 80 Latin characters**; a **research
+  title is ≤ 24 CJK / ≤ 48 Latin with at most one comma**, and the half a robustness check
+  did not support (B4) never goes in it. For research
   the finding is historical, never a forecast (B2). In a morning report the finding is a
   reading of the data (§7 rule 1), never a call: no direction for the days ahead, no
   target, no timing (§1b's levels-are-statistics rule applies to the title too).
   `write_report` copies `title` into
   `meta.title`, so this governs both. *Why:* the title is what the report list and the
   notification show, and for research it heads the public page when the user shares it
-  (B), where a title past about 50 CJK characters gets cut; 40 leaves room. A topic name tells a reader
+  (B), where a title past about 50 CJK characters gets cut; 40 leaves room. A shared research
+  link's preview card shows two lines, about 24 CJK, and readers remember the title more than
+  the chart, so a wrong title costs more than a wrong chart. A topic name tells a reader
   who sees only the title nothing. The api's 1–200 limit (§2) still stands; this is a
   readability cap, not a format rule.
 - **A2. The lead: one falsifiable claim** (§7 rule 1), the `text` block with
@@ -1121,14 +1217,26 @@ section headings in the report's language.
   a research question, prefer one with a popular saying to test. In any other hand-written
   report, write it that way only when the data really answers a popular saying; otherwise
   the lead is the single falsifiable reading of rule 1. Never manufacture a contrast.
+  **In research the lead's first sentence** (up to the first 「。」) **is the conclusion itself
+  plus one number and its baseline**, ≤ 40 characters, standing on its own — never a
+  cliffhanger: 「淨空破紀錄只對了一半」 says neither which half nor by how much. The whole lead
+  is ≤ 3 sentences and ≤ 3 numbers, each sentence ≤ 2 numbers plus 1 baseline — §1b R9 S1 /
+  N3 in their research form, which adds the number S1 does not ask for.
+  *Counting numbers* (here and in A9): percentages, contracts, points, ratios and sample sizes
+  count; dates, years, window lengths (「60 日」) and segment numbers do not; a baseline travels
+  with the figure it is compared against and is not counted.
   *Why:* the research people open and pass on pairs a contrast with a number anyone can
   compare ("Sell in May", counted against the summers that actually happened). A weekly or
   morning report usually has no myth to break, and a contrast forced onto it drifts toward
-  a call.
+  a call. The first sentence is also the share card's description and the notification;
+  most shares are never clicked through, so that sentence is all most readers get.
 - **A3. Every headline number stands next to its baseline**: random trading days, the
   same-period average, the out-of-sample half, the prior period. Put the baseline in the
   same sentence, in the cell's `delta`, in the chart's `caption` (§3), or as a `benchmark`
-  series on the chart. *Why:*
+  series on the chart. In research the default baseline is every trading day from the first
+  event on (the span the events come from); when you use the full-history baseline instead,
+  give both side by side. A window that has no baseline on the same basis is not used for a
+  conclusion — say so in robustness (B4). *Why:*
   "−2% in the 10 days after a launch" means nothing until the reader sees what an ordinary
   10 days does. This is §7 rule 2's comparison, made visible.
 - **A4. `kpi_row` directly after the lead; its first item is the number the claim rests
@@ -1136,13 +1244,25 @@ section headings in the report's language.
   statistic, never a current reading or a target price. In a hand-written morning or weekly
   report it is the figure behind the lead (「法人淨賣超 367 億」), not the index level: a
   template brief opens on 加權指數 because the template fixes its KPI row, and yours chooses
-  its own. *Why:* it is the first figure a
-  reader sees, and a public page shows it as the key number. A context figure there,
-  such as a price level or a sample size, advertises a claim it does not support.
-- **A5. The first chart block is the one that shows the claim**, not a context chart. A
-  price chart is a `candlestick` (§3); anything else uses its native block. *Why:* it is
+  its own. In research: the first item's `label` reads off the page — it names the event
+  and the window (「淨空破紀錄後 60 日中位數」, not 「後 60 日中位數」); the baseline goes in its
+  `delta` (「平常 +4.3%」「一般交易日 +4.3%」), never in a cell of its own with a `pos` / `neg`
+  tone, and that cell's `tone` is `neutral` — the tone colours the delta, so `pos` paints the
+  baseline green as if it were a gain; a sample-size cell gives
+  segments first, then days (「5 段／47 日」, B9); and when a robustness check did not support
+  one half (B4), that half gets a cell. *Why:* it is the first figure a
+  reader sees, and a public page and the share card show it as the key number. A context
+  figure there, such as a price level or a sample size, advertises a claim it does not support.
+- **A5. The first chart block is the one that shows the claim**, not a context chart, and
+  it reads on its own as a screenshot: its title states the conclusion (§1b N1), its
+  `caption` gives once the sample (segments / days), the period, the baseline and the
+  source, and the baseline is drawn on the chart (a `benchmark` series or a `reflines`
+  line), not only written in the caption. A context chart never comes before it. A
+  price chart is a `candlestick` (§3); anything else uses its native block, and an
+  event-window path ("day N after") is a `bar_chart` / `table`, never a `line_chart` on fake
+  dates (§3). *Why:* it is
   the first thing a reader looks at, and for research it is the main image of a public
-  page.
+  page; a screenshot passed on carries this chart and its title, nothing else.
 - **A6. Key points: one `text` block with 3–5 bullets, each one sentence carrying one
   number** (§7 rule 2, the swap test). *Why:* a reader who stops here should still hold
   the argument.
@@ -1157,11 +1277,40 @@ section headings in the report's language.
 - **A8. `footnote` last: method and data.** Give the window, frequency, formula and sample
   size, plus the source of every series. *Why:* a report is read later without the chat
   that produced it, so this is where a reader checks how the numbers were made.
+- **A9. A number has a home; the prose does not repeat it.** The headline number (the first
+  `kpi_row` item) appears at most three times: the KPI cell, the lead and the 「總結」. Every
+  other number has one home — a chart or a table; a KPI cell is the index of the chart or
+  table it summarises and counts as the same home — and the prose writes it at most once
+  more. A robustness table may list the number it tests again, beside its alternative. Key
+  points, evidence against and robustness text write only new numbers or new comparisons;
+  the 「總結」 says the so-what and where the finding stops. Two different statistics that
+  happen to share a value carry their own labels in the same sentence (「事件後 14 日 +2.4%」
+  next to 「一般交易日 30 日 +2.4%」 reads as one figure without them). This replaces §1b W1's
+  "one place" for hand-written reports, which A2, A4 and B5 already contradict. *Why:* a
+  sample research report wrote its headline figure in 7 places and a second one in 9, and
+  most of its ~2,000 characters were restatement.
+- **A10. One colour, one symbol, one sign, one meaning — and figures agree.** Across the
+  whole report a colour, a marker and a sign each carry one meaning (negative = net short in
+  every chart and table, never 「正值＝淨空」 in one table; the event and the baseline are
+  never the same colour). The sample size is the same everywhere; where it differs (47 event
+  days in the KPI, 45 points on a scatter), the block that differs says why. Every figure
+  comes from program output, never typed by hand (§1b R1 / R10 check this on a pack; in a
+  hand-written report it is on you). *Why:* a screenshot passed on is first attacked on an
+  inconsistency, and it costs the rest of the report its credibility.
+- **A11. Plain words first, then one word throughout.** A term of art (淨口數, 一般交易日,
+  段 in the B9 sense, a Blave indicator) gets a one-sentence plain definition at its first
+  appearance in the body, before its number. The title, the lead and the `kpi_row` use
+  words a reader already has, and leave the definition to the body. After that, one word
+  for one thing: never 「平常」, 「全體」 and 「同期」 for baselines that are, or are not,
+  the same. This widens §1b W3 (Blave indicators only) for hand-written reports. *Why:* a
+  public page's reader never saw the chat.
 
 ### B. Research rules — `type: "research"` only
 
-**How to build one — about four minutes, never a hand-written fetch script:**
-1. **Search first**, before any code (§1b › Report flow, § News): 3+ sites, read lean (below).
+**How to build one — about four minutes (with an analysis script behind it, 8–12; §1b › *Research questions*), never a hand-written fetch script:**
+1. **Search first**, before any code but the data check (§1b › Report flow, § News): 3+ sites,
+   read lean (below). A research question runs its data check first (§1b › *Research questions*) —
+   that probe decides whether there is a report at all.
 2. **`pack = research_pack("SOL", extra=[…], days=30, window="7d")`** (`lib.report_templates`; `days` = the
    span the comparison against BTC covers (not the candle count: 120 bars), `window` = the OI window — `"7d"` unless the question is about today) — price candles and levels,
    volume against its 20-day mean, the coin against BTC, funding / open interest / long-short, Blave
@@ -1172,7 +1321,7 @@ section headings in the report's language.
    `read` (the findings), `against` (B3) and `robustness` (B4), both required, `summary` (總結, required)
    and `risk` (B5, what would break it — the summary's last sentence), `news`; no `watch` (B2). The
    claim goes in the title.
-4. `publish(pack, narrative, title="<the claim, ≤40 CJK>", shareable=True|False)` — once; refused →
+4. `publish(pack, narrative, title="<the claim, ≤24 CJK (A1)>", shareable=True|False)` — once; refused →
    fix every listed problem and re-send the same pack by id.
 A question the pack cannot answer (a protocol's revenue, a token unlock schedule) is said as such in
 the narrative, or cited from a source in the footnote — not fetched by a script you write mid-turn.
@@ -1207,6 +1356,12 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
   season — is the right time to publish it, and the title still states the historical
   finding. What is out is saying the condition is being met now, or projecting the days
   ahead.
+  **No forecasting verbs**: 預告, 預示, 將會, 將持續, 接下來, 中繼, 意味著後市 (English: foreshadows,
+  signals ahead, will) — 「它預告的是月線以上的續漲」 published while the condition is on
+  reads as a call on the index whatever the data says. **An unfinished window**: when the last
+  event's forward window runs past the publish date, that event (or segment, B9) is marked
+  「觀察期未滿、不計」, left out of every statistic, and appears only in a table and the
+  footnote; the prose does not comment on it.
 
   B1 and B2 win over §7 wherever they meet (§7's examples read today's market, which fits
   a morning brief, not a research report), and they govern B3–B6.
@@ -1219,7 +1374,11 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
   - *Different window or baseline*: the same measurement on another lookback, start date
     or benchmark.
   - *Split sample*: first half vs second half, or before vs after a named event. A result
-    that shows up in one half only is a regime, not a rule.
+    that shows up in one half only is a regime, not a rule. Each half is measured against
+    the **same-period** baseline: it passes only when both halves' "event minus same-period
+    baseline" have the same sign — two positive raw returns do not count (+1.5% after the
+    events against +10.9% on every day of the same years is the effect reversed, not
+    confirmed).
   - *Placebo*: the same method on randomly drawn dates (or a matched unrelated series);
     the real effect has to stand clear of that distribution. State the number of draws and
     report it as "beats N of M random dates". It is not MCPT, so never label it a p-value
@@ -1240,7 +1399,7 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
     was not run.
 
   When a check does not support the claim, report it as it came out and weaken the lead
-  and the title to match. Never swap in a check that passes. *Why:* a claim that holds on
+  and the title to match (A1, A4). Never swap in a check that passes. *Why:* a claim that holds on
   one window only is the most common way a research report is wrong, and this is the
   section that catches it.
 - **B5. What would break this: the last sentence of the 「總結」** (`risk`; `publish` appends it to
@@ -1260,7 +1419,8 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
   Never name the field to the user, and never tell them a report cannot be shared because of
   it. Set it on purpose every time.
   - **`true`** only when all of these hold: B1 and B2 hold everywhere in the report, not
-    only in the title, the lead and the `kpi_row`; B3–B5 and B8 are all there; and it cites,
+    only in the title, the lead and the `kpi_row`, with no forecasting verb and any unfinished
+    window left out (B2); B3–B5, B8 and B9 are all there; and it cites,
     backtests or describes no strategy sold in the Marketplace (`references/marketplace.md`
     › *Strategy categories*), whether the user bought it or sells it.
   - **`false`, always**, when any of these is true: it gives buy / sell timing, a price
@@ -1268,9 +1428,9 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
     instrument — including one the user explicitly asked for (B1's exception); it says a
     condition is being met now or projects from today (B2); it cites a Marketplace strategy
     as above (official, shared-with-me and unlisted private strategies do not count); or any
-    of B1–B5 or B8 is missing. When unsure, `false`.
+    of B1–B5, B8 or B9 is missing. When unsure, `false`.
   - `research` only. Leave it off `morning` and `performance`.
-  - The flag records the report; it never changes what you write. B1–B6 and B8 apply to every
+  - The flag records the report; it never changes what you write. B1–B6, B8 and B9 apply to every
     research report whatever the flag says, and you do not drop what the user asked for to
     earn a `true`.
   - It needs `schema_version` `"1.3"` (§2); `write_report` sets that.
@@ -1290,12 +1450,21 @@ chat, and it leads with the **title**, the **lead**, the **first item of the fir
   given only the first takes a coin flip for a rule. A3 puts a figure next to its baseline;
   this puts it next to its own dispersion — the more common way a true number misleads.
 
+- **B9. Overlapping events are one segment, not many samples.** When the gap between two
+  events is shorter than the forward window, they belong to one segment; a new segment starts
+  only after a gap longer than the window. Compute the main statistic again at the segment
+  level and write it as 「N 段裡幾段贏過基準」 (an unfinished segment is not counted, B2). When
+  one segment holds more than a third of the event days, the lead or the evidence against
+  (B3) says so. *Why:* 23 of a sample report's 47 event days fell in one stretch
+  (2020-12 to 2021-05); with a 60-day window they are the same rally counted 23 times.
+
 **Order in a research report:** `meta` → lead (A2) → `kpi_row` (A4) → first chart (A5) →
 key points (A6) → 3–5 argument sections (A7) → evidence against (B3) → robustness (B4) →
 what would break this (B5) → `footnote` (A8).
 
 For a `research` report only, `write_report` prints a `WARNING:` (it never refuses) when
-the title is over the A1 cap, when the lead is not followed by a `kpi_row`, or when
+the title is over the A1 research cap (24 CJK / 48 Latin), when the lead's first sentence is
+over 40 CJK / 80 Latin or has no digit (A2), when the lead is not followed by a `kpi_row`, or when
 `meta.shareable` is missing (B7; a reminder to record it, not a sharing gate). Everything else here is yours to check, in research and in
 a hand-written morning report alike.
 

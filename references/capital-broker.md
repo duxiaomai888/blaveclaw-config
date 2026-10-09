@@ -679,6 +679,26 @@ units in `references/lib.md`; do NOT hand-write SKCOM order calls anymore); reco
 the hand-wired signed-diff pattern per `references/manager.md`, and the reconciler service needs
 the `.\Administrator` ObjectName exception there (602).
 
+**Contract months and settlement in the book** (`references/manager.md` § Contract months): each
+fill's `resolved_symbol` (`TX2610`) puts its lots in a month (`lib/account_capital.contract_month`).
+With a book, the reconciler's 群益 read counts only the months the book holds — a month the user
+opened by hand is left out (audit `manual_month_excluded`) instead of netted into the bot's, which
+used to let a far-month manual short net the bot's near-month long to 0 and write it off. Orders
+still go out on the near-month alias (a far-month close during a roll can open the near month —
+known, accepted). 群益 gives no contract list here, so a book month past its settlement time
+(third Wednesday 13:30) counts as cash-settled once the account has no row of it on two reads ≥5 s
+apart; a row still held past that time is a postponed settlement and stays the bot's.
+**Unverified:** whether `GetOpenInterest` keeps a settled month's row after cash settlement (統一
+does; if 群益 does too, the book keeps that month as held and the strategy does not re-enter —
+check on the first real settlement day, 2026-10-21).
+**Known gap — same-month netting:** the account nets one contract month. If the user holds the
+opposite side in the month the bot enters, the bot's entry closes the user's lots at the broker and
+nothing records it (futures have no `netted_qty` yet), so the bot's exit does not hand them back
+(`tests/check_capital_ledger_paths.py` M2, known bug). Say it to the user in plain words before a
+群益 futures strategy goes live, and whenever they mention trading the same contract by hand: the bot
+cannot tell its lots from theirs inside one contract month; keep manual positions in another month or
+another root, never the opposite side in the month the bot trades.
+
 ### Account Snapshot Worker (`blave-agent-capital` service)
 
 The connect flow's `capital_finish` command installs and starts this service exactly as below
@@ -707,6 +727,16 @@ workspace path if `BLAVE_AGENT_WORKSPACE` differs; read the password from
 worker writes an error snapshot, backs off 30 s, and exits so NSSM restarts it with a fresh COM
 session — a stale/error snapshot therefore means the service is down or the venue is failing,
 never a silently-wrong number.
+
+Each snapshot carries `query_started_at` (when that read began). Every 群益 futures order on the
+machine — reconciler, 全部平倉 (`manager/flatten.py`) or a script — is marked in
+`state/capital_last_order_at` by `lib/order_capital` (before the send and again after the fill
+wait), and the reconciler re-reads that mark every round: it skips its rounds until a read that
+started at least `ORDER_SETTLE_S` (`lib/capital_vault.py`, 20 s) after the order — a read begun
+before the order and written after it still shows the old open interest, and on `sNewClose=2` a
+second close on that read opens the reverse. The worker holds its early tick (`state/capital_refresh`) until the same 20 s have
+passed. A snapshot from a worker started before this field existed is judged by `read_at` until
+the service restarts.
 
 `lib/capital_worker.py` touches `state/heartbeat/capital_worker` at the top of each 60 s loop
 tick (`references/deployment.md`'s daemon heartbeat convention). Register it once in

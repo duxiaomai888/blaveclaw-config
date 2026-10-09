@@ -1294,13 +1294,19 @@ msgid "cx.retesting"
 msgstr "Testing…"
 
 msgid "cx.fail"
-msgstr "Connecting {id} failed ({stage}): {msg}"
+msgstr "{msg} ({stage})"
+
+msgid "cx.presStopped"
+msgstr "Login stopped. Press Continue to confirm login."
 
 msgid "cx.err.okxMode"
 msgstr "This OKX account mode can't trade futures. In OKX, go to Settings → Account mode and switch to Futures mode or Multi-currency margin."
 
 msgid "cx.failShort"
 msgstr "Connection failed"
+
+msgid "cx.failStopped"
+msgstr "Connection failed and the order engine isn’t running. Fix it under Settings."
 
 # Shown in the status line under the title (the top bar keeps the short cx.failShort) when the Binance recheck verdict is IP_CHANGED (other reasons keep cx.failShort); {ip} = the IPv4 binance_link verified
 msgid "cx.failIp"
@@ -1323,6 +1329,9 @@ msgstr "Auto trading"
 
 msgid "tr.autoOn"
 msgstr "Auto-trading running"
+
+msgid "tr.presAwake"
+msgstr "{n} lot(s) open at President, this computer stays awake"
 
 msgid "tr.halted"
 msgstr "Paused"
@@ -1523,9 +1532,6 @@ msgstr "No orders now. Each strategy starts trading only at its next entry, exit
 msgid "tr.opt.waitDescReal"
 msgstr "No orders now. Each strategy sends real orders only at its next entry, exit, or flip."
 
-msgid "tr.keep.sleep"
-msgstr "While this computer sleeps, is shut down, or Blave is closed, no orders go out — exits and stops included."
-
 # 「只調整 Blave 自己那一份」跟著帳本基準分三種說法(只給真錢):讀不到 / 還沒建(第一次對帳會收編同方向的部位)/ 已建。
 # 三句同一個開頭與句號(設計師定稿);意思由後端依對帳邏輯定
 msgid "tr.keep.own"
@@ -1566,6 +1572,15 @@ msgstr "After you quit and reopen Blave, trading stays paused until you press St
 
 msgid "tr.means.4"
 msgstr "Stop orders placed on the exchange are not affected by this computer; consider placing them."
+
+msgid "tr.means.twStop"
+msgstr "{venue} has no broker-side stop orders; Blave’s stop-loss is computed on this computer each bar and sent as a market order, so a sleeping or shut-down computer leaves the position unprotected."
+
+msgid "tr.keep.pres"
+msgstr "Only Blave’s own share is traded; don’t trade the same product and month by hand as a strategy — Blave can’t tell them apart."
+
+msgid "tr.means.presNight"
+msgstr "TAIEX futures also trade in the night session, 15:00–05:00; keep this computer on."
 
 msgid "tr.tab.over"
 msgstr "Overview"
@@ -1675,14 +1690,17 @@ msgstr "Paper trading does not support TWD-priced instruments yet"
 msgid "tr.pick.twdKeep"
 msgstr "Paper trading does not support TWD-priced instruments yet; once unchecked, it can’t be added back"
 
-msgid "cx.cap.localWin"
-msgstr "The desktop app can’t connect to Capital yet. Capital needs a Windows cloud machine: choose Windows when you launch one on the web (it can’t be changed afterward)."
+msgid "tr.pick.txf"
+msgstr "統一期貨 only trades Taiwan index futures (TXF / MXF / TMF)"
 
-msgid "cx.cap.localMac"
-msgstr "Capital’s order software runs only on Windows, so this Mac can’t connect to it. Capital needs a Windows cloud machine: choose Windows when you launch one on the web (it can’t be changed afterward)."
+msgid "tr.pick.txfKeep"
+msgstr "統一期貨 only trades Taiwan index futures (TXF / MXF / TMF); once unchecked, it can’t be added back"
 
 msgid "tr.typeB.rejected"
 msgstr "{name}: No fixed run interval, so for now it runs automatically only in the cloud. Uncheck it in Pick strategies, then save."
+
+msgid "tr.notTxf.rejected"
+msgstr "{name}: not a Taiwan index futures strategy (TXF / MXF / TMF), and 統一期貨 trades nothing else. Uncheck it in Pick strategies, then save."
 
 msgid "tr.gateHint"
 msgstr "Below the {m} {c} minimum entry — no position will open"
@@ -1759,6 +1777,12 @@ msgstr "Confirm trade amounts"
 msgid "tr.saveZeroed"
 msgstr "Set to 0: {names} — their share of futures positions will be closed and spot holdings sold."
 
+msgid "tr.saveZeroedLots"
+msgstr "Set to 0: {names} — their share of futures positions will be closed."
+
+msgid "tr.saveBlankLots"
+msgstr "{names}: a blank lot count is saved as 0 — this strategy won’t place orders."
+
 msgid "tr.saveWarn"
 msgstr "Once saved, the order engine reconciles to these amounts — orders may fire immediately."
 
@@ -1806,6 +1830,30 @@ msgstr "Equity"
 
 msgid "tr.acctBreakdown"
 msgstr "Wallets"
+
+msgid "tr.margin"
+msgstr "Margin"
+
+msgid "tr.marginAvail"
+msgstr "Available Margin"
+
+msgid "tr.marginInitial"
+msgstr "Initial Margin"
+
+msgid "tr.marginMaint"
+msgstr "Maintenance Margin"
+
+msgid "tr.riskRatio"
+msgstr "Risk Indicator"
+
+msgid "tr.riskRatioTip"
+msgstr "Equity ÷ Initial Margin"
+
+msgid "tr.belowMaint"
+msgstr "Below Maintenance"
+
+msgid "tr.marginUpdated"
+msgstr "Updated"
 
 msgid "tr.holdings"
 msgstr "Holdings"
@@ -1876,14 +1924,11 @@ msgstr "Disconnect"
 msgid "tr.unbinding"
 msgstr "Disconnecting…"
 
-msgid "tr.unbindDesc"
-msgstr "Removes the exchange keys from this computer — the order engine can no longer trade this account."
-
 msgid "tr.unbindDescPaper"
 msgstr "Unbind to connect a real exchange instead."
 
 msgid "tr.unbindWarn"
-msgstr "This removes the exchange keys from this computer — the order engine can no longer trade this account. Your order settings are also cleared; you'll need to set them up again after reconnecting."
+msgstr "This removes this account’s login details from this computer — the order engine can no longer trade with it. Your order settings are also cleared."
 
 msgid "tr.unbindWarnPaper"
 msgstr "Your order settings are cleared. If you connect paper trading again, the paper account starts fresh at 100,000 USDT — current positions and history don’t carry over."
@@ -1958,7 +2003,7 @@ msgid "tr.ov.perf.annTipOk"
 msgstr "Your current return projected to a yearly pace — an estimate, not a guarantee."
 
 msgid "tr.ov.perf.annTipGating"
-msgstr "Your current return projected to a yearly pace — an estimate, not a guarantee. Needs ~30 days; still accumulating."
+msgstr "Your current return projected to a yearly pace — an estimate, not a guarantee. Needs ~7 days; still accumulating."
 
 msgid "tr.ov.perf.vol"
 msgstr "Volatility (annualized)"
@@ -1982,7 +2027,7 @@ msgid "tr.ov.perf.sharpeTipOk"
 msgstr "Return earned per unit of volatility — higher is better."
 
 msgid "tr.ov.perf.sharpeTipGating"
-msgstr "Return earned per unit of volatility — higher is better. Needs ~30 days; still accumulating."
+msgstr "Return earned per unit of volatility — higher is better. Needs ~7 days; still accumulating."
 
 msgid "tr.ov.perf.trades"
 msgstr "Trades"
@@ -2522,8 +2567,9 @@ msgstr "Collected when on"
 msgid "priv.collect.5"
 msgstr "Which features you used: tab and button names, once per item per day, without their content; when you use a library strategy, whether it needs Blave data; when you send an idea request, which entry point it came from"
 
+# 0.1.18 策略三步(strat_created / strat_backtested / strat_deployed)補在這一條:只記型別與市場類別
 msgid "priv.collect.1"
-msgstr "Which step you reached: first open, daily open, each day the app stays open (and whether local auto-trading is running), connected an AI (which kind), signed in, first backtest, trading started (paper or real), ran in the cloud"
+msgstr "Which step you reached: first open, daily open, each day the app stays open (and whether local auto-trading is running), connected an AI (which kind), signed in, first backtest, trading started (paper or real), ran in the cloud; when each strategy is created, first backtested and first given an amount, its type (A/B/C) and market category (such as crypto or Taiwan index futures), never its name or symbol"
 
 msgid "priv.collect.2"
 msgstr "When it happened"
@@ -6392,3 +6438,410 @@ msgstr "from 2001"
 
 msgid "wd.r.pcr.an"
 msgstr "the Put/Call Ratio"
+
+msgid "pres.venue"
+msgstr "President Futures"
+
+msgid "pres.title"
+msgstr "Connect President Futures"
+
+msgid "pres.later"
+msgstr "Later"
+
+msgid "pres.retry"
+msgstr "Try again"
+
+msgid "pres.copy"
+msgstr "Copy"
+
+msgid "pres.copied"
+msgstr "Copied"
+
+msgid "pres.noMove"
+msgstr "This computer hasn’t reported progress. Press again; a step that’s still running won’t run twice."
+
+msgid "pres.mac.lead"
+msgstr "President Futures needs Windows."
+
+msgid "pres.mac.hint"
+msgstr "The Mac desktop app can’t connect to President Futures. With a Windows cloud machine, you can use Remote Desktop from your Mac to apply for the certificate on it."
+
+
+
+msgid "pres.prep.looking"
+msgstr "Looking for a President certificate on this computer…"
+
+msgid "pres.none.lead"
+msgstr "This computer doesn’t have a President certificate yet. Follow these steps; your progress is kept."
+
+msgid "pres.none.s1"
+msgstr "First, ask your broker rep to enable API trading and certificate application for your account"
+
+msgid "pres.none.s1sub"
+msgstr "Hotline {tel}"
+
+msgid "pres.none.s2"
+msgstr "After your rep’s email arrives, press Open 憑證e總管"
+
+msgid "pres.none.s2sub"
+msgstr "Log in with the same password you trade with in the President app, enter the SMS code, and set a certificate password. The SMS code is valid for 5 minutes."
+
+msgid "pres.tcem.open"
+msgstr "Open 憑證e總管"
+
+msgid "pres.tcem.hash"
+msgstr "The downloaded 憑證e總管 doesn’t match the official version, so Blave didn’t open it. President’s certificate center is open in your browser — download it there."
+
+msgid "pres.tcem.download"
+msgstr "Couldn’t download 憑證e總管. President’s certificate center is open in your browser — download it there."
+
+msgid "pres.tcem.fail"
+msgstr "憑證e總管 didn’t open. Press again."
+
+msgid "pres.wait.lead"
+msgstr "Finish applying in the 憑證e總管 window; this continues automatically."
+
+msgid "pres.wait.hint"
+msgstr "When it asks where to save, keep its default folder."
+
+msgid "pres.wait.again"
+msgstr "Open 憑證e總管 again"
+
+msgid "pres.form.acct"
+msgstr "Futures account"
+
+msgid "pres.form.acctHint"
+msgstr "11 digits, including the branch code in front."
+
+msgid "pres.form.acctErr"
+msgstr "The futures account is 11 digits."
+
+msgid "pres.form.pw"
+msgstr "Trading password"
+
+msgid "pres.form.pwHint"
+msgstr "The same password you trade with in the President app. The test environment uses it too."
+
+msgid "pres.form.found"
+msgstr "Found a President certificate on this computer, expiring {date}. Next, enter your account and trading password."
+
+msgid "pres.form.foundNoDate"
+msgstr "Found a President certificate on this computer. Next, enter your account and trading password."
+
+msgid "pres.form.store"
+msgstr "Your account and trading password are stored encrypted on this computer, never uploaded, and the agent can’t read them."
+
+msgid "pres.form.go"
+msgstr "Start"
+
+msgid "pres.ph.prep"
+msgstr "Preparation"
+
+msgid "pres.ph.test"
+msgstr "Test environment (President requires one test order first)"
+
+msgid "pres.ph.live"
+msgstr "Production"
+
+msgid "pres.s.setup"
+msgstr "Install President’s order component"
+
+msgid "pres.s.setupRun"
+msgstr "Installing…"
+
+msgid "pres.s.setupFail"
+msgstr "President’s order component didn’t install."
+
+msgid "pres.s.cert"
+msgstr "Choose certificate"
+
+msgid "pres.s.certRun"
+msgstr "Checking certificate…"
+
+msgid "pres.s.certExp"
+msgstr "Expires"
+
+msgid "pres.s.tprobe"
+msgstr "Confirm login (test host)"
+
+msgid "pres.s.tprobeDone"
+msgstr "Test host"
+
+msgid "pres.s.skipped"
+msgstr "Skipped"
+
+msgid "pres.t.skip"
+msgstr "Already have production access? Log in to the production host"
+
+msgid "pres.t.back"
+msgstr "Do the test order instead"
+
+msgid "pres.err.unknownSkipped"
+msgstr "If your rep hasn’t opened production access yet, do the test order above first."
+
+msgid "pres.s.torder"
+msgstr "Place a test order"
+
+msgid "pres.s.torderDone"
+msgstr "Accepted"
+
+msgid "pres.s.orderRun"
+msgstr "Sending…"
+
+msgid "pres.s.treport"
+msgstr "Tell your broker rep"
+
+msgid "pres.s.treportDone"
+msgstr "Enabled by rep"
+
+msgid "pres.s.probe"
+msgstr "Confirm login (production host)"
+
+msgid "pres.s.probeRun"
+msgstr "Confirming…"
+
+msgid "pres.s.probeDone"
+msgstr "Futures account"
+
+msgid "pres.s.worker"
+msgstr "Start the order program"
+
+msgid "pres.s.workerRun"
+msgstr "Starting…"
+
+msgid "pres.s.workerFail"
+msgstr "The order program couldn’t read the account. Try again; if it still fails, check Settings › Account."
+
+msgid "pres.cert.name"
+msgstr "President certificate"
+
+msgid "pres.cert.exp"
+msgstr "Expires {date} · on this computer"
+
+msgid "pres.cert.here"
+msgstr "On this computer"
+
+msgid "pres.cert.picked"
+msgstr "The certificate file you chose"
+
+msgid "pres.cert.pickedD"
+msgstr "On this computer"
+
+msgid "pres.cert.pw"
+msgstr "Certificate password"
+
+msgid "pres.cert.pwHint"
+msgstr "The one you set when applying for the certificate — not your trading password. Leave blank if you never set one."
+
+msgid "pres.cert.use"
+msgstr "Use this certificate"
+
+msgid "pres.cert.other"
+msgstr "Choose another file"
+
+msgid "pres.cert.local"
+msgstr "Checked on this computer; nothing is uploaded."
+
+msgid "pres.pfx.errPw"
+msgstr "Wrong certificate password."
+
+msgid "pres.pfx.errExpired"
+msgstr "This certificate expired on {date}. Renew it in 憑證e總管, then choose it again."
+
+msgid "pres.pfx.errIssuer"
+msgstr "This isn’t a President Futures certificate. Press Choose another file and pick the one in the PSCCA folder."
+
+msgid "pres.pfx.errFile"
+msgstr "This file isn’t a certificate. Press Choose another file and pick the one ending in .pfx."
+
+msgid "pres.pfx.errRead"
+msgstr "This computer couldn’t read that certificate file. Press Choose another file and pick it again."
+
+msgid "pres.pfx.errNone"
+msgstr "The certificate file is gone. Press Choose another file and pick the one in the PSCCA folder."
+
+msgid "pres.pfx.errImport"
+msgstr "The certificate wasn’t saved. Press Use this certificate again."
+
+msgid "pres.t.hostDo"
+msgstr "President’s rule: log in to the test environment and place one test order; production opens after you tell your rep. Enter the host address from the test account email."
+
+msgid "pres.t.url"
+msgstr "Test host address (from the email)"
+
+msgid "pres.t.urlHint"
+msgstr "Copy it as written; Blave handles the format. The account, password and certificate are the same ones."
+
+msgid "pres.err.hostNotAllowed"
+msgstr "That address isn’t President’s test or production host. Enter the one from the test account email."
+
+msgid "pres.t.probe"
+msgstr "Confirm login"
+
+
+
+msgid "pres.t.orderDo"
+msgstr "Blave places a buy of 1 Micro TAIEX in the test environment. It never fills and doesn’t touch your money."
+
+msgid "pres.t.order"
+msgstr "Place test order"
+
+msgid "pres.t.orderAgain"
+msgstr "Place again"
+
+msgid "pres.t.orderFail"
+msgstr "President’s test environment didn’t accept this order."
+
+msgid "pres.t.reportDo"
+msgstr "Give your broker rep this test order’s time and order number and ask them to enable production."
+
+msgid "pres.t.reportWhen"
+msgstr "Test order time"
+
+msgid "pres.t.reportNo"
+msgstr "Order number"
+
+msgid "pres.t.reportHint"
+msgstr "It works as soon as your rep enables it. Press the button below and Blave confirms on the production host — no need to choose the certificate again."
+
+msgid "pres.t.opened"
+msgstr "My rep says it’s enabled"
+
+msgid "pres.t.later"
+msgstr "Come back later"
+
+msgid "pres.pw.lead"
+msgstr "Enter the new trading password; Blave confirms again with the same certificate."
+
+msgid "pres.pw.hint"
+msgstr "Only a different password tries again."
+
+msgid "pres.pw.go"
+msgstr "Confirm with new password"
+
+msgid "pres.err.password"
+msgstr "President says the trading password is wrong."
+
+msgid "pres.err.unknown"
+msgstr "President refused the login without a reason. Most often the trading password is wrong, or API access isn't enabled yet."
+
+
+
+msgid "pres.err.cert"
+msgstr "This computer can't open this certificate, or its password is wrong."
+
+msgid "pres.err.certMismatch"
+msgstr "This certificate doesn't belong to account {acct} — maybe a family member's or another account's."
+
+msgid "pres.err.certSwap"
+msgstr "Choose another certificate"
+
+msgid "pres.err.acctSwap"
+msgstr "Change account"
+
+
+
+
+msgid "pres.err.maint"
+msgstr "President is under maintenance daily 05:30–05:50; Blave doesn't log in then."
+
+
+
+msgid "pres.err.timeout"
+msgstr "Couldn't reach President, or it didn't answer in time."
+
+msgid "pres.err.nocreds"
+msgstr "The order program on this computer didn’t get the credentials. Close and reopen this window; if it persists, connect again."
+
+msgid "pres.err.noSeal"
+msgstr "This computer’s encrypted storage isn’t available, so nothing was saved. Try again after signing in to your Windows account."
+
+msgid "pres.err.rebound"
+msgstr "The President credentials bound on this computer differ from the saved ones. Connect again."
+
+msgid "pres.err.libOutdated"
+msgstr "This computer’s strategy workspace is too old for President Futures. Update Blave, then try again."
+
+msgid "pres.err.generic"
+msgstr "This step didn’t start. Try again."
+
+msgid "pres.done.lead"
+msgstr "Connected to President Futures"
+
+msgid "pres.done.equity"
+msgstr "Equity"
+
+msgid "pres.done.acct"
+msgstr "Account"
+
+msgid "pres.done.acctV"
+msgstr "Futures {acct}"
+
+msgid "pres.done.can"
+msgstr "Tradable"
+
+msgid "pres.done.canV"
+msgstr "TAIEX futures: big, mini, micro"
+
+msgid "pres.done.exp"
+msgstr "Certificate expires"
+
+msgid "pres.done.expV"
+msgstr "{date} ({n} days left)"
+
+msgid "pres.done.n1"
+msgstr "Quit Blave or shut down and orders stop; positions stay at President and aren’t closed."
+
+msgid "pres.done.n2"
+msgstr "Blave manages only its own orders and never touches trades you place by hand."
+
+msgid "pres.done.go"
+msgstr "Set up strategy orders"
+
+
+
+
+
+
+msgid "pres.first.title"
+msgstr "First real-money start"
+
+msgid "pres.first.row"
+msgstr "{name}: {n} {unit}"
+
+msgid "pres.first.equity"
+msgstr "President account equity {v}."
+
+msgid "pres.first.equityNone"
+msgstr "President account equity not read yet."
+
+msgid "pres.first.margin"
+msgstr "Margin per lot follows President’s announcement; orders are refused when margin is short. These lots are real money."
+
+msgid "pres.first.ok"
+msgstr "Continue"
+
+msgid "pres.quit.title"
+msgstr "Quit Blave?"
+
+msgid "pres.quit.body"
+msgstr "{lots} lot(s) are still open at President. After you quit, strategies place no more orders and these positions aren’t closed — handle them in the President app."
+
+
+
+
+
+
+
+
+msgid "pres.err.stopNote"
+msgstr "If President has locked the account, ask your broker rep to unlock it."
+
+msgid "pres.err.retryNote"
+msgstr "Try again once the network or President is back."
+
+msgid "pres.err.confirm"
+msgstr "Confirm login"
+
+msgid "pres.err.changePw"
+msgstr "Change the trading password"

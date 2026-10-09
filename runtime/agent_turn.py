@@ -115,7 +115,46 @@ PROTECTED_EDIT_RULES = [
     "Edit(/lib/analysis.py)",
     "Edit(/lib/exits.py)",
     "Edit(/control/**)",
+    # 統一 SDK logs (the login id is the national id) lived here before they moved under
+    # credentials/; a machine bound before that keeps a copy until the next unbind
+    "Read(/state/president_logs/**)",
 ]
+
+
+def _abs_rule_path(path):
+    """A filesystem path as a permission-rule anchor: `//` + POSIX form, a Windows drive
+    as `/c/…` (Claude Code normalizes Windows paths that way before matching). A single
+    leading slash would anchor at cwd, and <base>/credentials sits beside the workspace."""
+    p = os.path.abspath(path).replace("\\", "/")
+    m = re.match(r"([A-Za-z]):(/.*)?$", p)
+    if m:
+        p = "/" + m.group(1).lower() + (m.group(2) or "")
+    return "/" + p
+
+
+# <base>/credentials: 群益 / 統一 vaults (the trading passwords, 統一's production switch), the
+# certificates, the one-time upload keys, 群益's staged certificate and 統一's SDK logs. Named
+# patterns, not the whole folder: references/capital-broker.md has the agent read
+# rdp_password.txt there (schtasks / NSSM as Administrator), and a `!` carve-out cannot reach a
+# `//`-anchored rule. Edit is denied too — a written "live": true is how production gets
+# switched on. Bash goes through _cred_bash_guard_hooks.
+CREDENTIALS_DIR = os.path.join(os.path.dirname(os.path.abspath(WORKSPACE)), "credentials")
+CREDENTIAL_SECRET_GLOBS = ("*vault*", "*pfx*", "capital_stage/**", "president_logs/**")
+CREDENTIAL_RULES = [f"{tool}({_abs_rule_path(CREDENTIALS_DIR)}/{g})"
+                    for tool in ("Read", "Edit") for g in CREDENTIAL_SECRET_GLOBS]
+PROTECTED_EDIT_RULES.extend(CREDENTIAL_RULES)
+
+# The code that is handed the 群益 / 統一 trading and certificate passwords (the vault readers,
+# the login workers, the order and account libs, and the two manager scripts that get the
+# desktop daemon's stdin line): an agent that edits one gets the passwords out on the next
+# run (audit 2026-10-07 S1; Wei: freeze them). Every turn, chat and scheduled; the runtime's
+# own update writes them, never the agent. Bash writes go through _secret_code_bash_guard.
+SECRET_CODE_FILES = (
+    "lib/president_vault.py", "lib/president_worker.py", "lib/order_president.py", "lib/account_president.py",
+    "lib/capital_vault.py", "lib/capital_worker.py", "lib/order_capital.py", "lib/account_capital.py",
+    "manager/reconciler.py", "manager/flatten.py",
+)
+PROTECTED_EDIT_RULES.extend(f"Edit(/{f})" for f in SECRET_CODE_FILES)
 
 
 # 模型(尤其較弱的 instruction-following)看到 prompt 裡的逐字稿格式,會在寫完
@@ -1167,11 +1206,11 @@ def _sched_guard_hooks(options):
 # 而 publish 的指令字串裡會整段塞進新聞原文——所以網路工具只認指令位置(同 crontab 守門)、`.env` 前面不能是字或點
 # (www.env.go.jp)、order 模組逐一列(`order_\w+` 會誤擋 order_flow)。
 # 會下單 / 平倉 / 換 key 的模組整個擋(報告流程一個都不 import);清單由測試從 import 關係列舉對齊,新模組漏列會紅。
-SCHED_ORDER_LIB = "order_(?:binance|bingx|bybit|capital|gateio|okx|paper|sinopac|TEMPLATE)"
+SCHED_ORDER_LIB = "order_(?:binance|bingx|bybit|capital|gateio|okx|paper|president|sinopac|TEMPLATE)"
 # 這幾個名字不會出現在敘事裡,光出現就擋;execute / venue / portfolio 是一般英文字,只在 lib. 之後或 from lib import 裡擋
-SCHED_TRADE_BARE = SCHED_ORDER_LIB + "|venue_wiring|capital_vault|capital_worker"
+SCHED_TRADE_BARE = SCHED_ORDER_LIB + "|venue_wiring|capital_vault|capital_worker|president_vault|president_worker"
 SCHED_TRADE_LIB = SCHED_TRADE_BARE + "|execute|venue|portfolio"
-SCHED_TRADE_RUNTIME = "command_listener|local_daemon|web_bridge|capital_connect"
+SCHED_TRADE_RUNTIME = "command_listener|local_daemon|web_bridge|capital_connect|president_connect|president_test_order"
 SCHED_TRADE_MANAGER = ("close_symbol|flatten|stop_strategy|reconciler|run_strategy|start_reconciler\\w*|manager|seed_ledger"
                        "|update_workspace|wait_for_bar")
 # 換目錄(`cd manager && python3 close_symbol.py`,Bash 的 cwd 跨呼叫保留)就沒有 manager/ 前綴:夠獨特的名字光出現就擋,
@@ -1181,6 +1220,7 @@ SCHED_TRADE_MANAGER_BARE = ("close_symbol|stop_strategy|seed_ledger|start_reconc
 _NET_MODS = r"requests|urllib\d?|socket|http|httpx|aiohttp|ftplib|smtplib"
 SCHED_BASH_DENY_RE = re.compile(
     r"(?<![\w.])\.env\b|\b(?:read_env|load_dotenv)\b|/proc/[\w-]+/environ\b"
+    r"|\bpresident_logs\b"  # 統一 SDK logs carry the national id (moved under credentials/; old copies may remain)
     rf"|\blib[./\\](?:order_|(?:{SCHED_TRADE_LIB})\b)|\b(?:{SCHED_TRADE_BARE})\b"
     rf"|\bfrom\s+lib\s+import\s[\w\s,()]*?\b(?:{SCHED_TRADE_LIB})\b"
     rf"|\bimport\s+(?:{SCHED_TRADE_LIB}|flatten|reconciler)\b|\bfrom\s+(?:{SCHED_TRADE_LIB}|flatten|reconciler)\s+import\b"
@@ -1227,7 +1267,8 @@ def _sched_bash_guard_hooks(options):
 # 回合結束時引擎追蹤的程序(前景、逾時被轉背景、run_in_background)全部被殺,沒有東西會再叫醒 agent。
 # 2026-10-03 事故:run_in_background 拿到「You will be notified」、agent 回「跑完後我會立即回報」就結束回合;
 # 09-28:回測給了 10 分鐘 timeout,CLI 到點轉背景,回合結束連回測一起死。所以 run_in_background 一律拒絕,
-# 會跑回測/掃參的前景呼叫 timeout 不到「這一輪還剩的時間」也拒絕(上限 = 自動轉背景的門檻,見 turn_env;
+# 會跑回測/掃參的前景呼叫 timeout 不到「這一輪還剩的時間」就由 hook 把 timeout 改寫成那個數放行(引擎不夠新或
+# 剩的太少才拒絕,見 _bg_guard_hooks;上限 = 自動轉背景的門檻,見 turn_env;
 # 剩餘 = 續跑判斷同一條式子 _BRIDGE_KILL_SEC − _RESUME_TAIL_MARGIN_SEC − 已用)。
 # 等待寫法只給 python time.sleep 輪詢(references/deployment.md 3b 那一行):單一指令、不串 `;`(AGENTS.md 的規矩),
 # 實測 claude 2.1.281 可用;開頭的 `sleep N`(N≥25)CLI 會擋。
@@ -1251,35 +1292,137 @@ _POLL_HINT = (
 )
 
 
-def bg_guard_reason(tool_input, need_ms):
-    """Bash 呼叫該不該拒絕:回給模型的理由,或 None。need_ms = min(這一輪的 Bash 上限, 這一輪還剩的時間)。"""
+def bg_guard_check(tool_input, need_ms):
+    """Bash 呼叫該不該擋:(kind, 回給模型的理由) 或 (None, None)。need_ms = min(這一輪的 Bash 上限, 這一輪還剩的時間)。
+    kind "background" = run_in_background;"timeout" = 回測/掃參啟動的 timeout 不到 need_ms(hook 可改寫放行)。"""
     tool_input = tool_input or {}
     if tool_input.get("run_in_background") in (True, "true", "True", 1):
-        return ("Refused by the Blave runtime — run_in_background is not available here. When this turn ends the "
-                "engine closes and kills every process it is tracking, a backgrounded one included, and nothing "
-                "calls you again: its completion notice reaches no one and no later report from you is possible. "
-                "Run the command in the foreground with the Bash tool's `timeout` (up to " + str(need_ms) + "; the "
-                "call returns as soon as the command ends). " + _POLL_HINT)
+        return "background", (
+            "Refused by the Blave runtime — run_in_background is not available here. When this turn ends the "
+            "engine closes and kills every process it is tracking, a backgrounded one included, and nothing "
+            "calls you again: its completion notice reaches no one and no later report from you is possible. "
+            "Run the command in the foreground with the Bash tool's `timeout` (up to " + str(need_ms) + "; the "
+            "call returns as soon as the command ends). " + _POLL_HINT)
     cmd = tool_input.get("command")
     if not isinstance(cmd, str) or not _BACKTEST_LAUNCH_RE.search(cmd) or _DETACHED_RE.search(cmd):
-        return None
+        return None, None
     try:
         timeout = int(tool_input.get("timeout"))
     except (TypeError, ValueError):
         timeout = 0
     if timeout >= need_ms:
-        return None
-    return ("Refused by the Blave runtime — this starts a backtest / scan, and with `timeout` "
-            + (str(timeout) if timeout else "unset (default 120000)") + " the engine moves it to the background "
-            "when that runs out; the background run is killed when this turn ends and its result is lost. Issue the "
-            "same command again in the foreground with the Bash tool's `timeout` set to " + str(need_ms) + " (what "
-            "this turn has left — the call returns as soon as the run ends, so a short run costs nothing extra). If "
-            "the run is not going to finish within that, do not start it this way: follow references/deployment.md "
-            "› When the job does not finish in the turn. " + _POLL_HINT)
+        return None, None
+    if need_ms < _BG_REWRITE_MIN_MS:
+        # 不給數字:給了 agent 就照那個 timeout 重送、下一次檢查放行,回測照跑、回合結束被殺
+        return "timeout", (
+            "Refused by the Blave runtime — this starts a backtest / scan, and less than 5 minutes remain in this "
+            "turn: it would be killed when the turn ends and its result lost. Do not start it in this turn, in the "
+            "foreground or the background; follow references/deployment.md › When the job does not finish in the "
+            "turn — say what is not done yet and the words that continue it in the next turn.")
+    return "timeout", (
+        "Refused by the Blave runtime — this starts a backtest / scan, and with `timeout` "
+        + (str(timeout) if timeout else "unset (default 120000)") + " the engine moves it to the background "
+        "when that runs out; the background run is killed when this turn ends and its result is lost. Issue the "
+        "same command again in the foreground with the Bash tool's `timeout` set to " + str(need_ms) + " (what "
+        "this turn has left — the call returns as soon as the run ends, so a short run costs nothing extra). If "
+        "the run is not going to finish within that, do not start it this way: follow references/deployment.md "
+        "› When the job does not finish in the turn. " + _POLL_HINT)
+
+
+# 這一輪真正在跑的引擎:stream-json 的 init 訊息帶 claude_code_version(run_turn 收到就記下來;hook 在第一個
+# 工具呼叫才會跑,init 早就過了)。沒收到(更舊的 CLI、SDK 沒 yield)= None = 走拒絕那條,不猜。
+_ENGINE = {"cli_version": None}
+# PreToolUse hook 的 updatedInput 從 claude 2.0.10 起(CHANGELOG「PreToolUse hooks can now modify tool inputs」);
+# 實跑驗過 2.1.281(SDK 0.2.159 內附)。再舊的引擎會把 updatedInput 當沒看到、照原 timeout 跑——那正是 09-28 轉背景
+# 被殺的那條路,而且這次連拒絕提醒都沒有,所以版本不夠就退回拒絕。
+_BG_REWRITE_MIN_CLI = (2, 0, 10)
+# 改寫的下限 = 續跑判斷的同一個數(_RESUME_MIN_TOOL_SEC:剩的不夠跑一支像樣的指令就不續跑);need_ms 比這還小時,
+# 靜默放行等於讓一個注定跑不完的回測開跑,所以拒絕、而且拒絕訊息叫 agent 這一輪別啟動(bg_guard_check)。
+_BG_REWRITE_MIN_MS = 300 * 1000
+
+
+def cli_supports_updated_input(version):
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", version or "")
+    return bool(m) and tuple(int(x) for x in m.groups()) >= _BG_REWRITE_MIN_CLI
+
+
+# Every turn's Bash, for the same files as CREDENTIAL_RULES — by name, so `cat`, `type`,
+# `Get-Content`, `copy`, `python -c open(...)` alike; the runtime writes them itself and never
+# through the agent's tools. A glob into credentials\ (`type credentials\*`) would take a vault
+# with it. Like the scheduled guard this is a speed bump: a name assembled at run time, or a
+# listing piped into a reader, is not caught (tests/check_cred_guard.py KNOWN_GAPS).
+CRED_BASH_DENY_RE = re.compile(
+    r"\b(?:capital|president)_vault\.json\b|\b(?:capital|president)_pfx_key\b|\bpresident\.pfx\b"
+    r"|\bcapital_stage\b|\bpresident_logs\b"
+    r"|credentials[\\/]+[^\s;&|'\"`<>]*(?:[*?]|\.pfx\b)",
+    re.IGNORECASE)
+CRED_BASH_DENY_REASON = (
+    "Refused by the Blave runtime — the broker vaults, certificates, upload keys and the 統一 SDK logs "
+    "under credentials/ are never read, copied or edited from the agent (they hold trading passwords, "
+    "the production switch and the user's national id). Use the status the libs report (probe file, "
+    "error classes, account snapshot) instead. Do not retry it another way."
+)
+
+
+def cred_bash_denied(cmd):
+    return bool(CRED_BASH_DENY_RE.search(cmd or ""))
+
+
+# Bash that names one of SECRET_CODE_FILES and writes, moves, deletes or replaces something.
+# Reading them (cat, grep, python -c "import ...") and running them stay allowed. A speed bump
+# like the credentials guard: a path assembled at run time is not caught.
+_SECRET_CODE_NAME_RE = re.compile(
+    r"(?:^|[\\/\s'\"`=(])(?:" + "|".join(re.escape(os.path.basename(f)[:-3]) for f in SECRET_CODE_FILES)
+    + r")\.py\b", re.IGNORECASE)
+_NAMES_ALT = "|".join(re.escape(os.path.basename(f)[:-3]) for f in SECRET_CODE_FILES)
+_REDIRECT_INTO_RE = re.compile(r">>?\s*['\"]?[^\s;&|'\"]*(?:" + _NAMES_ALT + r")\.py\b", re.IGNORECASE)
+_WRITE_MARK_RE = re.compile(
+    r"\btee\b|\bsed\b[^|;&]*\s-[a-zA-Z]*i|\bperl\b[^|;&]*\s-[a-zA-Z]*i|\b(?:cp|mv|rm|ln|install|truncate|patch|dd)\b"
+    r"|\b(?:copy|move|del|erase|ren|rename|xcopy|robocopy)\b|(?:Set|Add|Clear)-Content|Out-File|(?:Remove|Move|Copy|Rename|New)-Item"
+    r"|\bopen\([^)]*['\"][^'\"]*[wax+]|write_(?:text|bytes)|\bunlink\(|\bos\.(?:replace|rename|remove)\b|shutil\."
+    r"|\bgit\b[^|;&]*\b(?:checkout|restore|apply|am|reset|stash|mv|rm)\b",
+    re.IGNORECASE)
+SECRET_CODE_DENY_REASON = (
+    "Refused by the Blave runtime — the broker login code (lib/*president*, lib/*capital* vault/worker/order/account, "
+    "manager/reconciler.py, manager/flatten.py) is handed the user's trading passwords, so it is never written, moved "
+    "or replaced from the agent; only a Blave update changes it. Read it if you need to; put new helpers in a new "
+    "file. Do not retry it another way."
+)
+
+
+def secret_code_bash_denied(cmd):
+    cmd = cmd or ""
+    # a redirect counts only INTO one of them (`... > tmp/log 2>&1` while running one is fine)
+    return bool(_REDIRECT_INTO_RE.search(cmd) or (_SECRET_CODE_NAME_RE.search(cmd) and _WRITE_MARK_RE.search(cmd)))
+
+
+def _secret_code_bash_guard_hooks(options):
+    """PreToolUse:Bash,任何回合:改／搬／刪拿得到券商密碼的程式檔的指令拒絕。"""
+    async def guard(input_data, _tool_use_id, _context):
+        cmd = ((input_data or {}).get("tool_input") or {}).get("command")
+        if not isinstance(cmd, str) or not secret_code_bash_denied(cmd):
+            return {}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": SECRET_CODE_DENY_REASON}}
+
+    return _add_hook(options, "PreToolUse", "Bash", guard)
+
+
+def _cred_bash_guard_hooks(options):
+    """PreToolUse:Bash,任何回合:讀／抄／改 credentials 底下券商密鑰檔的指令拒絕。"""
+    async def guard(input_data, _tool_use_id, _context):
+        cmd = ((input_data or {}).get("tool_input") or {}).get("command")
+        if not isinstance(cmd, str) or not cred_bash_denied(cmd):
+            return {}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": CRED_BASH_DENY_REASON}}
+
+    return _add_hook(options, "PreToolUse", "Bash", guard)
 
 
 def _bg_guard_hooks(options):
-    """PreToolUse:Bash,任何回合:run_in_background 與 timeout 不足的回測啟動拒絕,理由回給模型。"""
+    """PreToolUse:Bash,任何回合:run_in_background 拒絕;timeout 不足的回測啟動,引擎夠新且 need_ms 夠大就把 timeout
+    改寫成 need_ms 放行(updatedInput 取代整個 input,所以帶著原欄位),否則拒絕——理由都回給模型。"""
     t0 = time.monotonic()   # 掛載在回合開頭(run_turn 的 t_start 前幾行)
 
     async def guard(input_data, _tool_use_id, _context):
@@ -1289,9 +1432,19 @@ def _bg_guard_hooks(options):
         except (TypeError, ValueError):
             cap_ms = 1800000
         left_ms = int((_BRIDGE_KILL_SEC - _RESUME_TAIL_MARGIN_SEC - (time.monotonic() - t0)) * 1000)
-        reason = bg_guard_reason((input_data or {}).get("tool_input"), max(0, min(cap_ms, left_ms)))
-        if not reason:
+        need_ms = max(0, min(cap_ms, left_ms))
+        tool_input = (input_data or {}).get("tool_input") or {}
+        kind, reason = bg_guard_check(tool_input, need_ms)
+        if not kind:
             return {}
+        if kind == "timeout" and need_ms >= _BG_REWRITE_MIN_MS \
+                and cli_supports_updated_input(_ENGINE["cli_version"]):
+            print(f"[agent_turn] bg guard: backtest launch timeout {tool_input.get('timeout')!r} → {need_ms} "
+                  f"(claude {_ENGINE['cli_version']})", file=sys.stderr)
+            # 排程回合的 _sched_bash_guard_hooks 同時回 deny 時 deny 贏(claude 2.1.281 PreToolUse 消費端:
+            # 記下 deny 之後的 allow 一律換成那個 deny,先 allow 後 deny 也是 deny 收尾)
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                           "updatedInput": {**tool_input, "timeout": need_ms}}}
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                        "permissionDecisionReason": reason}}
 
@@ -1303,6 +1456,8 @@ def _mount_turn_hooks(options, sink, scheduled, lang_msg=None, reply_lang=None):
     # 承諾回報同樣沒人兌現。機隊的 hook 通道以排程回合那道為先例,發版前在 29026 跑一個真實回合確認(runtime/CHANGELOG)。
     # SDK 沒有 hooks 時 _add_hook 不掛(fail-open)。
     _bg_guard_hooks(options)
+    _cred_bash_guard_hooks(options)
+    _secret_code_bash_guard_hooks(options)
     if isinstance(sink, LocalSink):
         # 語言與排程器兩道只在電腦版(實測過本機 CLI);機隊另外驗過再開
         _lang_hooks(options, lang_reminder(lang_msg, reply_lang))
@@ -2322,13 +2477,20 @@ def _bash_summary(cmd, workspace=None):
 
     不是「前兩個 token」——實測(29026 2026-09-04)`head -n 10 AGENTS.md` 會摘成
     `head -n`,而 agent 的指令大量帶旗標,收據會變成一排沒有受詞的 `grep -rn`。
-    也不送完整指令:那會把模型自己組的字串原樣送進瀏覽器,長度換不到資訊。"""
+    也不送完整指令:那會把模型自己組的字串原樣送進瀏覽器,長度換不到資訊。
+    heredoc 寫檔給目標路徑;`python3 -c`／heredoc 的程式只給從 lib 匯入的識別字
+    (`fetch_funding_rate`),不送程式本文。"""
     if not isinstance(cmd, str):
         return ""
     cmd = _BASH_ENV_PREFIX_RE.sub("", cmd.strip())
     tokens = cmd.split()
-    if not tokens or "<<" in cmd or _has_inline_code(tokens):
+    if not tokens:
         return ""
+    target = _heredoc_write_target(re.sub(r"\\(?=[\w.-])", "/", cmd) if _WIN_PATH_RE.search(cmd) else cmd)
+    if target:
+        return _cut(_ws_rel(target, workspace), TOOL_SUMMARY_BASH_MAX)
+    if "<<" in cmd or _has_inline_code(tokens):
+        return _cut(" ".join(_lib_names(cmd)), TOOL_SUMMARY_BASH_MAX)
     paths = []
     for tok in tokens:
         path = _script_path(tok, workspace)
@@ -2344,12 +2506,67 @@ def _bash_summary(cmd, workspace=None):
     # `git --no-pager log` 變成沒有意義的 `git 5`(實測)。
     out, rest, i = tokens[0], tokens[1:], 0
     while i < len(rest):
+        if rest[i] == "-m" and i + 1 < len(rest) and os.path.basename(out).startswith("python"):
+            # workspace 的模組才換成路徑;`-m pip`、`-m http.server` 是套件,照原樣
+            mod = rest[i + 1].replace(".", "/") + ".py"
+            if mod.startswith(_WS_MODULE_PREFIXES) or os.path.isfile(os.path.join(workspace or WORKSPACE, mod)):
+                return _cut(mod, TOOL_SUMMARY_BASH_MAX)
+            return _cut("%s -m %s" % (out, rest[i + 1]), TOOL_SUMMARY_BASH_MAX)
         if rest[i].startswith("-"):
             i += 2 if re.fullmatch(r"-\w+", rest[i]) else 1
             continue
         out += " " + rest[i]
         break
     return _cut(out, TOOL_SUMMARY_BASH_MAX)
+
+
+_WS_MODULE_PREFIXES = ("tmp/", "lib/", "strategies/", "manager/")
+_LIB_FROM_RE = re.compile(r"\bfrom\s+lib(?:\.\w+)?\s+import\s+(\w+(?:\s*,\s*\w+)*)")
+_LIB_IMPORT_RE = re.compile(r"\bimport\b[^\n;]*?\blib\.(\w+)")
+
+
+def _lib_names(code):
+    """程式裡從 lib 匯入的識別字(依出現順序、不重複):`from lib.data import fetch_x` → fetch_x、
+    `import lib.report_templates as r` → lib/report_templates.py。只有 \\w+,沒有模型寫的自由字串。"""
+    hits = [(m.start(), j, n.strip()) for m in _LIB_FROM_RE.finditer(code) for j, n in enumerate(m.group(1).split(","))]
+    hits += [(m.start(), 0, "lib/%s.py" % m.group(1)) for m in _LIB_IMPORT_RE.finditer(code)]
+    out = []
+    for _pos, _j, name in sorted(hits):
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _heredoc_write_target(cmd):
+    """`cat > tmp/x.py <<'EOF'`／`cat <<EOF > x`／`tee x <<EOF`:heredoc 寫進的檔(沒有就 "")。
+    看第一個開 heredoc 的 shell 行(前面常有一行 `mkdir -p tmp/research`)。"""
+    if not isinstance(cmd, str):
+        return ""
+    first = next((ln for ln in _strip_heredoc_bodies(cmd).split("\n") if "<<" in ln), "")
+    if not first:
+        return ""
+    for seg in re.split(r"&&|\|\||[|;]", first):
+        if "<<" not in seg:
+            continue
+        head, args, _env = _seg_parse(seg)
+        head = os.path.basename(head)
+        if head not in ("cat", "tee"):
+            return ""
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in (">", ">>") and i + 1 < len(args):
+                return args[i + 1]
+            if a.startswith(">") and not a.startswith(">&"):
+                return a.lstrip(">")
+            if a == "<<" or a == "<<-":
+                i += 2
+                continue
+            if head == "tee" and not a.startswith(("-", "<")):
+                return a
+            i += 1
+        return ""
+    return ""
 
 
 def _has_inline_code(tokens):
@@ -2489,11 +2706,14 @@ _KIND_SCAN = (
     # 寧可多報「正在下單」,不能漏報:開倉、改槓桿、派單、對帳(會下單並寫帳)都算
     ("order", re.compile(r"\bplace_\w*order\w*\(|\bcancel_\w*order\w*\(|\brun_twap\(|\bclose_position\w*\("
                          r"|\bopen_position\w*\(|\bset_leverage\(|\bdispatch_order\(|\breconcile\(")),
-    ("report", re.compile(r"report_templates|\bpublish\(|research_pack\(|report_bricks|lib\.report\b.*write_report")),
+    # 只認產出報告的**呼叫**與寫進 reports/:`from lib.report_templates import quickstart`、看簽名都只是在讀
+    ("report", re.compile(r"\bpublish\(|\bresearch_pack\(|\b\w+_brief\(|\bwrite_report\(|\bsave_recipe\("
+                          r"|(?:>>?|\btee\s+(?:-a\s+)?|\b(?:cp|mv)\s[^\n;|&]*\s)\s*['\"]?(?:[^\s'\"]*/)?reports/"
+                          r"|\bopen\([^)\n]*reports/[^)\n]*,\s*['\"][wax]")),
     ("scan", re.compile(r"scan_grid\(|find_plateau\(")),
     ("validate", re.compile(r"run_walk_forward\(|\bmcpt\(")),
     ("schedule", re.compile(r"register_schedule\(|remove_schedule\(|\bcrontab\b|\bschtasks\b")),
-    ("data", re.compile(r"\bfetch_\w+\(|from lib\.data import")),
+    ("data", re.compile(r"\bfetch_\w+\(|from lib\.data import|\bfrom\s+lib\s+import\b[^\n;]*\bdata\b[\s\S]*?\bdata\.\w+\(")),
     ("account", re.compile(r"lib\.order_|lib/order_|lib\.account_")),
 )
 _FIRST_STR_ARG = {
@@ -2504,7 +2724,13 @@ _FIRST_STR_ARG = {
 _SSH_OPT_VALUE = set("bcDEeFIiJLlmOopQRSWw")
 _SCRIPT_READ_MAX = 64 * 1024
 _WIN_PATH_RE = re.compile(r"(?:^|[\s'\"])(?:[A-Za-z]:)?[\w.-]+\\[\w.-]")
-_READ_HEADS = ("ls", "find", "grep", "rg", "wc", "cat", "head", "tail", "less")
+_READ_HEADS = ("ls", "find", "grep", "rg", "wc", "cat", "head", "tail", "less", "sed", "awk", "nl", "bat")
+# 讀文件那組:跟 Read 工具同一份(references/、examples/、AGENTS.md、lib/*.py)
+_DOC_READ_HEADS = ("cat", "head", "tail", "less", "sed", "awk", "nl", "bat")
+_DOC_PATH_RE = re.compile(r"(?:^|\s|/)(?:references/|examples/|AGENTS\.md|lib/[\w.-]+\.py\b)")
+# 只看說明的 inline 程式(`python3 -c "…inspect.signature(…)"`、`quickstart()`):讀文件,不是做那件事
+_INSPECT_RE = re.compile(r"\binspect\b|\bhelp\(|__doc__|\bquickstart\(|\bdir\(")
+_INTERP_HEADS = ("node", "bash", "sh", "zsh", "uv")
 
 
 def _kind_obj(text):
@@ -2647,13 +2873,57 @@ def _executed_script(head_full, args, workspace):
     return "", []
 
 
+def _redirects_to_file(args):
+    """參數裡有 `> 檔`／`>> 檔`(`2>/dev/null`、`>&2` 不算;引號裡的 `>` shlex 已併進別的字,不會單獨出現)。"""
+    for i, a in enumerate(args):
+        m = re.match(r"^\d?(>>?)(.*)$", a)
+        if not m or m.group(2).startswith("&"):
+            continue
+        dest = m.group(2) or (args[i + 1] if i + 1 < len(args) else "")
+        if dest and dest != "/dev/null":
+            return True
+    return False
+
+
+def _non_redirect_args(args):
+    """拿掉重導(`2>/dev/null`、`> x`、`<in`)後的參數。"""
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        m = re.match(r"^\d?(?:>>?|<)(&?)(.*)$", a)
+        if m:
+            skip = not m.group(2)
+            continue
+        out.append(a)
+    return out
+
+
+def _strip_heredoc_bodies(cmd):
+    """拿掉 heredoc 本文,只留 shell 那幾行:本文的每一行不是指令(`from lib.data import …` 的指令頭不是 from)。
+    本文還沒結束(串流到一半)就丟到底。"""
+    out, end = [], None
+    for line in cmd.split("\n"):
+        if end is not None:
+            if line.strip() == end:
+                end = None
+            continue
+        out.append(line)
+        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
+        if m:
+            end = m.group(1)
+    return "\n".join(out)
+
+
 def _bash_kind(cmd, workspace, trading, remote=False):
     if not isinstance(cmd, str) or not cmd.strip():
         return "unknown", ""
     # Windows 電腦版的路徑是反斜線(`python strategies\\x\\strategy.py`):shlex 會把它當跳脫吃掉,
     # 拆段前先換成 `/`(只影響判路徑用的這份;內容掃描照原文)
     pcmd = re.sub(r"\\(?=[\w.-])", "/", cmd) if _WIN_PATH_RE.search(cmd) else cmd
-    segs = [_seg_parse(s) for s in re.split(r"&&|\|\||[|;\n]", pcmd) if s.strip()]
+    shell = _strip_heredoc_bodies(pcmd)
+    segs = [_seg_parse(s) for s in re.split(r"&&|\|\||[|;\n]", shell) if s.strip()]
     env_all = {}
     for _h, _a, env in segs:
         env_all.update(env)
@@ -2692,7 +2962,8 @@ def _bash_kind(cmd, workspace, trading, remote=False):
             return "validate", obj
         if path in ("lib/quality_check.py", "lib/security_check.py", "lib/lint_export.py"):
             return "check", ""
-        if (path == "lib/capital_worker.py" and "--once" in sargs) or re.match(r"lib/account_\w+\.py$", path):
+        if ((path in ("lib/capital_worker.py", "lib/president_worker.py") and "--once" in sargs)
+                or re.match(r"lib/account_\w+\.py$", path)):
             return "account", ""
         # 本機的 workspace 腳本:內容一起掃(報告流程常是 python3 tmp/x.py)
         if not remote and not os.path.isabs(path):
@@ -2701,20 +2972,45 @@ def _bash_kind(cmd, workspace, trading, remote=False):
                     text += "\n" + f.read(_SCRIPT_READ_MAX)
             except OSError:
                 pass
-    # 純讀檔的指令(`grep -n publish lib/report_templates.py`):字串裡出現關鍵字不代表在做那件事,指令頭先判
     heads = [os.path.basename(h) for h, _a, _e in segs
              if os.path.basename(h) not in ("", "cd", "export", "source", ".", "set", "echo", "sleep", "true")]
-    reader_only = heads and heads[0] in _READ_HEADS and not any(
-        h.startswith("python") or h in ("node", "bash", "sh", "zsh", "uv") for h in heads)
-    # C. 內容掃描
+    runs_code = any(h.startswith("python") or h in _INTERP_HEADS for h in heads)
+    # heredoc 寫檔(`cat > tmp/research/x.py <<'EOF'`):本文裡的 fetch_( 是寫進去的字,不是在抓;同一個指令接著跑它才算跑
+    target = "" if runs_code else _heredoc_write_target(pcmd)
+    if target:
+        rel = _ws_rel(target, workspace)
+        if rel.startswith("reports/"):
+            return "report", ""
+        m = re.match(r"strategies/([^/]+)/", rel)
+        if m:
+            return "strategy_write", _kind_obj(m.group(1))
+        return "file_write", _kind_obj(os.path.basename(rel))
+    # 純讀檔的指令(`sed -n … lib/report_templates.py`):字串裡出現關鍵字不代表在做那件事,指令頭先判。
+    # `sed -i` 與往檔案導出(`cat a > reports/x`)是寫,不算
+    for h, args, _e in () if runs_code else segs:
+        if os.path.basename(h) == "sed" and any(a.startswith("--in-place") or re.match(r"-[a-zA-Z]*i", a) for a in args):
+            files = _non_redirect_args(args)
+            path = _ws_rel(files[-1], workspace) if files else ""
+            m = re.match(r"strategies/([^/]+)/", path)
+            return ("strategy_write", _kind_obj(m.group(1))) if m else ("file_write", _kind_obj(os.path.basename(path)))
+    writes = any(_redirects_to_file(args) for _h, args, _e in segs)
+    reader_only = heads and heads[0] in _READ_HEADS and not runs_code and not writes
+    inline = any((os.path.basename(h).startswith("python") or os.path.basename(h) in _INTERP_HEADS)
+                 and (any(a in _INLINE_CODE_FLAGS for a in args) or "<<" in shell) for h, args, _e in segs)
+    inspect_only = inline and bool(_INSPECT_RE.search(text))
+    # C. 內容掃描(看 fetch_kline 的簽名不是在抓:inline 程式帶 inspect 字樣時 data 改判 docs;order／report 照樣優先)
     for kind, rx in () if reader_only else _KIND_SCAN:
         if rx.search(text):
+            if kind == "data" and inspect_only:
+                return "docs", ""
             obj = ""
             arg = _FIRST_STR_ARG.get(kind)
             hit = arg.search(text) if arg else None
             if hit and _TICKER_RE.match(hit.group(1)):
                 obj = hit.group(1)
             return kind, _kind_obj(obj)
+    if inspect_only:
+        return "docs", ""
     # 指令頭:第一個不是 cd／export 這類前置的段落
     for head_full, args, _env in segs:
         head = os.path.basename(head_full)
@@ -2728,9 +3024,9 @@ def _bash_kind(cmd, workspace, trading, remote=False):
             return "status", ""
         if head in ("curl", "wget"):
             return "data", ""
-        if head in ("cat", "head", "less") and re.search(r"(?:^|\s|/)(?:references/|AGENTS\.md)", joined):
+        if head in _DOC_READ_HEADS and _DOC_PATH_RE.search(joined):
             return "docs", ""
-        if head in ("ls", "find", "grep", "rg", "wc", "cat", "head", "tail"):
+        if head in _READ_HEADS:
             return "files", ""
         if head in ("scp", "sftp"):
             return "cloud", ""
@@ -3110,6 +3406,7 @@ _SUPPORTS_PARTIAL = _STREAM_EVENT is not None and "include_partial_messages" in 
 # getattr:少了這兩個型別的 SDK build 只是收據沒有耗時,不能讓它 NameError 掉整個回合。
 _USER_MESSAGE = getattr(sdk, "UserMessage", None)
 _TOOL_RESULT_BLOCK = getattr(sdk, "ToolResultBlock", None)
+_SYSTEM_MESSAGE = getattr(sdk, "SystemMessage", None)
 # 探針:開著跑一回合就會在 journalctl 列出這個 query() 設定下 stream 吐出哪些訊息
 # 型別。只印類別名,不印任何 content。留著——換 SDK / 換 proxy 模型時要再驗一次。
 _DEBUG_MSGS = os.environ.get("BLAVE_AGENT_DEBUG_MSGS") == "1"
@@ -3652,13 +3949,16 @@ def local_mcp_servers(sink, mcp_config, mcp_servers):
 # 寫進訊息本文的話,泡泡上就是用戶「說了」他沒說過的話(e2e 0.1.8 #131),對話存檔與重開畫回來的也是。只認這張表上的代號。
 TURN_NOTES = {
     "report_once": (
-        "This request came from the desktop app's New report dialog. Produce the report once, now; do not "
-        "register or offer a schedule."),
+        "This request came from the desktop app's New report dialog. Produce the report once, now — unless the "
+        "data check fails (references/reports.md §1b › Research questions): then answer in chat and offer the "
+        "report on the changed question. Either way, do not register or offer a schedule."),
     "report_recur": (
         "This request came from the desktop app's New report dialog, and it asks for the report on a schedule "
         "(every day, every week, a time of day). This computer produces it this once only and cannot schedule "
-        "it: produce the report now, do not register a schedule, and say so plainly in the first sentence of "
-        "your reply — this computer makes it this once, and recurring reports are set up on the cloud machine."),
+        "it: produce the report now (unless the data check fails — references/reports.md §1b › Research questions: "
+        "then answer in chat and offer the report on the changed question), do not register a schedule, and say so "
+        "plainly in the first sentence of your reply — this computer makes it this once, and recurring reports are "
+        "set up on the cloud machine."),
 }
 
 
@@ -4259,6 +4559,9 @@ async def run_turn(session_id, message, model, sink, viewing_strategy=None, view
                             "terminal_reason": getattr(msg, "terminal_reason", None),
                             "result": getattr(msg, "result", None),
                         }
+                elif _SYSTEM_MESSAGE is not None and isinstance(msg, _SYSTEM_MESSAGE):
+                    if getattr(msg, "subtype", None) == "init":
+                        _ENGINE["cli_version"] = (getattr(msg, "data", None) or {}).get("claude_code_version")
                 elif _DEBUG_MSGS:
                     print(f"[agent_turn][probe] {type(msg).__name__}", file=sys.stderr)
                 if getattr(sink, "interrupted", False):

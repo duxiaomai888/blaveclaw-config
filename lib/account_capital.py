@@ -9,11 +9,24 @@
 # See references/capital-broker.md for the 602 background and field tables.
 import json
 import os
+import re
 import time
 
 _SNAPSHOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "state", "capital_account.json")
 _STALE_S = 300  # worker cadence is 60s; 5 misses = stale
+# lib/order_capital.CAPITAL_FUT_RE — not imported: importing an order lib marks
+# the process as a money process, and platform readers import this module
+_FUT_RE = re.compile(r"^(MTX|TX|TM)(\d{2})(0[1-9]|1[0-2])$")
+
+
+def contract_month(code):
+    """'YYYY-MM' of a 群益 month contract code (TX2610), None for anything else —
+    lib.portfolio's book records the month a fill landed in with it. 群益 has no
+    contract list here, so a held row past its settlement is read as still
+    trading (postponed) and an absent one as settled (lib.portfolio)."""
+    m = _FUT_RE.match(str(code or "").strip().upper())
+    return f"20{m.group(2)}-{m.group(3)}" if m else None
 
 
 def _read_snapshot():
@@ -45,6 +58,14 @@ def get_equity(env: dict) -> dict:
     out = {"equity": snap["equity"], "currency": snap.get("currency", "TWD")}
     if isinstance(snap.get("accounts"), dict):
         out["accounts"] = snap["accounts"]
+    # Margin rows on the assets page. Only `available` (GetFutureRights idx 31)
+    # ships — the worker never reads initial / maintenance margin: the rights
+    # row has idx 13/14 and 15/16 and 21 (references/capital-broker.md), and
+    # which pair matches the broker's app is unverified. TODO: verify against
+    # the app the way 統一 was (10-02), then read them in capital_worker and
+    # pass initial_margin / maintenance_margin here.
+    if snap.get("available") is not None:
+        out["available"] = snap["available"]
     return out
 
 
@@ -82,6 +103,17 @@ def get_snapshot_read_at() -> float:
     60s). Reuses _read_snapshot()'s freshness/ok checks — a genuinely
     stale/dead worker raises the same RuntimeError get_positions() would."""
     return _read_snapshot()["read_at"]
+
+
+def get_query_started_at() -> float:
+    """When the worker's last successful read of the broker STARTED — what
+    the reconciler compares with its last order. A snapshot from a worker
+    older than this field falls back to read_at: nothing restarts the
+    blave-agent-capital service on a workspace update, and refusing those
+    snapshots would pause every running 群益 machine until someone does."""
+    snap = _read_snapshot()
+    q = snap.get("query_started_at")
+    return float(q if q else snap["read_at"])
 
 
 def get_holdings(env: dict) -> list:

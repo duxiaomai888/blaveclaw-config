@@ -146,6 +146,19 @@ const OPEN = zh("tm.open"), QUIT = zh("menu.quit"), QUIT_ASK = zh("tm.quit"), PA
   t("localLine 列舉 §2.2 各情境(" + rows.length + " 筆)", bad.length === 0, bad);
   t("…on 與 tradeLive 同一組條件:tradeLive 不認的(心跳舊 / 監督者說沒在跑 / 已暫停 / 報告失敗)localLine 也不說 on",
     [{ ...running(), alive: false }, running(null, { daemon: { reconciler: { running: false } } }), running(null, { halt: { halted: true } }), { running: true, alive: true, report: { error: "x" } }].every((s) => !/^on/.test(S0([s]) || "")));
+  // 0.1.18:統一在這台電腦開通中(只綁了它、對帳器沒在跑)→ 尚未啟動下單,不是已暫停(同 trade.js trExecState 的 setup)
+  { const VP = { president: { credentials: true, pair: true, order: true, account: true } }, wip = { worker: { status: "idle" } };
+    const rs = { halt: { halted: true }, reconciler: { alive: false, heartbeat_at: 1 }, daemon: { reconciler: { running: false, wanted: false } } };
+    t("統一開通中:notStarted 而不是 paused;worker ok 之後照舊 paused;對帳器在跑就不算開通中", S0([{ running: true, alive: true, report: { venues: VP, president_connect: wip, ...rs } }]) === "notStarted"
+      && S0([{ running: true, alive: true, report: { venues: VP, president_connect: { worker: { status: "ok" } }, ...rs } }]) === "paused"
+      && S0([{ running: true, alive: true, report: { venues: VP, president_connect: wip, halt: { halted: true }, reconciler: { alive: true }, daemon: { reconciler: { running: true } } } }]) === "paused");
+    // 稽核 integ-0118 B-1:開通過(worker.ok_at)、之後登入失敗停掉 → 照一般狀態機;機器重開過的一律不講「尚未啟動下單」
+    const failed = { worker: { status: "failed", error: "LOGIN_FAILED:MAINTENANCE", ok_at: 5 } }, mr = { reconciler: { alive: false, stopped: { reason: "machine_restart", at: 7 } }, daemon: { reconciler: { running: false, wanted: false } } };
+    t("B-1 開通過→重開→登入失敗:paused(HALT)/ paused(重開停著)/ mayTrade(沒停住),不是 notStarted;從沒 ok 過但機器重開過也是 paused",
+      S0([{ running: true, alive: true, report: { venues: VP, president_connect: failed, ...rs } }]) === "paused"
+      && S0([{ running: true, alive: true, report: { venues: VP, president_connect: failed, halt: {}, ...mr } }]) === "paused"
+      && S0([{ running: true, alive: true, report: { venues: VP, president_connect: failed, halt: {}, reconciler: { alive: false, stopped: { reason: "machine_restart", gated: false } } } }]) === "mayTrade"
+      && S0([{ running: true, alive: true, report: { venues: VP, president_connect: wip, halt: {}, ...mr } }]) === "paused"); }
   t("…讀不到時沒有上次的場所 / 場所長得不像 id:不帶交易所名(用「這台電腦：{state}」那個樣板)", !TT.localLine({ running: true, alive: true, report: { error: "x" } }, "<b>").money && !TT.localLine({ running: true, alive: true, report: { error: "x" } }, null).money);
   t("statusLine:沒有 money 的那幾態走不帶 {money} 的樣板;字沒交就整行不出", TT.statusLine(L.stLocalOnly, { state: "none" }, L) === locOnly(zh("tr.noAccount")) && TT.statusLine(L.stLocalOnly, { state: "none" }, { ...L, noAccount: "" }) === null
     && TT.statusLine(L.stLocal, { money: "real", venue: "okx", state: "onZ" }, L) === loc("OKX · " + zh("tr.runningZ")));
@@ -194,7 +207,7 @@ const OPEN = zh("tm.open"), QUIT = zh("menu.quit"), QUIT_ASK = zh("tm.quit"), PA
 { const START = cut("function trayStart("), STEP = cut("function startStep(");
   let tick = null, p1 = 0; const errs = [];
   let polls = 0;
-  const ctx = { trayTimer: null, setInterval: (f) => { tick = f; return {}; }, traySync: () => {}, p1Sync: () => { p1++; }, console: { error: (e) => errs.push(e) },
+  const ctx = { trayTimer: null, setInterval: (f) => { tick = f; return {}; }, traySync: () => {}, appMenuSync: () => {}, p1Sync: () => { p1++; }, console: { error: (e) => errs.push(e) },
     updater: () => ({ poll: () => { polls++; throw new Error("poll boom"); } }) };
   new Function("ctx", "with (ctx) { " + STEP + "\n" + START + "\n trayStart(); }")(ctx);
   ctx.traySync = () => { throw new Error("tray boom"); };
@@ -206,5 +219,18 @@ const OPEN = zh("tm.open"), QUIT = zh("menu.quit"), QUIT_ASK = zh("tm.quit"), PA
   t("設計 T2:關視窗那則通知在 Windows 講系統匣(字與主行程的英文退路都分平台)",
     /hidden: t\(window\.blave\.platform === "win32" \? "tm\.hiddenWin" : "tm\.hidden"\)/.test(trSrc) && zh("tm.hiddenWin").includes("系統匣") && !zh("tm.hiddenWin").includes("選單列")
     && /hidden: WIN \? "Blave is still running in the system tray\." : "Blave is still running in the menu bar\.",/.test(src));
+}
+/* app 選單的「結束 Blave」:before-quit 會先問(可能在下單 / 回合在跑)時字尾「…」,同選單列 trayQuitLabel 的規則(HIG)。
+   appMenuSync 每 5 秒跟 traySync 一起對一次,key 含 ask 才會在狀態變時重建 */
+{ const tpl = new Function("app", "MENU_EN", cut("function appMenuTemplate(") + "\n return appMenuTemplate;")({ name: "Blave" }, MENU_EN);
+  const quitOf = (L, ask) => tpl(L, false, false, () => {}, () => {}, () => {}, ask)[0].submenu.find((x) => x.role === "quit").label;
+  t("不會先問:「結束 Blave」不帶「…」", quitOf(L, false) === zh("menu.quit") && !/…$/.test(quitOf(L, false)));
+  t("會先問(可能在下單 / 回合在跑):字尾「…」= tm.quit", quitOf(L, true) === zh("tm.quit") && /…$/.test(quitOf(L, true)));
+  t("renderer 還沒交字:英文退路也帶「…」", quitOf({}, true) === "Quit Blave…" && quitOf({}, false) === "Quit Blave");
+  t("不帶 ask 的舊呼叫 = 不問", quitOf(L, undefined) === zh("menu.quit"));
+  const sync = cut("function appMenuSync(");
+  t("appMenuSync:ask = tradeMaybeLive() || activeTurn || turnStarting,進 key、傳給樣板", /const ask = !!\(tradeMaybeLive\(\) \|\| activeTurn \|\| turnStarting\);/.test(sync)
+    && /JSON\.stringify\(\[uiLang, full, ask, tmLabels\.quit,/.test(sync) && /onFull, ask\)\)\);/.test(sync));
+  t("5 秒那一輪也叫 appMenuSync(下單狀態沒有事件,靠這裡補)", /startStep\("tray", traySync\); startStep\("app menu", appMenuSync\);/.test(cut("function trayStart(")));
 }
 console.log(red ? red + " 紅" : "ALL PASS"); process.exit(red ? 1 : 0);

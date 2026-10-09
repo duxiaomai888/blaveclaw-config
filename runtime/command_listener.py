@@ -46,8 +46,10 @@ if _RUNTIME_DIR not in sys.path:
 
 import atomic_file
 import capital_connect
+import president_connect
 import telegram_pairing
 import turn_slots
+import venue_traits
 
 try:
     import fcntl
@@ -359,7 +361,7 @@ def _env_flags():
     for line in lines:
         k, sep, v = line.partition("=")
         k = k.strip()
-        if sep and k and not k.startswith("#") and not _CRED_ENV_RE.match(k):
+        if sep and k and not k.startswith("#") and not _cred_match(k):
             out[k.upper()] = v.strip()
     return out
 
@@ -402,10 +404,38 @@ def _local_real_key_gate(venue_id, env):
         _withdraw_gate(venue_id, got, full)
 
 
+# Desktop data-access flags for every child (BLAVE_DATA_ACCESS / BLAVE_DATA_ACCESS_WHY —
+# the same two the shell gives a chat turn, so lib.data's key-free fallbacks take the same
+# branch under a live tick as under the backtest that approved the strategy). Read from
+# state/data_access.json at every spawn, not from our own environment: this process lives
+# for the whole app session while the account signs in / out / buys data, and a crash
+# restart reuses the environment we were first started with. The shell writes the file
+# before it starts us and on every account_status (shell/main.js syncDataAccess). Absent,
+# unreadable or off-shape → no flag, which is what a child got before.
+_DATA_ACCESS_FILE = os.path.join("state", "data_access.json")
+_DATA_ACCESS_VALUES = {"BLAVE_DATA_ACCESS": ("0", "1"),
+                       "BLAVE_DATA_ACCESS_WHY": ("signed_out", "no_card", "no_balance", "unknown")}
+
+
+def _data_access_flags():
+    try:
+        with open(os.path.join(WORKSPACE, _DATA_ACCESS_FILE), encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {k: v for k, v in doc.items() if k in _DATA_ACCESS_VALUES and v in _DATA_ACCESS_VALUES[k]}
+
+
 def _local_child_env(**extra):
     """Env for every workspace subprocess in local mode. Allowlist like the
     Linux one, plus the path variables that have no /opt/blave-agent default to
-    fall back on here. Any other BLAVE_* stays out of strategy code.
+    fall back on here, BLAVE_AGENT_LOCAL=1 (a child of the desktop daemon IS on
+    the user's own computer — lib.data's key-free TAIFEX / TWSE / Yahoo paths
+    open on that flag, and a live tick must see the same data its backtest did)
+    and the data-access flags (_data_access_flags). Any other BLAVE_* stays out
+    of strategy code.
 
     Windows: the allowlist starves python (no SystemRoot → it will not even
     start; USERPROFILE / APPDATA / TEMP / PATHEXT / COMSPEC likewise), so there
@@ -418,6 +448,8 @@ def _local_child_env(**extra):
     else:
         env = {k: v for k, v in os.environ.items() if k in _LOCAL_ENV_PASS}
     env["BLAVE_AGENT_WORKSPACE"] = WORKSPACE
+    env["BLAVE_AGENT_LOCAL"] = "1"
+    env.update(_data_access_flags())
     env.update(extra)
     return env
 
@@ -441,6 +473,24 @@ def _child_kw(**kw):
     return kw
 
 
+def _drop_namespace_lib():
+    """A `lib` imported before the workspace was on sys.path is whatever came
+    first there — on Windows pywin32's site-packages/win32/lib, a directory with
+    no __init__.py, so a namespace package. That binding never re-points to the
+    workspace's real package once it is on sys.path (importlib leaves a
+    namespace path alone when a regular package turns up), and every
+    `from lib…` below is ModuleNotFoundError for the rest of the process
+    (0.1.18 Windows: halt / resume / close_all dead). The workspace's lib always
+    has an __init__.py, so a namespace `lib` is never the right one: drop it and
+    the import below resolves again, with the workspace first."""
+    m = sys.modules.get("lib")
+    if m is None or getattr(m, "__file__", None):
+        return
+    _log("lib is bound to a namespace package (imported before the workspace was on sys.path) — dropped")
+    for name in [n for n in sys.modules if n == "lib" or n.startswith("lib.")]:
+        del sys.modules[name]
+
+
 def _in_workspace(fn, *a, **kw):
     """lib/guard.py resolves state/HALT relative to the cwd, and this thread has
     no business changing the process-wide cwd out from under the bridge — so the
@@ -451,6 +501,7 @@ def _in_workspace(fn, *a, **kw):
         os.chdir(WORKSPACE)
         if WORKSPACE not in sys.path:
             sys.path.insert(0, WORKSPACE)
+        _drop_namespace_lib()
         return fn(*a, **kw)
     finally:
         try:
@@ -486,12 +537,21 @@ def _strategy_names_arg(args):
     return names
 
 
+_downtime_import_logged = False
+
+
 def _downtime_lib(optional=False):
     """optional=True → None on a workspace that predates lib/downtime.py
-    (nothing there ever writes a pause, so there is nothing to honour)."""
+    (nothing there ever writes a pause, so there is nothing to honour). The
+    cause is logged once either way: a `lib` bound to the wrong directory reads
+    exactly like a missing module here (0.1.18 Windows), and that must show."""
+    global _downtime_import_logged
     try:
         from lib import downtime
-    except ImportError:
+    except ImportError as e:
+        if not _downtime_import_logged:
+            _downtime_import_logged = True
+            _log(f"lib.downtime not importable: {type(e).__name__}: {e}")
         if optional:
             return None
         raise RuntimeError("this workspace has no lib/downtime.py — "
@@ -672,6 +732,18 @@ _CRED_KEEP_IDS = {"BLAVE", "ADMIN"}
 _DATA_CRED_PREFIX = "DATA_"
 
 
+def _cred_match(name):
+    """(ID, SUFFIX) of a credential env name, or None. A venue's own names
+    (venue_traits cred_env — 統一's president_account is its API_KEY-role key)
+    are read first: through the pair regex alone 統一 never looks bound, and
+    president_ca_password reads as a phantom PRESIDENT_CA venue."""
+    own = venue_traits.cred_env(name)
+    if own:
+        return own
+    m = _CRED_ENV_RE.match(name)
+    return (m.group(1).upper(), m.group(2).upper()) if m else None
+
+
 def _is_data_cred_id(cred_id):
     return cred_id.upper().startswith(_DATA_CRED_PREFIX)
 
@@ -743,10 +815,9 @@ def _venue_cred_ids(lines, skip_ids=frozenset()):
     bound, so every 下單設定 save wiped its `exchanges` routing)."""
     suffixes = {}
     for l in lines:
-        m = _CRED_ENV_RE.match(l.split("=", 1)[0].strip())
-        if (m and m.group(1).upper() not in _CRED_KEEP_IDS | skip_ids
-                and not _is_data_cred_id(m.group(1))):
-            suffixes.setdefault(m.group(1).upper(), set()).add(m.group(2).upper())
+        m = _cred_match(l.split("=", 1)[0].strip())
+        if m and m[0] not in _CRED_KEEP_IDS | skip_ids and not _is_data_cred_id(m[0]):
+            suffixes.setdefault(m[0], set()).add(m[1])
     return {
         i for i, s in suffixes.items()
         if "API_KEY" in s and s & {"SECRET_KEY", "PASSWORD", "PASSPHRASE"}
@@ -1149,7 +1220,7 @@ def _cmd_credentials(args):
         # here (e.g. a fresh BLAVE_API_KEY= line)
         if not isinstance(v, str) or "\n" in v or "\r" in v:
             raise ValueError("bad env value")
-    writing = {m.group(1).upper() for k in env if (m := _CRED_ENV_RE.match(k))}
+    writing = {m[0] for k in env if (m := _cred_match(k))}
     # the remove side refuses to drop BLAVE_*; the write side must refuse to
     # overwrite it too, or a custom exchange named "Blave" clobbers the
     # platform keys
@@ -1168,7 +1239,12 @@ def _cmd_credentials(args):
         raise ValueError("這一版電腦版只開放模擬交易(paper),真實交易所的綁定尚未開放")
     if _local_mode():
         for vid in sorted(writing - {"PAPER", "BINANCE"}):
-            _local_real_key_gate(vid, env)  # raises = nothing written
+            if vid == "PRESIDENT":
+                # no account read to gate on: for 統一 that read IS a login (three
+                # wrong ones lock the account) — the certificate opening locally is
+                president_connect.local_bind_gate(env)
+            else:
+                _local_real_key_gate(vid, env)  # raises = nothing written
     else:
         # cloud box (and so the web connect flow): no account read, but a key
         # that can withdraw is refused here too — one request to the venue
@@ -1183,6 +1259,9 @@ def _cmd_credentials(args):
     # 群益 on a cloud Windows box: real values → a separate Administrator-only
     # file for the 群益 order code, sentinels → .env (spec §6-B)
     env = capital_connect.divert_credentials(env, local=_local_mode())
+    # 統一期貨 on a cloud Windows box: the trading password and the production
+    # switch → the vault, sentinels + certificate path + production host → .env
+    env = president_connect.divert_credentials(env, local=_local_mode())
 
     path = os.path.join(WORKSPACE, ".env")
     with _env_lock():
@@ -1212,8 +1291,8 @@ def _cmd_credentials(args):
             if evict:
 
                 def _stale_cred(line):
-                    m = _CRED_ENV_RE.match(line.split("=", 1)[0].strip())
-                    return bool(m) and m.group(1).upper() in evict
+                    m = _cred_match(line.split("=", 1)[0].strip())
+                    return bool(m) and m[0] in evict
 
                 kept = [l for l in kept if not _stale_cred(l)]
                 evicted_ids = {i.lower() for i in evict}
@@ -1244,11 +1323,16 @@ def _cmd_credentials(args):
         # the mirror update sources from the mirror itself, never the config
         # (P1-3 — see _clear_evicted_in_ui_mirror).
         _clear_evicted_in_ui_mirror(evicted_ids)
-        if "capital" in evicted_ids:  # its sentinels are gone from .env; the vault goes too
+        if venue_traits.CAPITAL in evicted_ids:  # its sentinels are gone from .env; the vault goes too
             try:
                 capital_connect.drop_vault(["capital_password"])
             except Exception as e:
                 _log(f"capital vault drop failed: {type(e).__name__}")
+        if venue_traits.PRESIDENT in evicted_ids:  # the vault holds its production switch
+            try:
+                president_connect.drop_vault()
+            except Exception as e:
+                _log(f"president vault drop failed: {type(e).__name__}")
         cpath = os.path.join(WORKSPACE, "manager", "portfolio_config.json")
         try:
             with open(cpath) as f:
@@ -3067,8 +3151,8 @@ def _cmd_amounts(args):
     inherited from existing members
     (one portfolio, one account — membership never silently splits across
     venues). Only a key's ABSENCE (unpicked in the picker) drops routing —
-    amount=0 must NOT drop it, or the reconciler (and Capital's
-    _is_capital_routed venue-detection, which reads `exchanges` alone) loses
+    amount=0 must NOT drop it, or the reconciler (and its hand-wired
+    _hand_wired_routed venue-detection, which reads `exchanges` alone) loses
     the venue to even query/flatten the position it's supposed to zero out
     (bug hit 2026-08-14: pausing a strategy at amount=0 wiped `exchanges` and
     stranded the reconciler with no venue to reconcile against).
@@ -3184,6 +3268,18 @@ def _cmd_amounts(args):
     cfg["exchanges"] = {
         n: (old.get(n) or default_venue) for n in clean
     }
+    # 統一期貨 trades TW index futures only: a member routed there whose SYMBOL is
+    # anything else (BTCUSDT…) is refused at save time, by name, instead of
+    # blowing up in the reconciler's first round. Symbol unreadable = not
+    # judged (same fail-open as the Type C check); the picker locks these too.
+    for k in clean:
+        if cfg["exchanges"].get(k) != venue_traits.PRESIDENT:
+            continue
+        sym = _strategy_futures_symbol(k)
+        if sym and sym not in _TXF_ASSET_SPECS:
+            raise ValueError(
+                f"NOT_TXF: 「{k}」的標的是 {sym},統一期貨只能下台指期(TXF／MXF／TMF)"
+                "——請取消勾選後再儲存")
     if not isinstance(cfg.get("asset_specs"), dict):
         cfg["asset_specs"] = {}
     # First-allocation TXF/MXF/TMF spec write (mirrors the frontend's own
@@ -3192,18 +3288,29 @@ def _cmd_amounts(args):
     # recorded (never clobber one already written — by this code, the agent,
     # or a manual edit). contract_value/lot_size are a static, deterministic
     # lookup keyed off the strategy's SYMBOL — no AI turn needed.
+    # One exception to "never clobber": a futures spec of ANOTHER contract.
+    # The strategy's SYMBOL changed after the spec was written (MXF -> TMF)
+    # and every order and margin check would be sized for the old one — any
+    # funded save rewrites it (a manual margin edit on the right contract is
+    # kept: only contract_value is compared).
     for k, amt in clean.items():
         if amt <= 0:
+            continue
+        sym = _strategy_futures_symbol(k)
+        spec = _TXF_ASSET_SPECS.get(sym) if sym else None
+        if not spec:
+            continue
+        have = cfg["asset_specs"].get(k)
+        if have:
+            if (isinstance(have, dict) and have.get("type") == "futures_contracts"
+                    and have.get("contract_value") != spec["contract_value"]):
+                cfg["asset_specs"][k] = dict(spec)
             continue
         try:
             prev_amt = float(old_amounts.get(k, 0))
         except (TypeError, ValueError):
             prev_amt = 0.0
-        if prev_amt > 0 or cfg["asset_specs"].get(k):
-            continue
-        sym = _strategy_futures_symbol(k)
-        spec = _TXF_ASSET_SPECS.get(sym) if sym else None
-        if spec:
+        if prev_amt <= 0:
             cfg["asset_specs"][k] = dict(spec)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # 紅線 L2:UI 儲存=權威副本。鏡像先寫、config 後寫(P2-2)——reconciler
@@ -3493,6 +3600,12 @@ def _cmd_credentials_remove(args):
     # casefold like the write side: a MixedCase line (agent-hand-written
     # Gateio_Api_Key) must still match its unbind name
     drop = {n.casefold() for n in names if not n.upper().startswith("BLAVE_")}
+    # a venue with its own name set (venue_traits cred_env — 統一's seven) goes whole:
+    # its extra lines would otherwise outlive the unbind
+    for _t in venue_traits.TRAITS.values():
+        _own = set(_t.get("cred_env") or {})
+        if _own & drop:
+            drop |= _own
 
     path = os.path.join(WORKSPACE, ".env")
     with _env_lock():
@@ -3511,6 +3624,10 @@ def _cmd_credentials_remove(args):
         capital_connect.drop_vault(names)
     except Exception as e:
         _log(f"capital vault drop failed: {type(e).__name__}")
+    try:
+        president_connect.drop_vault(names)
+    except Exception as e:
+        _log(f"president vault drop failed: {type(e).__name__}")
     # P1-2: unbind must shrink the bind manifest too, or an agent hand-writing
     # the SAME venue's keys back into .env after the unbind would still be in
     # the allowed list and route again without any UI bind.
@@ -3524,9 +3641,8 @@ def _cmd_credentials_remove(args):
     # the same thing _venue_cred_ids judges: the env NAME of a venue called
     # "DATA" (DATA_API_KEY) starts with the prefix, its id does not.
     dropped_ids = {
-        n[: -len("_API_KEY")].lower() for n in drop
-        if n.upper().endswith("_API_KEY")
-        and not _is_data_cred_id(n[: -len("_API_KEY")])
+        m[0].lower() for n in drop
+        if (m := _cred_match(n)) and m[1] == "API_KEY" and not _is_data_cred_id(m[0])
     }
     if dropped_ids:
         apath = os.path.join(WORKSPACE, "manager", "account.json")
@@ -3584,10 +3700,12 @@ def _cmd_credentials_remove(args):
             # (_cmd_restart_reconciler), same as every resume. If the stop
             # cannot be confirmed, keep the membership — a stale-but-consistent
             # config is the safe direction — and still let the unbind succeed.
-            # What's cleared is membership only (amounts/exchanges emptied,
-            # legacy weights dropped — asset_specs and the rest survive).
-            # Partial unbind on a multi-venue machine keeps daemon and
-            # portfolio as-is.
+            # What's cleared is membership (amounts/exchanges emptied, legacy
+            # weights dropped) plus asset_specs — a rebind re-derives the TXF
+            # ones on the first allocation, and specs for members that no
+            # longer exist are only something to trip on later. The rest of
+            # the config survives. Partial unbind on a multi-venue machine
+            # keeps daemon and portfolio as-is.
             if _stop_reconciler():
                 _mark_reconciler_stopped()
                 _park_account_state(_account_identity(lines))
@@ -3602,6 +3720,7 @@ def _cmd_credentials_remove(args):
                     if isinstance(cfg, dict):
                         cfg["amounts"] = {}
                         cfg["exchanges"] = {}
+                        cfg["asset_specs"] = {}
                         cfg.pop("weights", None)
                         # atomic: the reconciler mtime-watches + json-loads this
                         with atomic_file.replacing(cpath) as f:
@@ -3977,7 +4096,8 @@ def _restart_reconciler(args):
         # (service set up for some other venue before Capital was routed
         # through this machine), which is plausibly the more common path and
         # was silently skipped by an earlier version of this function.
-        admin_pw = _capital_admin_password() if "capital" in routed else None
+        admin_pw = (_capital_admin_password()
+                    if any(venue_traits.has(v, "windows_identity") for v in routed) else None)
 
         # Self-bootstrap: a machine where the agent never set up auto-trading
         # has no service yet — install it here (references/manager.md
@@ -4239,7 +4359,7 @@ def _capital_open_book_keys():
         # no baseline = no trustworthy book (flatten.py closes nothing then) → list them all
         ready = _pf.book_ready(cfg) if hasattr(_pf, "book_ready") else bool(_pf._load_ledger_seed()["seeded_at"])
         if (own(cfg) if own else cfg.get("self_ledger")) and ready:
-            ledger = (_pf.ledger_positions("capital") if hasattr(_pf, "book_ready")
+            ledger = (_pf.ledger_positions(venue_traits.CAPITAL) if hasattr(_pf, "book_ready")
                       else _pf.ledger_positions())
     except Exception:
         ledger = None  # unreadable (or pre-ledger workspace) → list them all
@@ -4272,7 +4392,7 @@ def _record_manual_close_row(symbols):
     except (OSError, ValueError):
         rows = []
     rows.append({"kind": "manual_close_required", "symbols": symbols, "reason": "identity",
-                 "ts": datetime.utcnow().isoformat(), "symbol": "*", "exchange": "capital",
+                 "ts": datetime.utcnow().isoformat(), "symbol": "*", "exchange": venue_traits.CAPITAL,
                  "error": "close-all: 群益部位未平倉(此身分無法登入群益 API),請在群益下單軟體手動平倉"})
     with atomic_file.replacing(path) as f:  # rows came from a file the agent can write
         json.dump(rows[-5:], f, indent=2)
@@ -4389,10 +4509,18 @@ def _launch_flatten(prefix):
     child_env["BLAVE_AGENT_WORKSPACE"] = WORKSPACE
     if _local_mode():
         # own session: the flatten must outlive a daemon that is shutting down
+        line = president_connect.secret_line()  # 統一's close logs in: hand it the line
         with atomic_file.open_append(log_path) as logf:
             proc = subprocess.Popen([sys.executable, "manager/flatten.py"], cwd=WORKSPACE,
-                                    env=_local_child_env(), stdout=logf, stderr=logf,
-                                    start_new_session=True, **_child_kw())
+                                    env=_local_child_env(**president_connect.child_flags()),
+                                    stdout=logf, stderr=logf, start_new_session=True,
+                                    **_child_kw(**({"stdin": subprocess.PIPE} if line else {})))
+        if line:
+            try:
+                proc.stdin.write((line + "\n").encode("utf-8"))
+                proc.stdin.close()
+            except OSError:
+                pass
         _kick_when_flatten_exits(proc)
         return prefix + "started"
     if platform.system() == "Windows":
@@ -5368,13 +5496,10 @@ def _start_rerun(name, n, path, expect_hash=None):
     os.makedirs(_versions_path(name), exist_ok=True)
     popen_kw = {"start_new_session": True} if platform.system() != "Windows" else {
         "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    # on the desktop BLAVE_AGENT_LOCAL=1 comes from _local_child_env (every daemon child: the same key-free
+    # data path as the agent's own backtest). Not BLAVE_SCHEDULED_RUN — this is not a scheduled run
+    # (lib.data treats those differently on market holidays).
     extra = {"BLAVE_QUIET": "1", "PYTHONUNBUFFERED": "1", "PYTHONPATH": WORKSPACE}
-    if _local_mode():
-        # the same data path as the agent's own backtest on the desktop (agent_turn sets it for
-        # every turn): 台股 daily bars and the key-free market series come from TWSE / TPEx /
-        # TAIFEX, not the Blave endpoints. Not BLAVE_SCHEDULED_RUN — this is not a scheduled
-        # run (lib.data treats those differently on market holidays). Live ticks stay without it.
-        extra["BLAVE_AGENT_LOCAL"] = "1"
     env = _strategy_subprocess_env("backtest", **extra)
     if expect_hash:  # an edit landing while the child is still importing is caught too (runner._superseded)
         env["BLAVE_EXPECT_CODE_HASH"] = expect_hash
@@ -5633,6 +5758,16 @@ HANDLERS.update({
         _n, args, Deferred, lambda: _push(_ON_PROGRESS, "capital connect"), _local_mode()))
     for name in capital_connect.COMMANDS
 })
+# 統一期貨 cloud connect (runtime/president_connect.py): same shape
+HANDLERS.update({
+    name: (lambda args, _n=name: president_connect.dispatch(
+        _n, args, Deferred, lambda: _push(_ON_PROGRESS, "president connect"), _local_mode()))
+    for name in president_connect.COMMANDS
+})
+# 統一期貨 on the desktop app: one command only the app's main process sends
+# (local_daemon.LOCAL_ONLY — never in the api's list); refused off the desktop
+HANDLERS["president_local"] = lambda args: president_connect.local_dispatch(
+    args, Deferred, lambda: _push(_ON_PROGRESS, "president connect"))
 
 
 def dispatch(command):

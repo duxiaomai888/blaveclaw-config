@@ -1296,13 +1296,20 @@ msgid "cx.retesting"
 msgstr "測試中…"
 
 msgid "cx.fail"
-msgstr "{id} 串接失敗（{stage}）：{msg}"
+msgstr "{msg}（{stage}）"
+
+msgid "cx.presStopped"
+msgstr "登入已停止，按「繼續」確認登入。"
 
 msgid "cx.err.okxMode"
 msgstr "OKX 帳戶模式不支援合約。到 OKX 設定 → 帳戶模式，改成合約模式或跨幣種保證金。"
 
 msgid "cx.failShort"
 msgstr "串接失敗"
+
+# 總覽標題下:讀帳失敗而且下單程式沒在跑(登入失敗停掉那一類);出口在設定分頁,不叫人去配金額
+msgid "cx.failStopped"
+msgstr "串接失敗，下單程式沒在跑。到「設定」處理。"
 
 # Binance 重查判定 IP_CHANGED 時標題下狀態行用的那句(頂列仍是短詞 cx.failShort)(其他 reason 仍是 cx.failShort);{ip} = binance_link 驗過的 IPv4
 msgid "cx.failIp"
@@ -1325,6 +1332,9 @@ msgstr "自動下單"
 
 msgid "tr.autoOn"
 msgstr "自動下單執行中"
+
+msgid "tr.presAwake"
+msgstr "統一有 {n} 口在倉，電腦保持清醒"
 
 msgid "tr.halted"
 msgstr "已暫停"
@@ -1525,9 +1535,6 @@ msgstr "現在不下單。每條策略等下一次進場、出場或翻向才開
 msgid "tr.opt.waitDescReal"
 msgstr "現在不下單。每條策略等下一次進場、出場或翻向才送出真實委託。"
 
-msgid "tr.keep.sleep"
-msgstr "電腦睡眠、關機或結束 Blave 時不會下單，平倉與停損也不會執行。"
-
 # 「只調整 Blave 自己那一份」跟著帳本基準分三種說法(只給真錢):讀不到 / 還沒建(第一次對帳會收編同方向的部位)/ 已建。
 # 三句同一個開頭與句號(設計師定稿);意思由後端依對帳邏輯定
 msgid "tr.keep.own"
@@ -1568,6 +1575,15 @@ msgstr "結束 Blave 再打開後，自動下單是暫停的，要按「啟動�
 
 msgid "tr.means.4"
 msgstr "交易所端的停損單不受這台電腦影響；建議替部位掛上。"
+
+msgid "tr.means.twStop"
+msgstr "{venue}沒有券商端停損單；Blave 的停損是這台電腦每根 K 棒算出來才下市價單，電腦睡著或關機時部位沒有保護。"
+
+msgid "tr.keep.pres"
+msgstr "只調整 Blave 自己那一份；同一個商品別跟策略用同一個月份手動交易，Blave 會分不清。"
+
+msgid "tr.means.presNight"
+msgstr "台指期夜盤 15:00 到隔天 05:00 也會下單，電腦要一直開著。"
 
 msgid "tr.tab.over"
 msgstr "總覽"
@@ -1677,14 +1693,17 @@ msgstr "模擬交易暫不支援台幣計價的標的"
 msgid "tr.pick.twdKeep"
 msgstr "模擬交易暫不支援台幣計價的標的；取消勾選後不能再加回來"
 
-msgid "cx.cap.localWin"
-msgstr "電腦版還不能連群益。要連群益，得用 Windows 雲端主機：在網頁開雲端主機時選 Windows（開好之後不能換）。"
+msgid "tr.pick.txf"
+msgstr "統一期貨只能下台指期（TXF／MXF／TMF）"
 
-msgid "cx.cap.localMac"
-msgstr "群益的下單元件只能在 Windows 上執行，這台 Mac 連不了。要連群益，得用 Windows 雲端主機：在網頁開雲端主機時選 Windows（開好之後不能換）。"
+msgid "tr.pick.txfKeep"
+msgstr "統一期貨只能下台指期（TXF／MXF／TMF）；取消勾選後不能再加回來"
 
 msgid "tr.typeB.rejected"
 msgstr "「{name}」沒有固定的執行週期，目前只能在雲端自動執行。到「選擇策略」取消勾選後再儲存。"
+
+msgid "tr.notTxf.rejected"
+msgstr "「{name}」的標的不是台指期（TXF／MXF／TMF），統一期貨只能下台指期。到「選擇策略」取消勾選後再儲存。"
 
 msgid "tr.gateHint"
 msgstr "低於最小進場 {m} {c}，不會進場"
@@ -1761,6 +1780,14 @@ msgstr "確認下單金額"
 msgid "tr.saveZeroed"
 msgstr "改成 0：{names}——這幾支那一份的合約部位會平倉、現貨會賣出。"
 
+# 改成 0 的全是口數列(期貨帳戶沒有現貨)
+msgid "tr.saveZeroedLots"
+msgstr "改成 0：{names}——這幾支那一份的合約部位會平倉。"
+
+# 口數格留空(改成 0 的另有上一句)
+msgid "tr.saveBlankLots"
+msgstr "{names}：口數留空會存成 0，這支策略不會下單。"
+
 msgid "tr.saveWarn"
 msgstr "儲存後，下單機會照新的金額對帳，可能立即產生下單。"
 
@@ -1808,6 +1835,30 @@ msgstr "淨值"
 
 msgid "tr.acctBreakdown"
 msgstr "錢包分佈"
+
+msgid "tr.margin"
+msgstr "保證金"
+
+msgid "tr.marginAvail"
+msgstr "可動用保證金"
+
+msgid "tr.marginInitial"
+msgstr "原始保證金"
+
+msgid "tr.marginMaint"
+msgstr "維持保證金"
+
+msgid "tr.riskRatio"
+msgstr "風險指標"
+
+msgid "tr.riskRatioTip"
+msgstr "權益數 ÷ 原始保證金"
+
+msgid "tr.belowMaint"
+msgstr "低於維持保證金"
+
+msgid "tr.marginUpdated"
+msgstr "更新"
 
 msgid "tr.holdings"
 msgstr "持倉"
@@ -1878,14 +1929,11 @@ msgstr "解除綁定"
 msgid "tr.unbinding"
 msgstr "解除中…"
 
-msgid "tr.unbindDesc"
-msgstr "移除這台電腦上的交易所金鑰，下單機不再能用這個帳戶交易。"
-
 msgid "tr.unbindDescPaper"
 msgstr "解除後可以改綁真實交易所。"
 
 msgid "tr.unbindWarn"
-msgstr "會把這個交易所的金鑰從這台電腦移除，下單機將無法再用這個帳戶交易。下單設定也會一併清空，重新串接後需重新設定。"
+msgstr "會把這個帳戶的登入資料從這台電腦移除，下單機不再能用它交易。下單設定也會一併清空。"
 
 msgid "tr.unbindWarnPaper"
 msgstr "下單設定會一併清空。之後再綁模擬交易時，模擬帳戶會從 100,000 USDT 重新開始，現在的部位與紀錄不會帶過去。"
@@ -1960,7 +2008,7 @@ msgid "tr.ov.perf.annTipOk"
 msgstr "把目前報酬換算成一年的速度，是推估不是保證。"
 
 msgid "tr.ov.perf.annTipGating"
-msgstr "把目前報酬換算成一年的速度，是推估不是保證。需約 30 天才顯示，目前累積中。"
+msgstr "把目前報酬換算成一年的速度，是推估不是保證。需約 7 天才顯示，目前累積中。"
 
 msgid "tr.ov.perf.vol"
 msgstr "波動率(年化)"
@@ -1984,7 +2032,7 @@ msgid "tr.ov.perf.sharpeTipOk"
 msgstr "每承受一單位波動換到的報酬，越高越好。"
 
 msgid "tr.ov.perf.sharpeTipGating"
-msgstr "每承受一單位波動換到的報酬，越高越好。需約 30 天才顯示，目前累積中。"
+msgstr "每承受一單位波動換到的報酬，越高越好。需約 7 天才顯示，目前累積中。"
 
 msgid "tr.ov.perf.trades"
 msgstr "交易次數"
@@ -2521,8 +2569,9 @@ msgstr "會收"
 msgid "priv.collect.hOff"
 msgstr "開啟時會收"
 
+# 0.1.18 策略三步(strat_created / strat_backtested / strat_deployed)補在這一條:只記型別與市場類別
 msgid "priv.collect.1"
-msgstr "做到哪一步：首次開啟、每日開啟、app 開著的每一天（含本機自動下單有沒有在跑）、完成連結（哪一種 AI）、登入、第一次回測、啟動下單（模擬或真錢）、上雲端運行"
+msgstr "做到哪一步：首次開啟、每日開啟、app 開著的每一天（含本機自動下單有沒有在跑）、完成連結（哪一種 AI）、登入、第一次回測、啟動下單（模擬或真錢）、上雲端運行；每支策略新建、第一次回測、第一次配了金額時，記它的型別（A／B／C）與市場類別（例如加密貨幣、台指期），不記策略名稱或標的"
 
 msgid "priv.collect.5"
 msgstr "用了哪些功能：分頁與按鈕的名稱，每天每項記一次，不含裡面的內容；從策略庫用一支策略時，記它要不要 Blave 資料；送出找點子時，記是從哪個入口送出"
@@ -6396,3 +6445,411 @@ msgstr "2001 年起"
 
 msgid "wd.r.pcr.an"
 msgstr "Put/Call Ratio"
+
+msgid "pres.venue"
+msgstr "統一期貨"
+
+msgid "pres.title"
+msgstr "連接統一期貨"
+
+msgid "pres.later"
+msgstr "稍後再來"
+
+msgid "pres.retry"
+msgstr "再試一次"
+
+msgid "pres.copy"
+msgstr "複製"
+
+msgid "pres.copied"
+msgstr "已複製"
+
+msgid "pres.noMove"
+msgstr "這台電腦一直沒有回報進度。再按一次；正在跑的話不會跑兩次。"
+
+msgid "pres.mac.lead"
+msgstr "統一期貨需要 Windows。"
+
+msgid "pres.mac.hint"
+msgstr "電腦版 Mac 不支援統一。改用 Windows 雲端主機的話，可以從 Mac 用遠端桌面連進主機申請憑證。"
+
+
+
+msgid "pres.prep.looking"
+msgstr "正在找這台電腦的統一憑證…"
+
+msgid "pres.none.lead"
+msgstr "這台電腦還沒有統一憑證。照順序做，回來時進度會留著。"
+
+msgid "pres.none.s1"
+msgstr "先請營業員幫你開 API 下單權限與憑證申請權限"
+
+msgid "pres.none.s1sub"
+msgstr "客服 {tel}"
+
+msgid "pres.none.s2"
+msgstr "收到營業員的信後，按「開啟憑證e總管」"
+
+msgid "pres.none.s2sub"
+msgstr "登入密碼跟你在統一 app 下單的一樣，輸入手機簡訊碼，設一組憑證密碼。簡訊碼 5 分鐘內有效。"
+
+msgid "pres.tcem.open"
+msgstr "開啟憑證e總管"
+
+msgid "pres.tcem.hash"
+msgstr "下載到的憑證e總管跟官方版本對不上，Blave 沒有打開它。已經幫你開統一憑證中心，從那裡下載。"
+
+msgid "pres.tcem.download"
+msgstr "下載不到憑證e總管。已經幫你開統一憑證中心，從那裡下載。"
+
+msgid "pres.tcem.fail"
+msgstr "憑證e總管沒打開。再按一次。"
+
+msgid "pres.wait.lead"
+msgstr "在憑證e總管的視窗完成申請，這裡會自動接著做。"
+
+msgid "pres.wait.hint"
+msgstr "申請完成時，憑證e總管會問存檔位置，用它預設的資料夾就好。"
+
+msgid "pres.wait.again"
+msgstr "再開一次憑證e總管"
+
+msgid "pres.form.acct"
+msgstr "期貨帳號"
+
+msgid "pres.form.acctHint"
+msgstr "11 碼數字，含前面的分公司代碼。"
+
+msgid "pres.form.acctErr"
+msgstr "期貨帳號是 11 碼數字。"
+
+msgid "pres.form.pw"
+msgstr "交易密碼"
+
+msgid "pres.form.pwHint"
+msgstr "跟你登入統一 app 下單的密碼一樣。測試環境也用這組。"
+
+msgid "pres.form.found"
+msgstr "這台電腦找到統一憑證，到期 {date}。接著填帳號和交易密碼。"
+
+msgid "pres.form.foundNoDate"
+msgstr "這台電腦找到統一憑證。接著填帳號和交易密碼。"
+
+msgid "pres.form.store"
+msgstr "帳號和交易密碼加密存在這台電腦，不會上傳，agent 讀不到。"
+
+msgid "pres.form.go"
+msgstr "開始開通"
+
+msgid "pres.ph.prep"
+msgstr "準備"
+
+msgid "pres.ph.test"
+msgstr "測試環境（統一規定先下一筆測試單）"
+
+msgid "pres.ph.live"
+msgstr "正式環境"
+
+msgid "pres.s.setup"
+msgstr "安裝統一下單元件"
+
+msgid "pres.s.setupRun"
+msgstr "安裝中…"
+
+msgid "pres.s.setupFail"
+msgstr "統一的下單元件沒裝好。"
+
+msgid "pres.s.cert"
+msgstr "選憑證"
+
+msgid "pres.s.certRun"
+msgstr "檢查憑證…"
+
+msgid "pres.s.certExp"
+msgstr "到期"
+
+msgid "pres.s.tprobe"
+msgstr "確認登入（測試主機）"
+
+msgid "pres.s.tprobeDone"
+msgstr "測試主機"
+
+msgid "pres.s.skipped"
+msgstr "已略過"
+
+msgid "pres.t.skip"
+msgstr "已經開過正式權限？直接登入正式主機"
+
+msgid "pres.t.back"
+msgstr "改做測試單"
+
+msgid "pres.err.unknownSkipped"
+msgstr "如果營業員還沒開正式權限，請先做上面的測試單。"
+
+msgid "pres.s.torder"
+msgstr "下一筆測試單"
+
+msgid "pres.s.torderDone"
+msgstr "委託成功"
+
+msgid "pres.s.orderRun"
+msgstr "送出中…"
+
+msgid "pres.s.treport"
+msgstr "回報營業員"
+
+msgid "pres.s.treportDone"
+msgstr "營業員已開"
+
+msgid "pres.s.probe"
+msgstr "確認登入（正式主機）"
+
+msgid "pres.s.probeRun"
+msgstr "確認中…"
+
+msgid "pres.s.probeDone"
+msgstr "期貨帳戶"
+
+msgid "pres.s.worker"
+msgstr "啟動下單程式"
+
+msgid "pres.s.workerRun"
+msgstr "啟動中…"
+
+msgid "pres.s.workerFail"
+msgstr "下單程式沒有讀到帳戶。再試一次；還是不行，看設定 › 帳戶的狀態。"
+
+msgid "pres.cert.name"
+msgstr "統一憑證"
+
+msgid "pres.cert.exp"
+msgstr "到期 {date} · 在這台電腦"
+
+msgid "pres.cert.here"
+msgstr "在這台電腦"
+
+msgid "pres.cert.picked"
+msgstr "你選的憑證檔"
+
+msgid "pres.cert.pickedD"
+msgstr "在這台電腦"
+
+msgid "pres.cert.pw"
+msgstr "憑證密碼"
+
+msgid "pres.cert.pwHint"
+msgstr "申請憑證時自己設的那組，不是交易密碼。沒設過就留空。"
+
+msgid "pres.cert.use"
+msgstr "用這張憑證"
+
+msgid "pres.cert.other"
+msgstr "選別的檔案"
+
+msgid "pres.cert.local"
+msgstr "在這台電腦上檢查，不上傳。"
+
+msgid "pres.pfx.errPw"
+msgstr "憑證密碼不對。"
+
+msgid "pres.pfx.errExpired"
+msgstr "這張憑證已在 {date} 到期。用憑證e總管展延後再選一次。"
+
+msgid "pres.pfx.errIssuer"
+msgstr "這不是統一期貨的憑證。按「選別的檔案」，選 PSCCA 資料夾裡的那張。"
+
+msgid "pres.pfx.errFile"
+msgstr "這個檔案不是憑證檔。按「選別的檔案」，選 .pfx 結尾的那個。"
+
+msgid "pres.pfx.errRead"
+msgstr "這台電腦讀不到那個憑證檔。按「選別的檔案」再選一次。"
+
+msgid "pres.pfx.errNone"
+msgstr "找不到憑證檔了。按「選別的檔案」，選 PSCCA 資料夾裡的那張。"
+
+msgid "pres.pfx.errImport"
+msgstr "憑證沒有存好。再按一次「用這張憑證」。"
+
+msgid "pres.t.hostDo"
+msgstr "統一規定：先在測試環境登入、下一筆測試單，回報營業員後才開正式權限。照測試帳號信上的主機網址填。"
+
+msgid "pres.t.url"
+msgstr "測試主機網址（信上寫的）"
+
+msgid "pres.t.urlHint"
+msgstr "照信上抄就好，網址格式 Blave 會自己處理。帳號、密碼、憑證都沿用剛剛那套。"
+
+msgid "pres.err.hostNotAllowed"
+msgstr "這個網址不是統一的測試或正式主機。照測試帳號信上寫的填。"
+
+msgid "pres.t.probe"
+msgstr "確認登入"
+
+
+
+msgid "pres.t.orderDo"
+msgstr "Blave 會在測試環境下一筆微台 1 口買進。測試環境不會成交，也不動你的錢。"
+
+msgid "pres.t.order"
+msgstr "下測試單"
+
+msgid "pres.t.orderAgain"
+msgstr "再下一次"
+
+msgid "pres.t.orderFail"
+msgstr "統一的測試環境沒有接受這筆單。"
+
+msgid "pres.t.reportDo"
+msgstr "把這筆測試單的時間與委託書號告訴營業員，請他開正式權限。"
+
+msgid "pres.t.reportWhen"
+msgstr "測試單時間"
+
+msgid "pres.t.reportNo"
+msgstr "委託書號"
+
+msgid "pres.t.reportHint"
+msgstr "營業員開好就能用。按下面的鈕，Blave 會切到正式主機再確認一次，不用重選憑證。"
+
+msgid "pres.t.opened"
+msgstr "營業員說開好了"
+
+msgid "pres.t.later"
+msgstr "稍後再回來"
+
+msgid "pres.pw.lead"
+msgstr "輸入新的交易密碼，Blave 會用同一張憑證再確認一次。"
+
+msgid "pres.pw.hint"
+msgstr "輸入不同的密碼才會再試。"
+
+msgid "pres.pw.go"
+msgstr "用新密碼確認"
+
+msgid "pres.err.password"
+msgstr "統一說交易密碼不對。"
+
+msgid "pres.err.unknown"
+msgstr "統一拒絕了登入，沒有說原因。最常見是交易密碼不對，或營業員還沒開 API 權限。"
+
+
+
+msgid "pres.err.cert"
+msgstr "這台電腦打不開這張憑證，或憑證密碼不對。"
+
+msgid "pres.err.certMismatch"
+msgstr "這張憑證不是帳號 {acct} 的，可能是家人或另一個帳號的。"
+
+msgid "pres.err.certSwap"
+msgstr "換一張憑證"
+
+msgid "pres.err.acctSwap"
+msgstr "改帳號"
+
+
+
+
+msgid "pres.err.maint"
+msgstr "統一每天 05:30 到 05:50 維護，這段時間不登入。"
+
+
+
+msgid "pres.err.timeout"
+msgstr "連不到統一，或統一沒有及時回應。"
+
+msgid "pres.err.nocreds"
+msgstr "這台電腦的下單程式沒拿到帳密。關掉這個框再打開一次；還是一樣就重新開通。"
+
+msgid "pres.err.noSeal"
+msgstr "這台電腦的加密儲存現在不能用，帳密沒有存。登入 Windows 帳戶後再試一次。"
+
+msgid "pres.err.rebound"
+msgstr "這台電腦綁的統一帳密跟存著的不一樣。重新開通一次。"
+
+msgid "pres.err.libOutdated"
+msgstr "這台電腦的策略工作區太舊，還不支援統一期貨。更新 Blave 後再試一次。"
+
+msgid "pres.err.generic"
+msgstr "這一步沒有開始。再試一次。"
+
+msgid "pres.done.lead"
+msgstr "已連接統一期貨"
+
+msgid "pres.done.equity"
+msgstr "權益數"
+
+msgid "pres.done.acct"
+msgstr "帳戶"
+
+msgid "pres.done.acctV"
+msgstr "期貨 {acct}"
+
+msgid "pres.done.can"
+msgstr "可下"
+
+msgid "pres.done.canV"
+msgstr "台指期大台、小台、微台"
+
+msgid "pres.done.exp"
+msgstr "憑證到期"
+
+msgid "pres.done.expV"
+msgstr "{date}（還有 {n} 天）"
+
+msgid "pres.done.n1"
+msgstr "結束 Blave 或關機就不再下單；部位留在統一，不會自動平倉。"
+
+msgid "pres.done.n2"
+msgstr "Blave 只管自己下的單，不碰你手動下的。"
+
+msgid "pres.done.go"
+msgstr "設定策略下單"
+
+
+
+
+
+
+msgid "pres.first.title"
+msgstr "第一次用真錢下單"
+
+msgid "pres.first.row"
+msgstr "{name}：{n} {unit}"
+
+msgid "pres.first.equity"
+msgstr "統一帳戶權益數 {v}。"
+
+msgid "pres.first.equityNone"
+msgstr "還沒讀到統一帳戶的權益數。"
+
+msgid "pres.first.margin"
+msgstr "每口保證金以統一公告為準；保證金不足時統一會拒單。這幾口是真錢。"
+
+msgid "pres.first.ok"
+msgstr "繼續"
+
+msgid "pres.quit.title"
+msgstr "結束 Blave？"
+
+msgid "pres.quit.body"
+msgstr "統一還有 {lots} 口在倉。結束後策略不會再下單，這些部位也不會自動平倉，要自己在統一 app 處理。"
+
+
+
+
+
+
+
+
+msgid "pres.err.stopNote"
+msgstr "如果被統一鎖住，請聯絡營業員解鎖。"
+
+# 逾時那一類的輔助句:不提鎖帳號(那是密碼錯才有的結果)
+msgid "pres.err.retryNote"
+msgstr "網路或統一恢復後再試一次。"
+
+msgid "pres.err.confirm"
+msgstr "確認登入"
+
+msgid "pres.err.changePw"
+msgstr "改交易密碼"
